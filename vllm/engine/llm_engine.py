@@ -218,6 +218,14 @@ class LLMEngine:
         )
         # TODO(woosuk): Print more configs in debug mode.
 
+        try:
+            import better_exceptions
+        except ImportError:
+            better_exceptions = None
+
+        if better_exceptions is not None:
+            better_exceptions.hook()
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config

@@ -144,12 +144,12 @@ class VineyardLLMCache:
                 query_prefix,
                 query_tokens,
             ]
-            torch.distributed.broadcast_object_list(query_args, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(query_args, src=0,
+            #                                         group=get_tensor_model_parallel_group())
         else:
             query_args = [None, None, None, None, None, None, None]
-            torch.distributed.broadcast_object_list(query_args, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(query_args, src=0,
+            #                                         group=get_tensor_model_parallel_group())
             (seq_id,
              context_len,
              token_chunk_size,
@@ -168,8 +168,8 @@ class VineyardLLMCache:
 
         # synchronized across tensor parallel ranks
         matched_tensor = torch.tensor([matched], dtype=torch.long, device='cuda')
-        torch.distributed.all_reduce(matched_tensor, op=torch.distributed.ReduceOp.MIN,
-                                     group=get_tensor_model_parallel_group())
+        # torch.distributed.all_reduce(matched_tensor, op=torch.distributed.ReduceOp.MIN,
+        #                              group=get_tensor_model_parallel_group())
         matched = matched_tensor[0].item()
 
         # shift
@@ -189,12 +189,12 @@ class VineyardLLMCache:
                 slot = block_number * block_size + block_offset
                 slot_mapping.append(slot)
             slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
-            torch.distributed.broadcast(slot_mapping, src=0,
-                                        group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast(slot_mapping, src=0,
+            #                             group=get_tensor_model_parallel_group())
         else:
             slot_mapping = torch.zeros((matched,), dtype=torch.long, device='cuda')
-            torch.distributed.broadcast(slot_mapping, src=0,
-                                        group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast(slot_mapping, src=0,
+            #                             group=get_tensor_model_parallel_group())
 
         # save to GPU kv cache
         buffer = self.buffer[:, :, offset:offset+matched].cuda()
@@ -235,12 +235,12 @@ class VineyardLLMCache:
                 if seq_group_meta.is_prompt:
                     prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
+            #                                         group=get_tensor_model_parallel_group())
         else:
             num_prefill_requests = [None]
-            torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
+            #                                         group=get_tensor_model_parallel_group())
             prefill_requests = [None] * num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
 
@@ -285,12 +285,12 @@ class VineyardLLMCache:
                 update_prefix,
                 update_tokens,
             ]
-            torch.distributed.broadcast_object_list(update_args, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(update_args, src=0,
+            #                                         group=get_tensor_model_parallel_group())
         else:
             update_args = [None, None, None, None, None]
-            torch.distributed.broadcast_object_list(update_args, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(update_args, src=0,
+            #                                         group=get_tensor_model_parallel_group())
             (seq_id,
              update_context_len,
              update_token_size,
@@ -314,12 +314,12 @@ class VineyardLLMCache:
                 slot = block_number * block_size + block_offset
                 slot_mapping.append(slot)
             slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
-            torch.distributed.broadcast(slot_mapping, src=0,
-                                        group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast(slot_mapping, src=0,
+            #                             group=get_tensor_model_parallel_group())
         else:
             slot_mapping = torch.zeros((update_token_size,), dtype=torch.long, device='cuda')
-            torch.distributed.broadcast(slot_mapping, src=0,
-                                        group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast(slot_mapping, src=0,
+            #                             group=get_tensor_model_parallel_group())
 
         # fetch from GPU kv cache
         for j in range(self.layer):
@@ -356,12 +356,12 @@ class VineyardLLMCache:
                 if seq_group_meta.is_prompt:
                     prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
+            #                                         group=get_tensor_model_parallel_group())
         else:
             num_prefill_requests = [None]
-            torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
-                                                    group=get_tensor_model_parallel_group())
+            # torch.distributed.broadcast_object_list(num_prefill_requests, src=0,
+            #                                         group=get_tensor_model_parallel_group())
             prefill_requests = [None] * num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
 

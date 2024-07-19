@@ -99,6 +99,12 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
+    
+    slot_mapping: Optional[torch.Tensor] = None
+    num_prefill_tokens: Optional[int] = 0
+    num_decode_tokens: Optional[int] = 0
+    num_prefills: Optional[int] = 0
+    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -1320,7 +1326,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if self.vineyard_llm_cache and kv_caches[0] is not None:
             cache_hints = self.vineyard_llm_cache.prefetch_kv_caches(
-                seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
+                model_input.seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
 
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1408,7 +1414,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         
         if self.vineyard_llm_cache and kv_caches[0] is not None:
             self.vineyard_llm_cache.update_kv_caches(
-                cache_hints, seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
+                cache_hints, model_input.seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
 
         if not self.is_driver_worker:
             return []

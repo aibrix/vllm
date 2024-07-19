@@ -15,6 +15,7 @@ from vllm.utils import init_logger
 try:
     from vineyard.llm import KVCache as VineyardKVCache
     from vineyard.llm import KVTensor as VineyardKVTensor
+    from vineyard.llm import FileCacheConfig
 except ImportError:
     raise
     VineyardKVCache = None
@@ -42,7 +43,11 @@ class VineyardLLMCache:
         self.kv_cache_dtype = kv_cache_dtype
         self.torch_dtype = torch_dtype
         self.tensor_nbytes = head_size * num_kv_heads * 2  # float16/bfloat16
+        vineyard_cache_config = FileCacheConfig(
+            root="/tmp/vineyard/llm_cache",
+        )
         self.cache = VineyardKVCache(
+            cache_config=vineyard_cache_config,
             tensor_nbytes=self.tensor_nbytes,
             cache_capacity=self.cache_capacity,
             layer=self.layer,
@@ -109,7 +114,7 @@ class VineyardLLMCache:
         kv_caches: List[torch.Tensor],
         block_size: int,
     ) -> Tuple[str, int]:
-        from vllm._C import cache_ops
+        from vllm._custom_ops import reshape_and_cache_flash
 
         if seq_group_metadata is not None:
             seq_ids = list(seq_group_metadata.seq_data.keys())

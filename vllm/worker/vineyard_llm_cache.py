@@ -43,19 +43,7 @@ class VineyardLLMCache:
         self.kv_cache_dtype = kv_cache_dtype
         self.torch_dtype = torch_dtype
         self.tensor_nbytes = head_size * num_kv_heads * 2  # float16/bfloat16
-        # vineyard_cache_config = FileCacheConfig(
-        #     root="/tmp/vineyard/llm_cache",
-        # )
-        vineyard_cache_config = VineyardCacheConfig(
-            socket="/tmp/vineyard_test.sock",
-            block_size=5,
-            sync_interval=3,
-            llm_cache_sync_lock="llmCacheSyncLock",
-            llm_cache_object_name="llm_cache_object",
-            llm_ref_cnt_object_name="llm_refcnt_object",
-        )
         self.cache = VineyardKVCache(
-            cache_config=vineyard_cache_config,
             tensor_nbytes=self.tensor_nbytes,
             cache_capacity=self.cache_capacity,
             layer=self.layer,

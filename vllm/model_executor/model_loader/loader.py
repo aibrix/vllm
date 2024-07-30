@@ -817,6 +817,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return model.eval()
 
 
+class VeturboIOLoader(BaseModelLoader):
+    """Model loader using veturboIO library."""
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   multimodal_config: Optional[MultiModalConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+        pass
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -834,5 +847,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
+    
+    if load_config.load_format == LoadConfig.VETURBOIO:
+        return VeturboIOLoader(load_config)
 
     return DefaultModelLoader(load_config)

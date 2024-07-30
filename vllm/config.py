@@ -566,6 +566,7 @@ class LoadFormat(str, enum.Enum):
     TENSORIZER = "tensorizer"
     SHARDED_STATE = "sharded_state"
     BITSANDBYTES = "bitsandbytes"
+    VETURBOIO = "veturboio"
 
 
 @dataclass

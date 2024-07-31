@@ -1,7 +1,7 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, ClassVar, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 from transformers import PretrainedConfig
@@ -724,7 +724,7 @@ class ParallelConfig:
                         backend)
 
         self._verify_args()
-        self.rank: int = 0
+        self.rank = 0
 
     @property
     def use_ray(self) -> bool:
@@ -793,8 +793,12 @@ class SchedulerConfig:
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
+                 enable_cgroups: bool = False,
                  embedding_mode: Optional[bool] = False,
-                 preemption_mode: Optional[str] = None) -> None:
+                 preemption_mode: Optional[str] = None,
+                 lora_shares: Optional[dict[int, int]] = None  # New field for LoRA shares
+                ) -> None:
+                 
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -810,6 +814,12 @@ class SchedulerConfig:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
                 self.max_num_batched_tokens = max(max_model_len, 2048)
+
+        if enable_cgroups:
+            logger.info(
+                "Start cgroup to monitor the GPU Usage for different LoRAs."
+            )
+
         if enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
@@ -823,6 +833,7 @@ class SchedulerConfig:
         self.chunked_prefill_enabled = enable_chunked_prefill
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
+        self.lora_shares = lora_shares
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -847,10 +858,23 @@ class SchedulerConfig:
                 "num_lookahead_slots "
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
+        
+        if self.lora_shares is not None:
+            if not all(isinstance(k, int) and isinstance(v, int) for k, v in self.lora_shares.items()):
+                raise ValueError("lora_shares must be a dictionary with integer keys and values.")
+            if any(share <= 0 for share in self.lora_shares.values()):
+                raise ValueError("All LoRA shares must be positive integers.")
+            #create a fraction version of the shares
+            self.convert_shares_to_float()
+    
+    def convert_shares_to_float(self)-> None:
+        sum_shares = sum(self.lora_shares.values())
+        for lora_id, share in self.lora_shares.items():
+            self.lora_shares_fractions = {lora_id: share / sum_shares}
+
 
 
 class DeviceConfig:
-    device: Optional[torch.device]
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
@@ -1328,8 +1352,8 @@ class LoRAConfig:
                 "Due to limitations of the custom LoRA CUDA kernel, "
                 "max_num_batched_tokens must be <= 65528 when "
                 "LoRA is enabled.")
-        if scheduler_config.chunked_prefill_enabled:
-            raise ValueError("LoRA is not supported with chunked prefill yet.")
+        # if scheduler_config.chunked_prefill_enabled:
+        #     raise ValueError("LoRA is not supported with chunked prefill yet.")
 
 
 @dataclass

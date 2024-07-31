@@ -82,6 +82,11 @@ class EngineArgs:
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+
+    #shuowei add LoRA shares here
+    enable_cgroup: bool = False
+    lora_shares: Optional[dict[int, int]] = None
+
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
     max_prompt_adapter_token: int = 0
@@ -813,8 +818,10 @@ class EngineArgs:
                                  speculative_config.num_lookahead_slots),
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            enable_cgroups=self.enable_cgroup,
             embedding_mode=model_config.embedding_mode,
             preemption_mode=self.preemption_mode,
+            lora_shares=self.lora_shares,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

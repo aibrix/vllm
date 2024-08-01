@@ -27,6 +27,8 @@ from vllm.model_executor.model_loader.tensorizer import (
     serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
+from vllm.model_executor.model_loader.veturboio import (
+    VeturboIOConfig, load_with_veturboio)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
@@ -819,6 +821,36 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
 class VeturboIOLoader(BaseModelLoader):
     """Model loader using veturboIO library."""
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if isinstance(load_config.model_loader_extra_config, VeturboIOConfig):
+            self.veturboio_config = load_config.model_loader_extra_config
+        else:
+            self.veturboio_config = VeturboIOConfig(
+                **load_config.model_loader_extra_config)
+
+    def _verify_config(self, model_config: ModelConfig,
+                       parallel_config: ParallelConfig):
+        self.veturboio_config.verify_with_model_config(model_config)
+        self.veturboio_config.verify_with_parallel_config(parallel_config)
+
+    def _prepare_weights(self, model_name_or_path: str,
+                         revision: Optional[str]):
+        is_local = os.path.isdir(model_name_or_path)
+        allow_patterns = ["*.safetensors"]
+        if not is_local:
+            hf_folder = download_weights_from_hf(model_name_or_path,
+                                            self.load_config.download_dir,
+                                            allow_patterns, revision)
+        else:
+            hf_folder = model_name_or_path
+            
+        for pattern in allow_patterns:
+                weight_files = glob.glob(
+                    os.path.join(hf_folder, pattern))
+                if weight_files:
+                    return weight_files, pattern
+        raise ValueError("No weight files matched")
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -827,7 +859,29 @@ class VeturboIOLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
-        pass
+        self._verify_config(model_config, parallel_config)
+
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model_class = get_model_architecture(model_config)[0]
+                quant_config = _get_quantization_config(
+                    model_config, self.load_config)
+                extra_kwargs = _get_model_initialization_kwargs(
+                    model_class, lora_config, multimodal_config)
+                extra_kwargs["quant_config"] = quant_config
+                extra_kwargs["cache_config"] = cache_config
+                _, hf_weights_files, _ = self._prepare_weights(
+                    model_config.model, model_config.revision)
+                
+                veturboio_config = copy.copy(self.veturboio_config)
+                veturboio_config.model_class = model_class
+                veturboio_config.hf_config = model_config.hf_config
+                veturboio_config.dtype = model_config.dtype
+                veturboio_config.model_files = hf_weights_files
+
+                model = load_with_veturboio(veturboio_config, **extra_kwargs)
+        return model.eval()
+
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
@@ -848,7 +902,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
     
-    if load_config.load_format == LoadConfig.VETURBOIO:
+    if load_config.load_format == LoadFormat.VETURBOIO:
         return VeturboIOLoader(load_config)
 
     return DefaultModelLoader(load_config)

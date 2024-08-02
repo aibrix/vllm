@@ -14,6 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+import ipdb
 
 logger = init_logger(__name__)
 
@@ -23,6 +24,7 @@ ENABLE_ARTIFICIAL_PREEMPT = bool(
     os.getenv("VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT", False))  # noqa
 ARTIFICIAL_PREEMPTION_PROB = 0.5
 ARTIFICIAL_PREEMPTION_MAX_CNT = 500
+
 
 
 class PreemptionMode(enum.Enum):
@@ -89,6 +91,13 @@ class SchedulingBudget:
         if req_id in self._request_ids_num_curr_seqs:
             self._request_ids_num_curr_seqs.remove(req_id)
             self._num_curr_seqs -= num_curr_seqs
+    
+    def add_tokens_num(self, to_add_token_num: int):
+        self._num_batched_tokens += to_add_token_num
+    
+    def add_reqs_num(self, to_add_request_num: int):
+        self._num_curr_seqs += to_add_request_num
+
 
     @property
     def num_batched_tokens(self):
@@ -332,6 +341,15 @@ class Scheduler:
                                        else 0)
         self.num_cumulative_preemption: int = 0
 
+
+        #add cgroup control mode here
+        if self.scheduler_config.cgroup_enabled:
+            self.lora_shares_fraction = scheduler_config.lora_shares_fractions
+            self.lora_budgets = {}
+            self._intialize_lora_budgets()
+
+
+
     @property
     def lora_enabled(self) -> bool:
         return bool(self.lora_config)
@@ -340,7 +358,21 @@ class Scheduler:
     def num_decoding_tokens_per_seq(self) -> int:
         """The number of new tokens."""
         return 1
+    
+    def _intialize_lora_budgets(self):
+        #only enters this function if cgroup is enabled.
+        if self.lora_shares_fraction is None:
+            raise ValueError("Lora shares are not set.")
+        for lora_id, fraction in self.lora_shares_fraction.items():
+            temp_budget = SchedulingBudget(
+                token_budget = int(fraction * self.scheduler_config.max_num_batched_tokens),
+                max_num_seqs = int(fraction * self.scheduler_config.max_num_seqs)
+            )
+            self.lora_budgets[lora_id] = temp_budget
 
+    def _reset_lora_budgets(self):
+        self._intialize_lora_budgets()
+        
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
@@ -396,6 +428,16 @@ class Scheduler:
         self._finished_requests_ids = list()
         return finished_requests_ids
 
+
+    def _update_budget(self, lora_id: int = None):
+        # cgroup is enabled get the budget directly from the budget list
+        try: 
+            return(self.lora_budgets[lora_id])
+        except KeyError:
+            raise ValueError(f"lora_int_id {lora_id} is not in the budget list.")
+        return None
+
+
     def _schedule_running(
         self,
         running_queue: deque,
@@ -442,6 +484,11 @@ class Scheduler:
         running_queue = policy.sort_by_priority(now, running_queue)
         while running_queue:
             seq_group = running_queue[0]
+
+            #check cgroup setting to decide the budget
+            if self.scheduler_config.cgroup_enabled and self.lora_enabled:
+                budget = self._update_budget(seq_group.lora_int_id)
+            
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
@@ -556,6 +603,10 @@ class Scheduler:
         leftover_swapped: Deque[SequenceGroup] = deque()
         while swapped_queue:
             seq_group = swapped_queue[0]
+
+             #check cgroup setting to decide the budget
+            if self.scheduler_config.cgroup_enabled and self.lora_enabled:
+                budget = self._update_budget(seq_group.lora_int_id)
 
             # If the sequence group cannot be swapped in, stop.
             is_prefill = seq_group.is_prefill()
@@ -684,6 +735,10 @@ class Scheduler:
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
+
+            #check cgroup setting to decide the budget
+            if self.scheduler_config.cgroup_enabled and self.lora_enabled:
+                budget = self._update_budget(seq_group.lora_int_id)
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
             assert len(waiting_seqs) == 1, (
@@ -871,6 +926,9 @@ class Scheduler:
         inter token latency because decodes requests don't need to blocked
         by prefill requests.
         """
+        if self.scheduler_config.cgroup_enabled:
+            self._reset_lora_budgets()
+           
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
@@ -903,6 +961,14 @@ class Scheduler:
         # Schedule new prefills.
         remaining_waiting, prefills = self._schedule_prefills(
             self.waiting, budget, curr_loras, enable_chunking=True)
+
+        # if enable cgroup, we need to gather the lora_budget dict to the budget variable.
+        if self.scheduler_config.cgroup_enabled:
+            for (lora_id, lora_budget) in self.lora_budgets.items():
+                
+                budget.add_tokens_num(lora_budget.num_batched_tokens)
+                budget.add_reqs_num(lora_budget.num_curr_seqs)
+         
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -946,11 +1012,12 @@ class Scheduler:
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
         )
+    
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
         if self.scheduler_config.chunked_prefill_enabled:
-            return self._schedule_chunked_prefill()
+                return self._schedule_chunked_prefill()
         else:
             return self._schedule_default()
 

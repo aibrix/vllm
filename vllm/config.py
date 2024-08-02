@@ -831,9 +831,11 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.cgroup_enabled = enable_cgroups #add cgroup control here.
         self.embedding_mode = embedding_mode
         self.preemption_mode = preemption_mode
         self.lora_shares = lora_shares
+        self.lora_shares_fractions = {}
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -870,7 +872,7 @@ class SchedulerConfig:
     def convert_shares_to_float(self)-> None:
         sum_shares = sum(self.lora_shares.values())
         for lora_id, share in self.lora_shares.items():
-            self.lora_shares_fractions = {lora_id: share / sum_shares}
+            self.lora_shares_fractions[lora_id] = share / sum_shares
 
 
 

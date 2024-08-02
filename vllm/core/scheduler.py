@@ -64,6 +64,10 @@ class SchedulingBudget:
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
                 and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
 
+    def have_budget(self):
+        #check if the budget has remaining slots
+        return self.num_batched_tokens < self.token_budget and self.num_curr_seqs < self.max_num_seqs
+
     def remaining_token_budget(self):
         return self.token_budget - self.num_batched_tokens
 
@@ -436,6 +440,20 @@ class Scheduler:
         except KeyError:
             raise ValueError(f"lora_int_id {lora_id} is not in the budget list.")
         return None
+    
+    def _check_remaining_budget(self, budget: SchedulingBudget, num_new_tokens: int, num_new_seqs: int):
+        if self.scheduler_config.cgroup_enabled:
+            flag = True
+            for lora_budget in self.lora_budgets.values():
+                if budget == lora_budget:
+                    #because this is the current lora, so the num_new_tokens should be set as the current one
+                    flag = flag or lora_budget.can_schedule(num_new_tokens=num_new_tokens, num_new_seqs=num_new_seqs)
+                else: 
+                    flag = flag or lora_budget.have_budget()
+            return flag
+        else:
+            return budget.can_schedule(num_new_tokens=num_new_tokens, 
+                                       num_new_seqs=num_new_seqs)
 
 
     def _schedule_running(
@@ -733,8 +751,17 @@ class Scheduler:
         waiting_queue = deque([s for s in waiting_queue])
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
-        while self._passed_delay(time.time()) and waiting_queue:
-            seq_group = waiting_queue[0]
+        exist_remaining_budget = True
+        
+        seq_pointer = 0
+        while self._passed_delay(time.time()) and waiting_queue and exist_remaining_budget:
+            # seq_group = waiting_queue[0]
+            if seq_pointer >= len(waiting_queue):
+                break
+                # raise ValueError("seq_pointer is out of range.")
+            seq_group = waiting_queue[seq_pointer]
+            # print(seq_group.request_id, seq_group.lora_int_id)
+            # ipdb.set_trace()
 
             #check cgroup setting to decide the budget
             if self.scheduler_config.cgroup_enabled and self.lora_enabled:
@@ -792,15 +819,20 @@ class Scheduler:
                     continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
+            exist_remaining_budget = self._check_remaining_budget(budget, num_new_tokens, num_new_seqs)
             if (num_new_tokens == 0
                     or not budget.can_schedule(num_new_tokens=num_new_tokens,
                                                num_new_seqs=num_new_seqs)):
-                break
+                seq_pointer += 1
+                continue
+                # break
 
             # Can schedule this request.
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
-            waiting_queue.popleft()
+            # waiting_queue.popleft()
+            waiting_queue.remove(seq_group)
+
             self._allocate_and_set_running(seq_group)
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,

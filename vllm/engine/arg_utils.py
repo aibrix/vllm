@@ -165,7 +165,7 @@ class EngineArgs:
             default=EngineArgs.load_format,
             choices=[
                 'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer',
-                'bitsandbytes'
+                'bitsandbytes', 'veturboio'
             ],
             help='The format of the model weights to load.\n\n'
             '* "auto" will try to load the weights in the safetensors format '
@@ -181,7 +181,8 @@ class EngineArgs:
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n')
+            'quantization.\n'
+            '* "veturboio" will load the weights using veturboio library.\n')
         parser.add_argument(
             '--dtype',
             type=str,

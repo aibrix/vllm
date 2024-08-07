@@ -825,9 +825,11 @@ class VeturboIOLoader(BaseModelLoader):
         super().__init__(load_config)
         if isinstance(load_config.model_loader_extra_config, VeturboIOConfig):
             self.veturboio_config = load_config.model_loader_extra_config
-        else:
+        elif isinstance(load_config.model_loader_extra_config, dict):
             self.veturboio_config = VeturboIOConfig(
                 **load_config.model_loader_extra_config)
+        else:
+            self.veturboio_config = VeturboIOConfig()
 
     def _verify_config(self, model_config: ModelConfig,
                        parallel_config: ParallelConfig):
@@ -870,7 +872,7 @@ class VeturboIOLoader(BaseModelLoader):
                     model_class, lora_config, multimodal_config)
                 extra_kwargs["quant_config"] = quant_config
                 extra_kwargs["cache_config"] = cache_config
-                _, hf_weights_files, _ = self._prepare_weights(
+                hf_weights_files, _ = self._prepare_weights(
                     model_config.model, model_config.revision)
                 
                 veturboio_config = copy.copy(self.veturboio_config)
@@ -878,6 +880,7 @@ class VeturboIOLoader(BaseModelLoader):
                 veturboio_config.hf_config = model_config.hf_config
                 veturboio_config.dtype = model_config.dtype
                 veturboio_config.model_files = hf_weights_files
+                veturboio_config.map_location = device_config.device_type
 
                 model = load_with_veturboio(veturboio_config, **extra_kwargs)
         return model.eval()

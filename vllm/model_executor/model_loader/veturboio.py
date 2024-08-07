@@ -16,7 +16,11 @@ veturboio_error_msg = None
 
 try:
     import veturboio
-    helper = veturboio.init_io_helper()
+    from veturboio.ops.load_utils import IOHelper
+    if IOHelper is None:
+        helper = None
+    else:
+        helper = veturboio.init_io_helper()
 except ImportError as e:
     veturboio_error_msg = str(e)
 
@@ -26,7 +30,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class VeturboIOConfig:
-    model_files: Tuple[str, os.PathLike]
+    model_files: Optional[Tuple[str, os.PathLike]] = None
     map_location: Optional[str] = "cpu"
     enable_fast_mode: Optional[bool] = True
     num_thread: Optional[int] = 32
@@ -39,7 +43,7 @@ class VeturboIOConfig:
 
     def _construct_veturboio_args(self) -> "VeturboIOArgs":
         veturboio_args = {
-            "map_location": self.enable_fast_mode,
+            "map_location": self.map_location,
             "enable_fast_mode": self.enable_fast_mode,
             "num_thread": self.num_thread,
             "use_pinmem": self.use_pinmem,
@@ -97,9 +101,12 @@ class VeturboIOAgent:
         start = time.perf_counter()
         for model_file in self.veturboio_config.model_files:
             tensors_dict = veturboio.load(model_file, 
-                                          helper=helper,
-                                          **self.veturboio_args.deserializer_params)
-            self.model.load_state_dict(tensors_dict, assign=True)    
+                                        helper=helper,
+                                        **self.veturboio_args.deserializer_params)
+            self.model.load_state_dict(tensors_dict, strict=False, assign=True)
+            del tensors_dict
+            torch.cuda.empty_cache()
+
         end = time.perf_counter()
         duration = end - start
         logger.info("Deserialized model in %0.2fs by VeturboIO", duration)
@@ -108,6 +115,8 @@ class VeturboIOAgent:
 
 def load_with_veturboio(veturboio_config: VeturboIOConfig,
                         **extra_kwargs) -> nn.Module:
+    assert veturboio_config.model_files is not None, ("model files can not be None, "
+                                                      "when load with veturboIO")
     veturboio = VeturboIOAgent(veturboio_config, **extra_kwargs)
     return veturboio.deserialize()
 

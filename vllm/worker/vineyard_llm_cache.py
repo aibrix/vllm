@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import torch
@@ -91,6 +92,9 @@ class VineyardLLMCache:
             logger.warn("VineyardLLMCache requires flash attention decoding")
             return None
 
+        if envs.VINEYARD_LLM_CACHE_SHARED_MEMORY:
+            logger.debug("VineyardLLMCache is in shared memory mode")
+
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
@@ -156,10 +160,22 @@ class VineyardLLMCache:
             ) = query_args
 
         # query from vineyard
+        if envs.VINEYARD_LLM_CACHE_SHARED_MEMORY:
+            query_tensors = []
+            for i in range(query_token_size):
+                query_tensors.append([])
+                for j in range(self.layer):
+                    query_tensors[-1].append((
+                        VineyardKVTensor(0, 0),
+                        VineyardKVTensor(0, 0),
+                    ))
+        else:
+            query_tensors = self.tensors[:query_token_size]
+
         matched = self.cache.query(
             prefix=query_prefix,
             tokens=query_tokens,
-            kv_cache_list=self.tensors[:query_token_size],
+            kv_cache_list=query_tensors,
         )
 
         # synchronized across tensor parallel ranks
@@ -191,6 +207,27 @@ class VineyardLLMCache:
             slot_mapping = torch.zeros((matched,), dtype=torch.long, device='cuda')
             # torch.distributed.broadcast(slot_mapping, src=0,
             #                             group=get_tensor_model_parallel_group())
+
+        logger.debug(f"#matched tokens: {matched}")
+        if envs.VINEYARD_LLM_CACHE_SHARED_MEMORY:
+            if envs.VLLM_LOGGING_LEVEL == "DEBUG":
+                debug_start = time.perf_counter()
+            # copy to pinned buffer
+            for i in range(matched):
+                for j in range(self.layer):
+                    self.buffer[0][j][i].copy_(
+                        torch.frombuffer(
+                            query_tensors[i][j][0], dtype=self.torch_dtype
+                        ).reshape(self.buffer[0][j][i].shape)
+                    )
+                    self.buffer[1][j][i].copy_(
+                        torch.frombuffer(
+                            query_tensors[i][j][1], dtype=self.torch_dtype
+                        ).reshape(self.buffer[1][j][i].shape)
+                    )
+            if envs.VLLM_LOGGING_LEVEL == "DEBUG":
+                debug_end = time.perf_counter()
+                logger.debug(f"spent {(debug_end - debug_start) * 1000:.3f}ms to copy result into pinned buffer")
 
         # save to GPU kv cache
         buffer = self.buffer[:, :, offset:offset+matched].cuda()

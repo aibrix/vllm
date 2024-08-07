@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_USE_VINEYARD_CACHE: Optional[str] = None
     VLLM_USE_FLASH_ATTN_DECODING: Optional[str] = None
+    VINEYARD_LLM_CACHE_SHARED_MEMORY: Optional[str] = None
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -87,6 +88,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Enable vineyard kv cache for vLLM.
     "VLLM_USE_FLASH_ATTN_DECODING":
     lambda: os.getenv("VLLM_USE_FLASH_ATTN_DECODING", None),
+
+    # Vineyard kv cache w/ shm mode
+    "VINEYARD_LLM_CACHE_SHARED_MEMORY":
+    lambda: os.getenv("VINEYARD_LLM_CACHE_SHARED_MEMORY", None),
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs

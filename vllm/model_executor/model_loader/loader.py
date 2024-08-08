@@ -28,7 +28,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.veturboio import (
-    VeturboIOConfig, load_with_veturboio)
+    VeturboIOConfig, load_with_veturboio_into_model)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
@@ -862,27 +862,30 @@ class VeturboIOLoader(BaseModelLoader):
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
         self._verify_config(model_config, parallel_config)
-
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model_class = get_model_architecture(model_config)[0]
-                quant_config = _get_quantization_config(
-                    model_config, self.load_config)
-                extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, multimodal_config)
-                extra_kwargs["quant_config"] = quant_config
-                extra_kwargs["cache_config"] = cache_config
-                hf_weights_files, _ = self._prepare_weights(
-                    model_config.model, model_config.revision)
-                
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, multimodal_config,
+                                          cache_config)
+
+                hf_weights_files, _ = self._prepare_weights(model_config.model, 
+                                                            model_config.revision)
                 veturboio_config = copy.copy(self.veturboio_config)
-                veturboio_config.model_class = model_class
-                veturboio_config.hf_config = model_config.hf_config
-                veturboio_config.dtype = model_config.dtype
                 veturboio_config.model_files = hf_weights_files
                 veturboio_config.map_location = device_config.device_type
-
-                model = load_with_veturboio(veturboio_config, **extra_kwargs)
+            load_with_veturboio_into_model(veturboio_config, model)
+            # # do quant method
+            # for _, module in model.named_modules():
+            #     quant_method = getattr(module, "quant_method", None)
+            #     if quant_method is not None:
+            #         # print(f">>>>>> {_} do quant_method {quant_method}")
+            #         quant_method.process_weights_after_loading(module)
+            #     # FIXME: Remove this after Mixtral is updated
+            #     # to use quant_method.
+            #     if hasattr(module, "process_weights_after_loading"):
+            #         # print(f">>>>>> {_} has process_weights_after_loading")
+            #         module.process_weights_after_loading()
+        torch.cuda.empty_cache()
         return model.eval()
 
 

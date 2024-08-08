@@ -1,3 +1,4 @@
+import gc
 import os
 import time
 from dataclasses import dataclass
@@ -37,9 +38,6 @@ class VeturboIOConfig:
     use_pinmem: Optional[bool] = False
     use_direct_io: Optional[bool] = False
     use_cipher: Optional[bool] = False  # not implemented yet
-    model_class: Optional[Type[torch.nn.Module]] = None
-    hf_config: Optional[PretrainedConfig] = None
-    dtype: Optional[Union[str, torch.dtype]] = None
 
     def _construct_veturboio_args(self) -> "VeturboIOArgs":
         veturboio_args = {
@@ -69,8 +67,7 @@ class VeturboIOConfig:
 
 class VeturboIOAgent:
 
-    def __init__(self, veturboio_config: VeturboIOConfig,
-                 quant_config: QuantizationConfig, **extra_kwargs):
+    def __init__(self, veturboio_config: VeturboIOConfig):
         if veturboio_error_msg is not None:
             raise ImportError(
                 "VeturboIO is not installed. Please install ImportError "
@@ -80,45 +77,32 @@ class VeturboIOAgent:
         self.veturboio_config = veturboio_config
         self.veturboio_args = (
             self.veturboio_config._construct_veturboio_args())
-        self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("quant_config", None) is not None:
-            self.quant_config = extra_kwargs["quant_config"]
-        else:
-            self.quant_config = quant_config
-        self.model = self._init_model()
 
-    def _init_model(self):
-        assert self.veturboio_config.hf_config is not None
-        model_args = self.veturboio_config.hf_config
-        model_args.torch_dtype = self.veturboio_config.dtype
-        assert self.veturboio_config.model_class is not None
-        
-        return self.veturboio_config.model_class(config=model_args, 
-                                                 quant_config=self.quant_config, 
-                                                 **self.extra_kwargs)
-        
-    def deserialize(self):
+    def deserialize(self, model):
+        assert isinstance(model, torch.nn.Module)
         start = time.perf_counter()
         for model_file in self.veturboio_config.model_files:
-            tensors_dict = veturboio.load(model_file, 
-                                        helper=helper,
-                                        **self.veturboio_args.deserializer_params)
-            self.model.load_state_dict(tensors_dict, strict=False, assign=True)
-            del tensors_dict
-            torch.cuda.empty_cache()
 
+            tensors_dict = veturboio.load(model_file, 
+                                          helper=helper, 
+                                          **self.veturboio_args.deserializer_params)
+        
+            model.load_state_dict(tensors_dict, strict=False, assign=True)
+            del tensors_dict
+            # gc.collect()  # do gc collect immediately
+            torch.cuda.empty_cache()
+                
         end = time.perf_counter()
         duration = end - start
         logger.info("Deserialized model in %0.2fs by VeturboIO", duration)
-        return self.model.eval()
 
 
-def load_with_veturboio(veturboio_config: VeturboIOConfig,
-                        **extra_kwargs) -> nn.Module:
+def load_with_veturboio_into_model(veturboio_config: VeturboIOConfig,
+                        model: nn.Module):
     assert veturboio_config.model_files is not None, ("model files can not be None, "
                                                       "when load with veturboIO")
-    veturboio = VeturboIOAgent(veturboio_config, **extra_kwargs)
-    return veturboio.deserialize()
+    veturboio = VeturboIOAgent(veturboio_config)
+    return veturboio.deserialize(model)
 
 
 @dataclass

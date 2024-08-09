@@ -1,26 +1,22 @@
 import os
 import time
-import torch
-from torch import nn
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import torch
+from torch import nn
+
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-
 
 veturboio_error_msg = None
 
 try:
     import veturboio
     from veturboio.ops.load_utils import IOHelper
-    if IOHelper is None:
-        helper = None
-    else:
-        helper = veturboio.init_io_helper()
+    helper = None if IOHelper is None else veturboio.init_io_helper()
 except ImportError as e:
     veturboio_error_msg = str(e)
-
 
 logger = init_logger(__name__)
 
@@ -44,7 +40,7 @@ class VeturboIOConfig:
             "use_direct_io": self.use_direct_io,
             "use_cipher": self.use_cipher,
         }
-        return VeturboIOArgs(**veturboio_args)
+        return VeturboIOArgs(**veturboio_args)  # type: ignore
 
     def verify_with_parallel_config(
         self,
@@ -76,26 +72,29 @@ class VeturboIOAgent:
 
     def deserialize(self, model):
         assert isinstance(model, torch.nn.Module)
+        assert self.veturboio_config.model_files is not None
         start = time.perf_counter()
         for model_file in self.veturboio_config.model_files:
 
-            tensors_dict = veturboio.load(model_file, 
-                                          helper=helper, 
-                                          **self.veturboio_args.deserializer_params)
+            tensors_dict = veturboio.load(
+                model_file,
+                helper=helper,
+                **self.veturboio_args.deserializer_params)
             model.load_weights(iter(tensors_dict.items()))
             del tensors_dict
             # gc.collect()  # do gc collect immediately
             torch.cuda.empty_cache()
-                
+
         end = time.perf_counter()
         duration = end - start
         logger.info("Deserialized model in %0.2fs by VeturboIO", duration)
 
 
 def load_with_veturboio_into_model(veturboio_config: VeturboIOConfig,
-                        model: nn.Module):
-    assert veturboio_config.model_files is not None, ("model files can not be None, "
-                                                      "when load with veturboIO")
+                                   model: nn.Module):
+    assert veturboio_config.model_files is not None, (
+        "model files can not be None, "
+        "when load with veturboIO")
     veturboio = VeturboIOAgent(veturboio_config)
     return veturboio.deserialize(model)
 

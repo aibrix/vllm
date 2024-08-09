@@ -821,6 +821,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
 class VeturboIOLoader(BaseModelLoader):
     """Model loader using veturboIO library."""
+
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         if isinstance(load_config.model_loader_extra_config, VeturboIOConfig):
@@ -842,16 +843,15 @@ class VeturboIOLoader(BaseModelLoader):
         allow_patterns = ["*.safetensors"]
         if not is_local:
             hf_folder = download_weights_from_hf(model_name_or_path,
-                                            self.load_config.download_dir,
-                                            allow_patterns, revision)
+                                                 self.load_config.download_dir,
+                                                 allow_patterns, revision)
         else:
             hf_folder = model_name_or_path
-            
+
         for pattern in allow_patterns:
-                weight_files = glob.glob(
-                    os.path.join(hf_folder, pattern))
-                if weight_files:
-                    return weight_files, pattern
+            weight_files = glob.glob(os.path.join(hf_folder, pattern))
+            if weight_files:
+                return weight_files, pattern
         raise ValueError("No weight files matched")
 
     def load_model(self, *, model_config: ModelConfig,
@@ -868,8 +868,8 @@ class VeturboIOLoader(BaseModelLoader):
                                           lora_config, multimodal_config,
                                           cache_config)
 
-                hf_weights_files, _ = self._prepare_weights(model_config.model, 
-                                                            model_config.revision)
+                hf_weights_files, _ = self._prepare_weights(
+                    model_config.model, model_config.revision)
                 veturboio_config = copy.copy(self.veturboio_config)
                 veturboio_config.model_files = hf_weights_files
                 veturboio_config.map_location = device_config.device_type
@@ -889,7 +889,6 @@ class VeturboIOLoader(BaseModelLoader):
         return model.eval()
 
 
-
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -907,7 +906,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
-    
+
     if load_config.load_format == LoadFormat.VETURBOIO:
         return VeturboIOLoader(load_config)
 

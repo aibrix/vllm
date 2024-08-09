@@ -86,8 +86,7 @@ class VeturboIOAgent:
             tensors_dict = veturboio.load(model_file, 
                                           helper=helper, 
                                           **self.veturboio_args.deserializer_params)
-        
-            model.load_state_dict(tensors_dict, strict=False, assign=True)
+            model.load_weights(iter(tensors_dict.items()))
             del tensors_dict
             # gc.collect()  # do gc collect immediately
             torch.cuda.empty_cache()

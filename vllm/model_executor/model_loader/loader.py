@@ -27,6 +27,8 @@ from vllm.model_executor.model_loader.tensorizer import (
     serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
+from vllm.model_executor.model_loader.veturboio import (
+    VeturboIOConfig, load_with_veturboio_into_model)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
@@ -898,6 +900,76 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return model.eval()
 
 
+class VeturboIOLoader(BaseModelLoader):
+    """Model loader using veturboIO library."""
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if isinstance(load_config.model_loader_extra_config, VeturboIOConfig):
+            self.veturboio_config = load_config.model_loader_extra_config
+        elif isinstance(load_config.model_loader_extra_config, dict):
+            self.veturboio_config = VeturboIOConfig(
+                **load_config.model_loader_extra_config)
+        else:
+            self.veturboio_config = VeturboIOConfig()
+
+    def _verify_config(self, model_config: ModelConfig,
+                       parallel_config: ParallelConfig):
+        self.veturboio_config.verify_with_model_config(model_config)
+        self.veturboio_config.verify_with_parallel_config(parallel_config)
+
+    def _prepare_weights(self, model_name_or_path: str,
+                         revision: Optional[str]):
+        is_local = os.path.isdir(model_name_or_path)
+        allow_patterns = ["*.safetensors"]
+        if not is_local:
+            hf_folder = download_weights_from_hf(model_name_or_path,
+                                                 self.load_config.download_dir,
+                                                 allow_patterns, revision)
+        else:
+            hf_folder = model_name_or_path
+
+        for pattern in allow_patterns:
+            weight_files = glob.glob(os.path.join(hf_folder, pattern))
+            if weight_files:
+                return weight_files, pattern
+        raise ValueError("No weight files matched")
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   multimodal_config: Optional[MultiModalConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+        self._verify_config(model_config, parallel_config)
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, multimodal_config,
+                                          cache_config)
+
+                hf_weights_files, _ = self._prepare_weights(
+                    model_config.model, model_config.revision)
+                veturboio_config = copy.copy(self.veturboio_config)
+                veturboio_config.model_files = hf_weights_files
+                veturboio_config.map_location = device_config.device_type
+            load_with_veturboio_into_model(veturboio_config, model)
+            # # do quant method
+            # for _, module in model.named_modules():
+            #     quant_method = getattr(module, "quant_method", None)
+            #     if quant_method is not None:
+            #         # print(f">>>>>> {_} do quant_method {quant_method}")
+            #         quant_method.process_weights_after_loading(module)
+            #     # FIXME: Remove this after Mixtral is updated
+            #     # to use quant_method.
+            #     if hasattr(module, "process_weights_after_loading"):
+            #         # print(f">>>>>> {_} has process_weights_after_loading")
+            #         module.process_weights_after_loading()
+        torch.cuda.empty_cache()
+        return model.eval()
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -915,5 +987,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
+
+    if load_config.load_format == LoadFormat.VETURBOIO:
+        return VeturboIOLoader(load_config)
 
     return DefaultModelLoader(load_config)

@@ -1,17 +1,13 @@
-import gc
 import os
 import time
-from dataclasses import dataclass
-from typing import BinaryIO, Generator, Optional, Tuple, Type, Union
-
-from vllm.config import ModelConfig, ParallelConfig
-
-from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+from vllm.config import ModelConfig, ParallelConfig
+from vllm.logger import init_logger
+
 
 veturboio_error_msg = None
 

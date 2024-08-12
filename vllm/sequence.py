@@ -99,6 +99,7 @@ class RequestMetrics:
     first_token_time: Optional[float]
     time_in_queue: Optional[float]
     finished_time: Optional[float] = None
+    token_timestamp_list: Optional[List[float]] = field(default_factory=list)
 
 
 class SequenceData:
@@ -450,7 +451,8 @@ class SequenceGroup:
                                       last_token_time=arrival_time,
                                       first_scheduled_time=None,
                                       first_token_time=None,
-                                      time_in_queue=None)
+                                      time_in_queue=None,
+                                      token_timestamp_list=[])
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.embeddings = embeddings
@@ -502,6 +504,7 @@ class SequenceGroup:
 
         # Otherwise return token latency.
         latency = now - self.metrics.last_token_time
+        self.metrics.token_timestamp_list.append(now)
         self.metrics.last_token_time = now
         return latency
 

@@ -26,7 +26,7 @@ class VeturboIOConfig:
     model_files: Optional[Tuple[str, os.PathLike]] = None
     map_location: Optional[str] = "cpu"
     enable_fast_mode: Optional[bool] = True
-    num_thread: Optional[int] = 32
+    num_thread: Optional[int] = None
     use_pinmem: Optional[bool] = False
     use_direct_io: Optional[bool] = False
     use_cipher: Optional[bool] = False  # not implemented yet
@@ -103,17 +103,21 @@ def load_with_veturboio_into_model(veturboio_config: VeturboIOConfig,
 class VeturboIOArgs:
     map_location: Optional[str] = "cpu"
     enable_fast_mode: Optional[bool] = True
-    num_thread: Optional[int] = 32
+    num_thread: Optional[int] = None
     use_pinmem: Optional[bool] = False
     use_direct_io: Optional[bool] = False
     use_cipher: Optional[bool] = False  # not implemented yet
 
     def __post_init__(self):
-        self.deserializer_params = {
+        all_params = {
             "map_location": self.map_location,
             "enable_fast_mode": self.enable_fast_mode,
             "num_thread": self.num_thread,
             "use_pinmem": self.use_pinmem,
             "use_direct_io": self.use_direct_io,
             "use_cipher": self.use_cipher,
+        }
+        self.deserializer_params = {
+            k: v
+            for k, v in all_params.items() if v is not None
         }

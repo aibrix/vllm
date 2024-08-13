@@ -30,7 +30,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
 from vllm.inputs import INPUT_REGISTRY
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -99,12 +98,6 @@ class ModelInputForGPU(ModelRunnerInputBase):
     request_ids_to_seq_ids: Optional[Dict[str, List[int]]] = None
     finished_requests_ids: Optional[List[str]] = None
     virtual_engine: int = 0
-    
-    slot_mapping: Optional[torch.Tensor] = None
-    num_prefill_tokens: Optional[int] = 0
-    num_decode_tokens: Optional[int] = 0
-    num_prefills: Optional[int] = 0
-    seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -718,31 +711,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.flashinfer_decode_wrapper = None
         self.flashinfer_prefill_workspace_buffer = None
         self.flashinfer_prefill_wrapper = None
-        # Delay the initialization of vineyard cache after model loading
-        # to ensure the tensor model parallel group is initialized.
-        self.vineyard_llm_cache = None
 
-    def _init_vineyard_cache(self):
-        if envs.VLLM_USE_VINEYARD_CACHE:
-            if not self.scheduler_config.chunked_prefill_enabled:
-                logger.warn("Vineyard LLM cache is not enabled, requires chunked prefill")
-            elif not envs.VLLM_USE_FLASH_ATTN_DECODING:
-                logger.warn("Vineyard LLM cache is not enabled, requires flash attention decoding")
-            else:
-                from vllm.worker.vineyard_llm_cache import VineyardLLMCache
-                self.vineyard_llm_cache: VineyardLLMCache = VineyardLLMCache.from_envs(
-                    model_config=self.model_config,
-                    parallel_config=self.parallel_config,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
-                                                         self.model_config.dtype),
-                )
-                if self.vineyard_llm_cache:
-                    logger.info("Using Vineyard LLM cache")
-                else:
-                    logger.warn("Vineyard LLM cache is failed to be initialized")
-        else:
-            logger.info("Vineyard LLM cache is not enabled")
+        set_cpu_offload_max_bytes(
+            int(self.cache_config.cpu_offload_gb * 1024**3))
 
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
@@ -818,8 +789,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        self._init_vineyard_cache()
-
     def save_sharded_state(
         self,
         path: str,
@@ -833,9 +802,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             pattern=pattern,
             max_size=max_size,
         )
-
-    def set_block_size(self, block_size: int) -> None:
-        self.block_size = block_size
 
     def save_tensorized_model(
         self,
@@ -1324,10 +1290,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
-        if self.vineyard_llm_cache and kv_caches[0] is not None:
-            cache_hints = self.vineyard_llm_cache.prefetch_kv_caches(
-                model_input.seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
-
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
 
@@ -1411,10 +1373,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
-        
-        if self.vineyard_llm_cache and kv_caches[0] is not None:
-            self.vineyard_llm_cache.update_kv_caches(
-                cache_hints, model_input.seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
 
         if not self.is_driver_worker:
             return []

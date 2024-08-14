@@ -241,6 +241,8 @@ class VineyardLLMCache:
                 kv_caches[j][1],
                 slot_mapping,
                 self.kv_cache_dtype,
+                1.0,
+                1.0
             )
 
         # update the seq_group_metadata's and seq's metadata

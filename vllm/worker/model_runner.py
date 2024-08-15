@@ -1300,7 +1300,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         cache_hints = None
-        if self.vineyard_llm_cache and kv_caches[0] is not None:
+        if self.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
             cache_hints = self.vineyard_llm_cache.prefetch_kv_caches(
                 seq_group_metadata_list, kv_caches, getattr(self, 'block_size', None))
         model_input = self._prepare_model_input_tensors(

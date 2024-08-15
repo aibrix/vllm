@@ -219,6 +219,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
+        cache_hints = None
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:
@@ -232,11 +233,13 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
             worker_input: WorkerInput = self.prepare_worker_input(
                 execute_model_req=execute_model_req)
-            model_input: ModelRunnerInputBase = (
-                self.model_runner.prepare_model_input(
+            input, cache_hints = self.model_runner.prepare_model_input(
                     execute_model_req.seq_group_metadata_list,
                     execute_model_req.virtual_engine,
-                    execute_model_req.finished_requests_ids))
+                    execute_model_req.finished_requests_ids,
+                    kv_caches = self.kv_cache[worker_input.virtual_engine]
+            )
+            model_input: ModelRunnerInputBase = input
             num_steps = execute_model_req.num_steps
 
             if self.do_metadata_broadcast:
@@ -273,7 +276,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             model_input, self.kv_cache[worker_input.virtual_engine]
             if self.kv_cache is not None else None, intermediate_tensors,
             num_steps)
-
+        if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
+            self.model_runner.vineyard_llm_cache.update_kv_caches(
+                cache_hints, 
+                execute_model_req.seq_group_metadata_list, 
+                self.kv_cache[worker_input.virtual_engine], 
+                getattr(self.model_runner, 'block_size', None))
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors
             get_pp_group().send_tensor_dict(output.tensors)

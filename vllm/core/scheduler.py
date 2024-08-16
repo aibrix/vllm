@@ -503,9 +503,12 @@ class Scheduler:
         while running_queue:
             seq_group = running_queue[0]
 
-            #check cgroup setting to decide the budget
-            if self.scheduler_config.cgroup_enabled and self.lora_enabled:
-                budget = self._update_budget(seq_group.lora_int_id)
+            #check cgroup setting to decide the budget, also consider if the lora is not enabled, just use the request_id
+            if self.scheduler_config.cgroup_enabled:
+                if self.lora_enabled:
+                    budget = self._update_budget(seq_group.lora_int_id)
+                else:
+                    budget = self._update_budget(int(seq_group.request_id.split("-")[-1]))
             
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
@@ -622,9 +625,12 @@ class Scheduler:
         while swapped_queue:
             seq_group = swapped_queue[0]
 
-             #check cgroup setting to decide the budget
-            if self.scheduler_config.cgroup_enabled and self.lora_enabled:
-                budget = self._update_budget(seq_group.lora_int_id)
+             #check cgroup setting to decide the budget, and if the lora is not enabled, just use the request_id
+            if self.scheduler_config.cgroup_enabled:
+                if self.lora_enabled:
+                    budget = self._update_budget(seq_group.lora_int_id)
+                else:
+                    budget = self._update_budget(int(seq_group.request_id.split("-")[-1]))
 
             # If the sequence group cannot be swapped in, stop.
             is_prefill = seq_group.is_prefill()
@@ -763,9 +769,13 @@ class Scheduler:
             # print(seq_group.request_id, seq_group.lora_int_id)
             # ipdb.set_trace()
 
-            #check cgroup setting to decide the budget
-            if self.scheduler_config.cgroup_enabled and self.lora_enabled:
-                budget = self._update_budget(seq_group.lora_int_id)
+            #Shuowei: check cgroup setting to decide the budget, if the lora is not enabled, then use the request id as the user id to identify the user budget.
+            if self.scheduler_config.cgroup_enabled:
+                print('seq_group id:', seq_group.request_id)
+                if self.lora_enabled:
+                    budget = self._update_budget(seq_group.lora_int_id)
+                else:
+                    budget = self._update_budget(int(seq_group.request_id.split("-")[-1]))
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
             assert len(waiting_seqs) == 1, (

@@ -1050,8 +1050,9 @@ class LLMEngine:
                             seq_group.num_seqs())
                 else:
                     # TPOTs.
-                    latency = seq_group.get_last_latency(now)
-                    time_per_output_tokens_iter.append(latency)
+                    if not seq_group.is_prefill(): #shuowei add here, otherwise some prefill request still goes into the logging
+                        latency = seq_group.get_last_latency(now)
+                        time_per_output_tokens_iter.append(latency)
 
                 # Because of chunked prefill, we can have a single sequence
                 # group that does multiple prompt_runs. To prevent logging

@@ -771,7 +771,6 @@ class Scheduler:
 
             #Shuowei: check cgroup setting to decide the budget, if the lora is not enabled, then use the request id as the user id to identify the user budget.
             if self.scheduler_config.cgroup_enabled:
-                print('seq_group id:', seq_group.request_id)
                 if self.lora_enabled:
                     budget = self._update_budget(seq_group.lora_int_id)
                 else:

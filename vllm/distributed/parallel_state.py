@@ -30,7 +30,7 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed
-from torch.distributed import Backend, ProcessGroup
+from torch.distributed import Backend, ProcessGroup, ReduceOp
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -262,7 +262,7 @@ class GroupCoordinator:
             with maybe_pynccl_context:
                 yield graph_capture_context
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor, op = None) -> torch.Tensor:
         """
         NOTE: This operation will be applied in-place or out-of-place. 
         Always assume this function modifies its input, but use the return
@@ -277,20 +277,26 @@ class GroupCoordinator:
         # For TPUs, use TPU communicator.
         tpu_comm = self.tpu_communicator
         if tpu_comm is not None and not tpu_comm.disabled:
+            assert op == None, (
+                f"op ({op}) is not supported for tpu_comm")
             return tpu_comm.all_reduce(input_)
 
         if ca_comm is not None:
+            assert op == None, (
+                f"op ({op}) is not supported for custom_all_reduce")
             out = ca_comm.custom_all_reduce(input_)
             if out is not None:
                 return out
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
-            pynccl_comm.all_reduce(input_)
+            pynccl_comm.all_reduce(input_, op = op)
         elif input_.is_cpu:
             import intel_extension_for_pytorch as ipex
+            assert op == None, (
+                f"op ({op}) is not supported for ipex")
             ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+            torch.distributed.all_reduce(input_, group=self.device_group, op = op)
         return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:

@@ -289,14 +289,20 @@ class GroupCoordinator:
                 return out
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
-            pynccl_comm.all_reduce(input_, op = op)
+            if op == None:
+                pynccl_comm.all_reduce(input_)
+            else:
+                pynccl_comm.all_reduce(input_, op = op)
         elif input_.is_cpu:
             import intel_extension_for_pytorch as ipex
             assert op == None, (
                 f"op ({op}) is not supported for ipex")
             ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group, op = op)
+            if op == None:
+                torch.distributed.all_reduce(input_, group=self.device_group)
+            else:
+                torch.distributed.all_reduce(input_, group=self.device_group, op = op)
         return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:

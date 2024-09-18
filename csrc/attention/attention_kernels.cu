@@ -44,7 +44,29 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
+#define DATTN_UNIFIED_QK_MAX 1
+#define WARNING(msg) printf("\033[33mWARNING: %s\033[0m\n", msg)
+
+//#define DATTENTION_QK_MAX 7.0f // llama2-7B long 99mean
+#define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99mean
+//#define DATTENTION_QK_MAX 12.73f //  llama2-7B short 99.99high
+// #define DATTENTION_QK_MAX 13.49f //  llama2-7B long 99.99high
+// #define DATTENTION_QK_MAX 4.58f //  llama2-7B short 99high
+// #define DATTENTION_QK_MAX 5.96f //  llama2-7B long 99high
+
+#if !defined(likely)
+#define likely(x)   __builtin_expect(!!(x), 1)
+#endif
+
+#if !defined(unlikely)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#endif
+
 namespace vllm {
+
+inline __device__ bool is_half_inf(float val) {
+    return (val <= -65504.0f || val >= 65504.0f);
+}
 
 // Utility function for attention softmax.
 template <int NUM_WARPS>
@@ -345,6 +367,20 @@ __device__ void paged_attention_kernel(
         logits[token_idx - start_token_idx] = mask ? 0.f : qk;
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+#if 0
+        /*** This vanilla version of PAcannot print layer_num ***/
+        /**** Show qk_max distribution  ****/
+        printf("[horenc] %s():%d: <<<grid[%d, %d, %d]block[%d, 0, 0]>>> "
+              //"[%d/xxx] "
+              "seq_len %d layer_num %02d head_num %02d qk_max %f\n", // %.2f
+              __func__, __LINE__, blockIdx.x, seq_idx, partition_idx, threadIdx.x,
+              //cnt,
+              seq_len, layer_num, head_idx, qk_max);
+        /**** Check overflow ****/
+        if (logits[i]  > qk_max) {
+          printf("[horenc] overflow - logits[i] %f > qk_max %f\n", logits[i], qk_max);
+        }
+#endif
       }
     }
   }
@@ -831,6 +867,7 @@ __global__ void dattention_kernel(
   // Each thread group fetches x elements from the key at a time.
   constexpr int x = 16 / sizeof(cache_t);
   float qk_max = -FLT_MAX;
+  bool recompute = false;
 
 #if 0
   // blocksparse specific vars
@@ -933,15 +970,73 @@ __global__ void dattention_kernel(
         // Store the partial reductions to shared memory.
         // NOTE(woosuk): It is required to zero out the masked logits.
         const bool mask = token_idx >= seq_len;
+
+#if DATTN_UNIFIED_QK_MAX // new
+        logits[token_idx - start_token_idx] = mask ? 0.f : qk;
+
+        /***** debug ******/
+        if (is_half_inf(qk - DATTENTION_QK_MAX)) {
+          WARNING("qk_max causes float16 overflow!!");
+        }
+
+        if (likely(!isinf(qk - DATTENTION_QK_MAX))) { /* Set unfied qk_max value */
+          qk_max = DATTENTION_QK_MAX;
+        } else { /* Rollback */
+          recompute = true;
+          WARNING("qk_max causes float32 overflow!!");
+          // Update the max value.
+          qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+        }
+#else // vanilla
         logits[token_idx - start_token_idx] = mask ? 0.f : qk;
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+        
+        // recompute = true;
+#endif
       }
+
+    // within warp PA thread group
     }
+#if DATTN_UNIFIED_QK_MAX // warp granularity
+    /* For synchronizing all recomput */
+    const unsigned int mask = __ballot_sync(0xffffffff, recompute);
+    if (mask == 0) {
+      qk_max = DATTENTION_QK_MAX;
+    } else {
+      recompute = true;
+    }
+#endif
   }
   
-  // Perform reduction across all threads in the same thread block
-  qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
+  if(to_profile2) {
+    time2 = clock64();
+    newTime += time2 - time0; 
+    time1 = time2; 
+  } 
+  
+  __syncthreads(); // this works but not very sure why yet
+
+  // Multiple thread blocks/warps here
+  // TODO - use __shared__ for recompute to reduce sync overhead
+  /* For synchronizing all recomput */
+  if (recompute == true) { /* Someone overflowed */
+    // Perform reduction across all threads in the same thread block
+    qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
+    //if(threadIdx.x == 0) {
+    //  printf("[%d, %d, %d]: scale %f qk_max %f. layer_offset %ld, kv_head_stride %d - %d. q_stride %ld\n", blockIdx.x, blockIdx.y, threadIdx.x, scale, qk_max, layer_offset, KV_HEAD_STRIDE, kv_head_stride, q_stride);
+    //}
+  } else {
+    // another point can set qk_max
+  }
+
+  // TODO - I'M WRONG THIS IS!!!!
+  // USING THIS: all qk_max are DATTENTION_QK_MAX
+  // NOT USING THIS: all qk_max are DATTENTION_QK_MAX as well........
+  //qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
+  //qk_max = VLLM_SHFL_SYNC(qk_max, 0); // this must be offset=0 // doesn't work
+  // __syncthreads(); // this works but don't know why.....
+  //num_tokens: each seq currently accumulates how many tokens
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;

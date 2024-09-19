@@ -65,6 +65,8 @@ class CacheEngine:
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
             self.num_gpu_blocks, self.device_config.device_type)
+
+        #print(f"NNNNNNNNNNNNN self.gpu_cache:{self.gpu_cache}")
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
     def _allocate_kv_cache(
@@ -115,6 +117,7 @@ class CacheEngine:
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_attention_layers * (key_cache_block + value_cache_block)
+        print(f"head_size:{head_size}, num_heads:{num_heads}, num_attention_layers:{num_attention_layers}, block_size: {cache_config.block_size}, key_cache_block:{key_cache_block},total:{total/1024}KB")
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:

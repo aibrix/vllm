@@ -134,6 +134,11 @@ class SchedulerOutputs:
     running_queue_size: int
     preempted: int
 
+    # new add for vmm
+    allocated_block_counts: Dict[int, int] = field(default_factory=dict)
+    free_buffer_ids: List[int] = field(default_factory=list)
+
+
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
         assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
@@ -311,12 +316,21 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
+        self.use_vmm = cache_config.use_vmm
+        self.use_dattn = cache_config.use_dattn
+        self.prefillcount = 0
+        self.schedcount = 0
+        self.runningcount = 0
+
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
         if self.scheduler_config.embedding_mode:
             version = "embedding"
-
+        if self.use_vmm:
+            version = "vmm"
+        if self.use_dattn:
+            version = "dattn"
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
@@ -329,12 +343,27 @@ class Scheduler:
             num_cpu_blocks //= pipeline_parallel_size
 
         # Create the block space manager.
-        self.block_manager = BlockSpaceManagerImpl(
-            block_size=self.cache_config.block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=num_cpu_blocks,
-            sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+        if not cache_config.use_vmm and not cache_config.use_dattn:
+            self.block_manager = BlockSpaceManagerImpl(
+                block_size=self.cache_config.block_size,
+                num_gpu_blocks=num_gpu_blocks,
+                num_cpu_blocks=num_cpu_blocks,
+                sliding_window=self.cache_config.sliding_window,
+                enable_caching=self.cache_config.enable_prefix_caching)
+        else: # vmm block space manager.
+            self.block_manager = BlockSpaceManagerImpl(
+                block_size=self.cache_config.block_size,
+                num_gpu_blocks=num_gpu_blocks,
+                num_cpu_blocks=num_cpu_blocks,
+                sliding_window=self.cache_config.sliding_window,
+                enable_caching=self.cache_config.enable_prefix_caching,
+                num_cache_buffers=self.scheduler_config.max_num_seqs)
+        # self.block_manager = BlockSpaceManagerImpl(
+        #     block_size=self.cache_config.block_size,
+        #     num_gpu_blocks=num_gpu_blocks,
+        #     num_cpu_blocks=num_cpu_blocks,
+        #     sliding_window=self.cache_config.sliding_window,
+        #     enable_caching=self.cache_config.enable_prefix_caching)
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
@@ -1151,8 +1180,10 @@ class Scheduler:
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
-                block_tables[seq_id] = self.block_manager.get_block_table(seq)
-                self.block_manager.access_all_blocks_in_seq(seq, now)
+                # block_tables[seq_id] = self.block_manager.get_block_table(seq)
+                # self.block_manager.access_all_blocks_in_seq(seq, now)
+                if not self.use_vmm:
+                    block_tables[seq_id] = self.block_manager.get_block_table(seq)
 
             if self.cache_config.enable_prefix_caching:
                 common_computed_block_nums = (

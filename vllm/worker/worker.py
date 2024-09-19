@@ -24,11 +24,15 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.worker.cache_engine import CacheEngine
+from vllm.worker.cache_engine_vmm import CacheEngineVMM
+from vllm.worker.cache_engine_dattn import CacheEngineDAttn
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
 from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
 
+import time
+from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
@@ -64,6 +68,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.use_vmm = cache_config.use_vmm
+        self.use_dattn = cache_config.use_dattn
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -112,7 +118,8 @@ class Worker(LocalOrDistributedWorkerBase):
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: List[Union[CacheEngine, CacheEngineVMM, CacheEngineDAttn]]
+        # self.cache_engine: List[CacheEngine]
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
@@ -267,6 +274,32 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
+
+        if self.use_vmm: # using VMM
+            self.cache_engine = [
+                CacheEngineVMM(self.cache_config, self.model_config,
+                            self.parallel_config, self.device_config)
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+        elif self.use_dattn:   # Using DAttn
+            #print(f"NOOOOOW, before initialization of CacheEngineDAttn!")
+            self.cache_engine = [
+                CacheEngineDAttn(self.cache_config, self.model_config,
+                            self.parallel_config, self.scheduler_config,
+                            self.device_config)
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
+
+            # Initialize kv_cache_ptrs immediately
+            for ve in range(self.parallel_config.pipeline_parallel_size):
+                self.model_runner.init_kv_cache_attribute(self.cache_engine[ve].kv_cache_ptrs, self.cache_engine[ve].block_size, self.cache_engine[ve].num_layers)
+
+        else:# Not using VMM or VAttn
+            self.cache_engine = [
+                CacheEngine(self.cache_config, self.model_config,
+                            self.parallel_config, self.device_config)
+                for _ in range(self.parallel_config.pipeline_parallel_size)
+            ]
         self.cache_engine = [
             CacheEngine(self.cache_config, self.model_config,
                         self.parallel_config, self.device_config)
@@ -313,12 +346,21 @@ class Worker(LocalOrDistributedWorkerBase):
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
 
+        if self.use_vmm or self.use_dattn:
+            allocated_block_counts = execute_model_req.allocated_block_counts
+            free_buffer_ids = execute_model_req.free_buffer_ids
+        else:
+            allocated_block_counts = None
+            free_buffer_ids = None
+
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
+            allocated_block_counts=allocated_block_counts,
+            free_buffer_ids=free_buffer_ids,
             num_steps=num_steps,
         )
 
@@ -337,6 +379,14 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+
+        if (self.use_vmm or self.use_dattn) and (worker_input.free_buffer_ids is not None and len(worker_input.free_buffer_ids) > 0):
+            self.cache_engine[virtual_engine].free_seqs(
+                worker_input.free_buffer_ids)
+
+        if (self.use_vmm or self.use_dattn) and worker_input.allocated_block_counts is not None:
+            self.cache_engine[virtual_engine].alloc_seqs(worker_input.allocated_block_counts)
+
 
     def _get_cached_seq_group_metadata(
             self,
@@ -431,9 +481,24 @@ class Worker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(self.cache_config,
-                                                self.model_config,
-                                                self.parallel_config)
+        # return CacheEngine.get_cache_block_size(self.cache_config,
+        #                                         self.model_config,
+        #                                         self.parallel_config)
+
+        if self.use_vmm:
+            return CacheEngineVMM.get_cache_block_size(self.cache_config,
+                                                       self.model_config,
+                                                       self.parallel_config)
+        elif self.use_dattn:
+            return CacheEngineDAttn.get_cache_block_size(self.cache_config,
+                                                         self.model_config,
+                                                         self.parallel_config)
+
+
+        else:
+            return CacheEngine.get_cache_block_size(self.cache_config,
+                                                    self.model_config,
+                                                    self.parallel_config)
 
 
 def init_worker_distributed_environment(

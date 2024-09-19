@@ -245,6 +245,125 @@ __global__ void reshape_and_cache_flash_kernel(
     }
   }
 }
+
+template <typename scalar_t>
+__global__ void reshape_and_cache_vmm_kernel(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
+    scalar_t* __restrict__ k_cache,      // [max_batch_size, max_seq_len, num_heads, head_size]
+    scalar_t* __restrict__ v_cache,      // [max_batch_size, max_seq_len, num_heads, head_size]
+    const int64_t* __restrict__ cache_row_mapping,  // [num_tokens]  record key/value write to which batch row in cache
+    const int64_t* __restrict__ cache_col_mapping,  // [num_tokens]  record key/value write to which token col in cache
+    const int cache_batch_stride, const int key_stride, const int value_stride,
+    const int num_heads, const int head_size) {
+  const int64_t token_idx = blockIdx.x;
+  // // NOTE: cache_row_idx or cache_col_idx can be -1 if the token is padded
+  const int64_t cache_row_idx = cache_row_mapping[token_idx];
+  const int64_t cache_col_idx = cache_col_mapping[token_idx];
+  if (cache_row_idx < 0 || cache_col_idx < 0) {
+    return;
+  }
+
+  const int n = num_heads * head_size;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const int64_t src_key_idx = token_idx * key_stride + i;
+    const int64_t src_value_idx = token_idx * value_stride + i;
+
+    const int64_t tgt_idx = cache_row_idx * cache_batch_stride + cache_col_idx * n + i;
+    // const int head_idx = i / head_size;
+    // const int head_offset = i % head_size;
+
+    // const int64_t tgt_idx = cache_row_idx * cache_batch_stride + cache_col_idx * num_heads * head_size + head_idx * head_size + head_offset;
+
+    k_cache[tgt_idx] = key[src_key_idx];
+    v_cache[tgt_idx] = value[src_value_idx];
+  }
+}
+
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+// TODO: make block_size, kv_block_size, head_size, key_stride to be constant number (constexpr)
+// Then we can save some computation overhead during execution
+__global__ void reshape_and_cache_dattn_kernel(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
+    int heads_per_thread_block,  // number of heads for each thread block
+    int64_t block_size,          // number of tokens inside a block
+    int64_t kv_block_size,    // key or value block size in number of bytes for each layer
+    int64_t layer_offset,        // layer offset in the units
+    int64_t whole_block_size,    // whole block size (bytes), including KV of all layers together
+    const int64_t* cache_row_mapping,  // [num_tokens]  record cache ptr for this token
+    const int64_t* cache_col_mapping,  // [num_tokens]  record token index of the sequence
+    const int key_stride, const int value_stride,
+    const int head_size) {
+  // The index of the token
+  const int64_t index = blockIdx.x;
+  // The total number of heads for the model
+  const int64_t num_heads = gridDim.y * heads_per_thread_block;
+  constexpr int x = 16 / sizeof(cache_t);
+
+  // NOTE: cache_row_idx or cache_col_idx can be -1 if the token is padded
+  const int64_t cache_address = cache_row_mapping[index];
+  // token index in the sequence, which determins the position of kv cache
+  const int64_t token_idx = cache_col_mapping[index];
+  if (cache_address <= 0 || token_idx < 0) {
+    return;
+  }
+
+  // Note: each thread block is in charge of 4 heads of the same token
+  // Therefore, each warp is in charge of 1 head of the same token
+  int64_t block_idx = token_idx / block_size;
+
+  // token index inside the current block: [0, 16)
+  int64_t block_offset = token_idx % block_size;
+
+  // compute the block index for the current thread block
+  const int64_t head_block_idx = blockIdx.y;
+
+  // Each head will be handled will be handled by each warp
+  int64_t warp_idx = threadIdx.x / WARP_SIZE; //[0,3]
+  assert (warp_idx <= 3);
+
+  // head_idx for the token, should be less than num_heads.
+  int64_t head_idx = head_block_idx * heads_per_thread_block + warp_idx;
+
+  // kv_block_size == head_size * block_size
+  // Compute the start address of the head of the block for KV cache
+  int64_t head_start = block_idx * whole_block_size + layer_offset + head_idx * kv_block_size ;
+
+  int64_t thread_idx_in_warp = threadIdx.x % WARP_SIZE;
+
+  cache_t* dest_key = reinterpret_cast<cache_t*>(cache_address) + head_start;
+
+  // whole_block_size: 2 * (num_heads * head_size * block_size * layers)
+  cache_t* dest_value = dest_key + whole_block_size/2;
+
+  // Each thread block will copy one token's 4 heads, while each warp will copy one token's one head only
+  // since key: [num_tokens, num_heads, head_size]
+  //int64_t src_offset = index * num_heads * head_size  + head_idx * head_size;
+  int64_t src_offset = index * key_stride + head_idx * head_size;
+  scalar_t* src_key = const_cast<scalar_t*>(key + src_offset);
+  scalar_t* src_value = const_cast<scalar_t*>(value + src_offset);
+
+  // Each warp will handle only one token's one head
+  for (int i = thread_idx_in_warp; i < head_size; i += WARP_SIZE) {
+    // i == head_offset
+    // We are going to transfer [0,head_size) to [head_size/x, block_size, x]
+    int x_idx = i / x;
+    int x_offset = i % x;
+
+    // [num_blocks, num_heads, head_size/x, block_size, x]
+    int64_t tgt_key_idx = x_idx * block_size * x + block_offset * x + x_offset;
+    dest_key[tgt_key_idx] = src_key[i];
+
+    // [num_blocks, num_heads, head_size, block_size]
+    int64_t tgt_value_idx = i * block_size + block_offset;
+    //if(head_idx == 0 && i < 8)
+    //  printf("[%d, %d, %d]: index %ld offset [%d, %ld, %d] at %p\n", blockIdx.x, blockIdx.y, threadIdx.x, tgt_value_idx, x_idx, block_offset, x_offset, &dest_value[i]);
+    dest_value[tgt_value_idx] = src_value[i];
+  }
+}
+
 }  // namespace vllm
 
 // KV_T is the stored data type of kv-cache.
@@ -327,6 +446,116 @@ void reshape_and_cache_flash(
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
+}
+
+void reshape_and_cache_vmm(
+    torch::Tensor& key,    // [num_tokens, num_heads, head_size]
+    torch::Tensor& value,  // [num_tokens, num_heads, head_size]
+    torch::Tensor& k_cache,  // [max_batch_size, max_seq_len, num_heads, head_size]
+    torch::Tensor& v_cache,  // [max_batch_size, max_seq_len, num_heads, head_size]
+    torch::Tensor& cache_row_mapping,  // [num_tokens]  record key/value write to which batch row in cache
+    torch::Tensor& cache_col_mapping,  // [num_tokens]  record key/value write to which token col in cache
+    const std::string& kv_cache_dtype) {
+
+  if (kv_cache_dtype != "auto") {
+    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
+  }
+  int num_tokens = key.size(0);
+  int num_heads = key.size(1);
+  int head_size = key.size(2);
+
+  int key_stride = key.stride(0);
+  int value_stride = value.stride(0);
+  int cache_batch_stride = k_cache.stride(0);
+  TORCH_CHECK(k_cache.stride(0) == v_cache.stride(0));
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(num_heads * head_size, 512));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  VLLM_DISPATCH_FLOATING_TYPES(
+    key.scalar_type(), "reshape_and_cache_vmm", [&] {
+      vllm::reshape_and_cache_vmm_kernel<scalar_t>
+          <<<grid, block, 0, stream>>>(
+              key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+              k_cache.data_ptr<scalar_t>(), v_cache.data_ptr<scalar_t>(),
+              cache_row_mapping.data_ptr<int64_t>(),cache_col_mapping.data_ptr<int64_t>(),
+              cache_batch_stride, key_stride, value_stride, num_heads, head_size);
+    });
+
+}
+
+#define CALL_RESHAPE_AND_CACHE_DATTN(KV_T, CACHE_T, KV_DTYPE)         \
+  vllm::reshape_and_cache_dattn_kernel<KV_T, CACHE_T, KV_DTYPE>             \
+      <<<grid, block, 0, stream>>>(                                   \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
+          heads_per_thread_block, block_size,                         \
+          kv_block_size, layer_offset,                                \
+          whole_block_size,                                           \
+          cache_row_mapping.data_ptr<int64_t>(),                      \
+          cache_col_mapping.data_ptr<int64_t>(),                      \
+          key_stride, value_stride,                                   \
+          head_size);
+
+void reshape_and_cache_dattn(
+    torch::Tensor& key,    // [num_tokens, num_heads, head_size]
+    torch::Tensor& value,  // [num_tokens, num_heads, head_size]
+    int64_t layer_idx,  // which layer to reshape
+    int64_t num_layers, // number of layers
+    int64_t block_size, // the number of tokens inside a block
+    torch::Tensor& cache_row_mapping,  // [num_tokens]  record key/value write to which batch row in cache
+    torch::Tensor& cache_col_mapping,  // [num_tokens]  record key/value write to which token col in cache
+    const std::string& kv_cache_dtype) {
+
+  if (kv_cache_dtype != "auto") {
+    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
+  }
+  int num_tokens = key.size(0);
+  int num_heads = key.size(1);
+  const int head_size = key.size(2);
+
+  const int key_stride = key.stride(0);
+  const int value_stride = value.stride(0);
+
+  //printf("hihihi, num_tokens %d, head_size %d, key_stride %d,  value_stride %d\n", num_tokens, head_size, key_stride, value_stride);
+  // We will dynamically decide heads_per_thread_block
+  int heads_per_thread_block = 4;
+  assert(num_heads % heads_per_thread_block == 0);
+
+  int sm_for_heads = num_heads/heads_per_thread_block;
+
+  int64_t kv_block_size = head_size * block_size;
+  int64_t whole_block_size = kv_block_size * num_heads * num_layers * 2;
+  int64_t layer_offset = layer_idx * kv_block_size * num_heads;
+
+  //printf("key_block_size-%d, whole_block_size-%ld, num_layers-%d\n", key_block_size, whole_block_size, num_layers);
+  dim3 grid(num_tokens, sm_for_heads);
+
+  // each thread block will be 128 threads
+  dim3 block(128);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
+                             CALL_RESHAPE_AND_CACHE_DATTN)
+  /*
+  VLLM_DISPATCH_FLOATING_TYPES(
+    key.scalar_type(), "reshape_and_cache_dattn", [&] {
+      vllm::reshape_and_cache_dattn_kernel<scalar_t>
+          <<<grid, block, 0, stream>>>(
+              key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+              heads_per_thread_block, block_size,
+              kv_block_size, layer_offset,
+              whole_block_size,
+              cache_row_mapping.data_ptr<int64_t>(),
+              cache_col_mapping.data_ptr<int64_t>(),
+              key_stride, value_stride,
+              head_size);
+    });
+  */
 }
 
 namespace vllm {

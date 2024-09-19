@@ -696,6 +696,21 @@ class SequenceGroup:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
+    def __repr__(self) -> str:
+        return (f"SequenceGroupMetadata(\n"
+                f"-- request_id={self.request_id}, \n"
+                f"-- is_prompt={self.is_prompt}, \n"
+                f"-- seq_data={self.seq_data}, \n"
+                f"-- sampling_params={self.sampling_params}, \n"
+                f"-- block_tables={self.block_tables}, \n"
+                f"-- do_sample={self.do_sample}, \n"
+                f"-- token_chunk_size={self.token_chunk_size}, \n"
+                f"-- lora_request={self.lora_request}, \n"
+                f"-- computed_block_nums={self.computed_block_nums}, \n"
+                f"-- multi_modal_data={self.multi_modal_data}, \n"
+                f"-- encoder_seq_data={self.encoder_seq_data}, \n"
+                f"-- cross_block_table={self.cross_block_table})")
+
     @property
     def prompt_adapter_id(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_id \
@@ -1263,6 +1278,11 @@ class ExecuteModelRequest(
     num_steps: int = 1
     # Finished request ids since last step.
     finished_requests_ids: List[str] = msgspec.field(default_factory=list)
+
+    # new add for vmm and dattn
+    allocated_block_counts: Dict[int, int]= msgspec.field(default_factory=dict),
+    free_buffer_ids: List[int] = msgspec.field(default_factory=list)
+
     # The last sampled token ids for multi step decoding.
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback

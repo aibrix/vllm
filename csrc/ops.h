@@ -26,6 +26,25 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
+void dattention(
+    torch::Tensor& output,
+    torch::Tensor& exp_sums,
+    torch::Tensor& max_logits,
+    torch::Tensor& tmp_out,
+    torch::Tensor& query,
+    int64_t layer_idx,
+    int64_t num_layers,
+    int64_t block_size,
+    int64_t max_seq_len,
+    torch::Tensor & seq_lens,
+    torch::Tensor & cache_row_mapping,
+    torch::Tensor & cache_col_mapping,
+    const std::string& kv_cache_dtype,
+    int64_t num_kv_heads,
+    double  kv_scale,
+    const c10::optional<torch::Tensor>&  alibi_slopes,
+    double scale);
+
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
 

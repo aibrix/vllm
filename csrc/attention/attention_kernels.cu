@@ -44,15 +44,20 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
-#define DATTN_UNIFIED_QK_MAX 1
+/* DATTN_DEBUG_PERHEAD_QKMAX & DATTN_UNIFIED_QK_MAX cannot be on at the same time */
+#define VANILLA_DEBUG_PERHEAD_QKMAX 1 /* Cannot - no layer_num info passed in */
+#define DATTN_DEBUG_PERHEAD_QKMAX 1
+#define DATTN_UNIFIED_QK_MAX 0
 #define WARNING(msg) printf("\033[33mWARNING: %s\033[0m\n", msg)
 
+#if DATTN_UNIFIED_QK_MAX
 //#define DATTENTION_QK_MAX 7.0f // llama2-7B long 99.99mean
 #define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean
 //#define DATTENTION_QK_MAX 12.73f //  llama2-7B short 99.99high
 // #define DATTENTION_QK_MAX 13.49f //  llama2-7B long 99.99high
 // #define DATTENTION_QK_MAX 4.58f //  llama2-7B short 99high
 // #define DATTENTION_QK_MAX 5.96f //  llama2-7B long 99high
+#endif
 
 #if !defined(likely)
 #define likely(x)   __builtin_expect(!!(x), 1)
@@ -367,6 +372,7 @@ __device__ void paged_attention_kernel(
         logits[token_idx - start_token_idx] = mask ? 0.f : qk;
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+
 #if 0
         /*** This vanilla version of PAcannot print layer_num ***/
         /**** Show qk_max distribution  ****/
@@ -390,6 +396,21 @@ __device__ void paged_attention_kernel(
   // Get the sum of the exp values.
   float exp_sum = 0.f;
   for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
+#if VANILLA_DEBUG_PERHEAD_QKMAX
+    /**** Show qk_max distribution - per-layer, per-head  ****/
+    printf("[horenc] %s():%d: <<<grid[%d, %d, %d]block[%d, 0, 0]>>> "
+          //"[%d/xxx] "
+          "lane 0 seq_len %d "
+          //"layer_num %02d "
+          "head_num %02d qk_max %f\n", // %.2f
+          __func__, __LINE__, blockIdx.x, seq_idx, partition_idx, threadIdx.x,
+          //cnt,
+          seq_len,
+          //layer_num,
+          head_idx, qk_max);
+          /* Cannot - no layer_num info passed in */
+#endif
+
     float val = __expf(logits[i] - qk_max);
     logits[i] = val;
     exp_sum += val;
@@ -1033,7 +1054,18 @@ __global__ void dattention_kernel(
   // Get the sum of the exp values.
   float exp_sum = 0.f;
   for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
-    float val = __expf(logits[i] - qk_max);
+#if DATTN_DEBUG_PERHEAD_QKMAX
+    /**** Show qk_max distribution - per-layer, per-head  ****/
+    printf("[horenc] "
+          "%s():%d: "
+          "<<<grid[%d, %d, %d]block[%d, 0, 0]>>> "
+          "lane 0 seq_len %d layer_offset %02ld head_num %02d qk_max %f\n", // %.2f
+          __func__, __LINE__,
+          blockIdx.x, seq_idx, partition_idx, threadIdx.x,
+          seq_len, layer_offset, head_idx, qk_max);
+#endif
+
+    const float val = __expf(logits[i] - qk_max);
     logits[i] = val;
     exp_sum += val;
   }

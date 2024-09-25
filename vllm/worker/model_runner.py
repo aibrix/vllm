@@ -994,12 +994,39 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.mm_registry = mm_registry
         self.multi_modal_input_mapper = mm_registry \
             .create_input_mapper(model_config)
+
+
+        # TODO: we will soon support these features in VMM
+        self.use_vmm = cache_config.use_vmm
+        self.use_dattn = cache_config.use_dattn
+        if self.use_vmm:
+            if self.lora_config:
+                #TODO:
+                raise NotImplementedError("VMM is not supported with LoRA ")
+            if self.sliding_window:
+                #TODO:
+                raise NotImplementedError("VMM is not supported with sliding window")
+            if self.attn_backend.get_name() != "flash-attn":
+                raise NotImplementedError("VMM is only supported with flash-attn")
+        elif self.use_dattn:
+            if self.lora_config:
+                #TODO:
+                raise NotImplementedError("DATTN is not supported with LoRA ")
+            if self.sliding_window:
+                #TODO:
+                raise NotImplementedError("DATTN is not supported with sliding window")
+            #print(f"dAttention's current backend is {self.attn_backend.get_name()}")
+
         self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+
+
+
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
 
         set_cpu_offload_max_bytes(
@@ -1009,6 +1036,19 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.inter_data_cache: Dict[int, PyObjectCache] = {}
         self.sampling_metadata_cache: SamplingMetadataCache = \
             SamplingMetadataCache()
+
+        # Add dAttention support
+        self.kv_cache_ptrs: Optional[List[int]] = None
+        self.num_layers: int = 0
+
+    # Initialize kv_cache_ptrs when dAttention is used
+    def init_kv_cache_attribute(self, kv_cache_ptrs: List[int], block_size: int, num_layers: int) -> None:
+        self.kv_cache_ptrs = kv_cache_ptrs
+        self.block_size = block_size
+        self.num_layers = num_layers
+
+    def _get_kv_ptr(self, index: int) -> int:
+        return self.kv_cache_ptrs[index]
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1587,6 +1627,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        import sys
+        if kv_caches != None and kv_caches[0] != None:
+            print(f"GPUModelRunner with num_steps-{num_steps}, input_tokens:{len(model_input.input_tokens)}, kv_cache:{len(kv_caches)} - {kv_caches[0].size()}", file=sys.stderr)
+        else:
+            print(f"GPUModelRunner with num_steps-{num_steps}, input_tokens:{len(model_input.input_tokens)}, kv_cache:{len(kv_caches)}", file=sys.stderr)
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,

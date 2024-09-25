@@ -294,6 +294,46 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
+
+#
+# _vmm extension (VMM)
+#
+
+set(VLLM_VMM_EXT_SRC
+  "csrc/vmm/torch_bindings.cpp"
+  "csrc/vmm/vmm.cu"
+  )
+
+define_gpu_extension_target(
+  _vmm_C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_VMM_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  USE_SABI 3
+  WITH_SOABI)
+
+#
+# dattn extension (DATTN)
+#
+
+set(VLLM_DATTN_EXT_SRC
+  "csrc/dattn/torch_bindings.cpp"
+  "csrc/dattn/dattn.cu"
+  )
+
+define_gpu_extension_target(
+  _dattn_C
+  DESTINATION vllm
+  LANGUAGE ${VLLM_GPU_LANG}
+  SOURCES ${VLLM_DATTN_EXT_SRC}
+  COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  USE_SABI 3
+  WITH_SOABI)
+
+
 # If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
 # cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
 # driver API. This causes problems when linking with earlier versions of CUDA.

@@ -47,6 +47,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_head_sliding_step) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
+  ops.def(
+      "dattention("
+      "    Tensor! output, Tensor exp_sums, Tensor max_logits,"
+      "    Tensor tmp_out, Tensor query,"
+      "    int layer_idx, int num_layers, int block_size, int max_seq_len,"
+      "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping,"
+      "    str kv_cache_dtype, int num_kv_heads, float kv_scale,"
+      "    Tensor? alibi_slopes, float scale) -> ()"
+    );
+  ops.impl("dattention", torch::kCUDA, &dattention);
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");
@@ -387,6 +398,29 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
       "str kv_cache_dtype) -> ()");
   cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
+
+  // new add for vmm
+  cache_ops.def(
+      "reshape_and_cache_vmm(Tensor key, Tensor value,"
+      "                        Tensor! key_cache,"
+      "                        Tensor! value_cache,"
+      "                        Tensor cache_row_mapping,"
+      "                        Tensor cache_col_mapping,"
+      "                        str kv_cache_dtype) -> ()");
+  cache_ops.impl("reshape_and_cache_vmm", torch::kCUDA,
+                 &reshape_and_cache_vmm);
+// new add for dAttention
+  cache_ops.def(
+      "reshape_and_cache_dattn(Tensor key, Tensor value,"
+      "                        int layer_idx,"
+      "                        int num_layers,"
+      "                        int block_size,"
+      "                        Tensor cache_row_mapping,"
+      "                        Tensor cache_col_mapping,"
+      "                        str kv_cache_dtype) -> ()");
+  cache_ops.impl("reshape_and_cache_dattn", torch::kCUDA,
+                 &reshape_and_cache_dattn);
+
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {

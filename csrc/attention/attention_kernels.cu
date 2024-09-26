@@ -1032,7 +1032,7 @@ __global__ void dattention_kernel(
           /* Rollback */
           recompute = true;
           // WARNING("qk_max causes float32 overflow!!");
-          printf("\033[33mWARNING: Recompute. qk_max overflow!! qk = %.6f\033[0m\n", qk);
+          // printf("\033[33mWARNING: Recompute. qk_max overflow!! qk = %.6f\033[0m\n", qk);
         }
 #else // vanilla
         // recompute = true;
@@ -1066,6 +1066,12 @@ __global__ void dattention_kernel(
     //if(threadIdx.x == 0) {
     //  printf("[%d, %d, %d]: scale %f qk_max %f. layer_offset %ld, kv_head_stride %d - %d. q_stride %ld\n", blockIdx.x, blockIdx.y, threadIdx.x, scale, qk_max, layer_offset, KV_HEAD_STRIDE, kv_head_stride, q_stride);
     //}
+
+    local_rollback++;
+    if (!threadIdx.x) {
+      printf("\033[33mWARNING: local_rollback = %" PRIu64 " threadIdx.x %d + seq_idx %d * NUM_THREADS %d\033[0m\n",
+          local_rollback, threadIdx.x, seq_idx, NUM_THREADS);
+    }
   }
 #else // vanilla
   // Perform reduction across all threads in the same thread block

@@ -46,18 +46,22 @@ typedef __hip_bfloat16 __nv_bfloat16;
 
 /* DATTN_DEBUG_PERHEAD_QKMAX & DATTN_UNIFIED_QK_MAX cannot be on at the same time */
 #define VANILLA_DEBUG_PERHEAD_QKMAX 1 /* Cannot - no layer_num info passed in */
-#define DATTN_DEBUG_PERHEAD_QKMAX 1
-#define DATTN_UNIFIED_QK_MAX 0
+#define DATTN_DEBUG_PERHEAD_QK 0
+#define DATTN_DEBUG_PERHEAD_QKMAX 0
+#define DATTN_UNIFIED_QK_MAX 1
 #define WARNING(msg) printf("\033[33mWARNING: %s\033[0m\n", msg)
 
 #if DATTN_UNIFIED_QK_MAX
 //#define DATTENTION_QK_MAX 7.0f // llama2-7B long 99.99mean
-#define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean
+//#define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean
 //#define DATTENTION_QK_MAX 12.73f //  llama2-7B short 99.99high
-// #define DATTENTION_QK_MAX 13.49f //  llama2-7B long 99.99high
-// #define DATTENTION_QK_MAX 4.58f //  llama2-7B short 99high
-// #define DATTENTION_QK_MAX 5.96f //  llama2-7B long 99high
+//#define DATTENTION_QK_MAX 13.49f //  llama2-7B long 99.99high
+//#define DATTENTION_QK_MAX 4.58f //  llama2-7B short 99high
+//#define DATTENTION_QK_MAX 5.96f //  llama2-7B long 99high
+// #define DATTENTION_QK_MAX -57.545f // patent OPT6.7B short
+#define DATTENTION_QK_MAX 16.38f // patent OPT6.7B medium
 #endif
+
 
 #if !defined(likely)
 #define likely(x)   __builtin_expect(!!(x), 1)
@@ -399,12 +403,10 @@ __device__ void paged_attention_kernel(
 #if VANILLA_DEBUG_PERHEAD_QKMAX
     /**** Show qk_max distribution - per-layer, per-head  ****/
     printf("[horenc] %s():%d: <<<grid[%d, %d, %d]block[%d, 0, 0]>>> "
-          //"[%d/xxx] "
           "lane 0 seq_len %d "
           //"layer_num %02d "
           "head_num %02d qk_max %f\n", // %.2f
           __func__, __LINE__, blockIdx.x, seq_idx, partition_idx, threadIdx.x,
-          //cnt,
           seq_len,
           //layer_num,
           head_idx, qk_max);
@@ -837,6 +839,14 @@ __global__ void dattention_kernel(
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
+#if (DATTN_DEBUG_PERHEAD_QK || DATTN_DEBUG_PERHEAD_QKMAX)
+  int64_t layer_idx = layer_offset/(num_heads * HEAD_SIZE * BLOCK_SIZE);
+#endif
+
+#if DATTN_UNIFIED_QK_MAX
+  static uint64_t local_rollback = 0;
+#endif
+
   // A vector type to store a part of a key or a query.
   // The vector size is configured in such a way that the threads in a thread
   // group fetch or compute 16 bytes at a time. For example, if the size of a
@@ -996,6 +1006,20 @@ __global__ void dattention_kernel(
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
 
+#if DATTN_DEBUG_PERHEAD_QK
+        /* Show qk distribution - per-layer, per-head */
+        if (!mask) {
+          printf("[horenc] %s():%d: "
+                "<<<grid[%02d, %d, %d]block[%02d, 0, 0]>>> "
+                "lane 0 seq_len %d layer_idx %02" PRId64 " head_num %02d qk %f\n", // %.2f
+                __func__, __LINE__,
+                blockIdx.x, seq_idx, partition_idx, threadIdx.x,
+                seq_len, layer_idx, head_idx, qk);
+        } else {
+          // qk always = 0;
+        }
+#endif
+
 #if DATTN_UNIFIED_QK_MAX // new
         /***** debug ******/
         //if (unlikely(is_half_inf(__expf(qk - DATTENTION_QK_MAX)))) {
@@ -1055,14 +1079,16 @@ __global__ void dattention_kernel(
   float exp_sum = 0.f;
   for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
 #if DATTN_DEBUG_PERHEAD_QKMAX
-    /**** Show qk_max distribution - per-layer, per-head  ****/
-    printf("[horenc] "
-          "%s():%d: "
-          "<<<grid[%d, %d, %d]block[%d, 0, 0]>>> "
-          "lane 0 seq_len %d layer_offset %02ld head_num %02d qk_max %f\n", // %.2f
-          __func__, __LINE__,
-          blockIdx.x, seq_idx, partition_idx, threadIdx.x,
-          seq_len, layer_offset, head_idx, qk_max);
+    /* Show qk_max distribution - per-layer, per-head */
+    if (!i) {
+      printf("[horenc] %s():%d: qk_max "
+            "<<<grid[%02d, %d, %d]block[%02d, 0, 0]>>> "
+            "lane 0 seq_len %d layer_idx %02" PRId64 " head_num %02d qk_max %f\n", // %.2f
+            __func__, __LINE__,
+            blockIdx.x, seq_idx, partition_idx, threadIdx.x,
+            seq_len, layer_idx, head_idx, qk_max);
+            // threadIdx.x is within the range of a warp (32)
+    }
 #endif
 
     const float val = __expf(logits[i] - qk_max);

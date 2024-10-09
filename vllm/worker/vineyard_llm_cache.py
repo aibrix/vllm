@@ -86,6 +86,7 @@ class VineyardLLMCache:
                     VineyardKVTensor(v_tensor.data_ptr(), v_tensor.numel() * v_tensor.element_size()),
                 ))
         self.metrics = metrics
+        self.collected_count = 0
         logger.info(f"VineyardLLMCache init {metrics}")
 
     def _init_vineyard_logger(self):
@@ -220,6 +221,7 @@ class VineyardLLMCache:
         self.metrics.hit_blocks += (matched // block_size)
         self.metrics.total_blocks += ((-query_token_size) // (-block_size))
         self.metrics.counter += 1
+        # print(f"matched {matched} len(tokens) {len(tokens)} block_size {block_size} matched {matched} len(tokens) {len(tokens)} query_context_len {query_context_len} query_token_size {query_token_size} ")
         # save to GPU kv cache
         torch.cuda.synchronize()
         start_time = time.time()
@@ -353,28 +355,31 @@ class VineyardLLMCache:
             #                             group=get_tensor_model_parallel_group())
 
         # fetch from GPU kv cache
-        torch.cuda.synchronize()
-        start_time = time.time()
-        for j in range(self.layer):
-            self.buffer[:, j, :update_token_size].copy_(
-                kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
-        torch.cuda.synchronize()
-        duration = time.time() - start_time
-        self.metrics.time_unload.append(duration)   
-        self.metrics.time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
-        # print(f"time unload avg {np.mean(self.time_unload)} std {np.std(self.time_unload)}")
-        
-        start_time = time.time()
-        # updates into vineyard
-        updated = self.cache.update(
-            prefix=update_prefix,
-            tokens=update_tokens,
-            kv_cache_list=self.tensors[:update_token_size],
-        )
-        duration = time.time() - start_time
-        self.metrics.time_update.append(duration)   
-        self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
-        # print(f"time update avg {np.mean(self.time_update)} std {np.std(self.time_update)}")
+        updated=0
+        if self.collected_count <= 1:
+            torch.cuda.synchronize()
+            start_time = time.time()
+            for j in range(self.layer):
+                self.buffer[:, j, :update_token_size].copy_(
+                    kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
+            torch.cuda.synchronize()
+            duration = time.time() - start_time
+            self.metrics.time_unload.append(duration)   
+            self.metrics.time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
+            # print(f"time unload avg {np.mean(self.time_unload)} std {np.std(self.time_unload)}")
+            
+            start_time = time.time()
+            # updates into vineyard
+            updated = self.cache.update(
+                prefix=update_prefix,
+                tokens=update_tokens,
+                kv_cache_list=self.tensors[:update_token_size],
+            )
+            duration = time.time() - start_time
+            self.metrics.time_update.append(duration)   
+            self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
+            # print(f"time update avg {np.mean(self.time_update)} std {np.std(self.time_update)}")
+            self.collected_count += 1
 
         # restore the seq_group_metadata's and seq's metadata
         if seq_group_metadata is not None:

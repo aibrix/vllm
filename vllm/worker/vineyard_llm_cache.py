@@ -216,9 +216,9 @@ class VineyardLLMCache:
             #                             group=get_tensor_model_parallel_group())
 
         self.metrics.hit_tokens += matched
-        self.metrics.total_tokens += len(tokens)
+        self.metrics.total_tokens += query_token_size
         self.metrics.hit_blocks += (matched // block_size)
-        self.metrics.total_blocks += (- len(tokens) // (-block_size))
+        self.metrics.total_blocks += ((-query_token_size) // (-block_size))
         self.metrics.counter += 1
         # save to GPU kv cache
         torch.cuda.synchronize()

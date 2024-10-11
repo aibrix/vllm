@@ -266,10 +266,13 @@ def initialize_ray_cluster(
                 f"Total number of devices: {device_bundles}.")
     else:
         num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
-        if parallel_config.world_size > num_devices_in_cluster:
-            raise ValueError(
-                f"The number of required {device_str}s exceeds the total "
-                f"number of available {device_str}s in the placement group.")
+        # we can throw an warning message here instead of error.
+        # Technically, user can still create placement group and
+        # wait cluster to be ready, no need to early reject the request.
+        # if parallel_config.world_size > num_devices_in_cluster:
+        #     raise ValueError(
+        #         f"The number of required {device_str}s exceeds the total "
+        #         f"number of available {device_str}s in the placement group.")
         # Create a new placement group
         placement_group_specs: List[Dict[str, float]] = ([{
             device_str: 1.0

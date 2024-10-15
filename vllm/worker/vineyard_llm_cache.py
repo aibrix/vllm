@@ -33,10 +33,12 @@ class CacheServiceMetrics:
     counter: int = 0
     time_query: list = []
     time_load: list = []
+    time_reshape: list = []
     time_unload: list = []
     time_update: list = []
     normalized_time_query: list = []
     normalized_time_load: list = []
+    normalized_time_reshape: list = []
     normalized_time_unload: list = []
     normalized_time_update: list = []
     
@@ -221,13 +223,19 @@ class VineyardLLMCache:
         self.metrics.total_blocks += ((-query_token_size) // (-block_size))
         self.metrics.counter += 1
         # save to GPU kv cache
-        torch.cuda.synchronize()
-        start_time = time.time()
+        copy_start = torch.cuda.Event(enable_timing=True)
+        copy_end = torch.cuda.Event(enable_timing=True)
+        copy_start.record()
         buffer = self.buffer[:, :, offset:offset+matched].cuda()
+        copy_end.record()
         torch.cuda.synchronize()
-        duration = time.time() - start_time
+        duration = copy_start.elapsed_time(copy_end) / 1000.0
         self.metrics.time_load.append(duration)
-        self.metrics.time_load.append(0 if matched == 0 else duration/matched)
+        self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
+        
+        reshape_start = torch.cuda.Event(enable_timing=True)
+        reshape_end = torch.cuda.Event(enable_timing=True)
+        reshape_start.record()
         for j in range(self.layer):
             # use `reshape_and_cache_flash` rather than `copy_` as
             # the target kv cache slots is not contingous.
@@ -241,7 +249,12 @@ class VineyardLLMCache:
                 1.0,
                 1.0
             )
-
+        reshape_end.record()
+        torch.cuda.synchronize()
+        duration = reshape_start.elapsed_time(reshape_end) / 1000.0
+        self.metrics.time_reshape.append(duration)
+        self.metrics.normalized_time_reshape.append(0 if matched == 0 else duration/matched)
+        
         # update the seq_group_metadata's and seq's metadata
         if seq_group_metadata is not None:
             seq_data.update_num_computed_tokens(matched)
@@ -328,14 +341,12 @@ class VineyardLLMCache:
              update_prefix,
              update_tokens,
             ) = update_args
-
         if update_token_size <= 0:
             # restore the seq_group_metadata's and seq's metadata
             if seq_group_metadata is not None:
                 seq_data.update_num_computed_tokens(-matched[seq_id])
                 seq_group_metadata.token_chunk_size += matched[seq_id]
             return seq_id, 0
-
         if seq_group_metadata is not None:
             block_table = seq_group_metadata.block_tables[seq_id]
             slot_mapping = []
@@ -353,15 +364,17 @@ class VineyardLLMCache:
             #                             group=get_tensor_model_parallel_group())
 
         # fetch from GPU kv cache
-        torch.cuda.synchronize()
-        start_time = time.time()
+        start_unload = torch.cuda.Event(enable_timing=True)
+        end_unload = torch.cuda.Event(enable_timing=True)
+        start_unload.record()
         for j in range(self.layer):
             self.buffer[:, j, :update_token_size].copy_(
                 kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
         torch.cuda.synchronize()
-        duration = time.time() - start_time
+        end_unload.record()
+        duration = start_unload.elapsed_time(end_unload) / 1000.0
         self.metrics.time_unload.append(duration)   
-        self.metrics.time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
+        self.metrics.normalized_time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
         # print(f"time unload avg {np.mean(self.time_unload)} std {np.std(self.time_unload)}")
         
         start_time = time.time()

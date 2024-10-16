@@ -3,6 +3,7 @@ import time
 import numpy as np
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
+import time
 import torch
 import torch.distributed
 
@@ -39,9 +40,8 @@ class CacheServiceMetrics:
     normalized_time_load: list = []
     normalized_time_unload: list = []
     normalized_time_update: list = []
-    
-     
-    
+
+
 class VineyardLLMCache:
     def __init__(
         self,
@@ -114,6 +114,7 @@ class VineyardLLMCache:
             logger.warn("VineyardLLMCache requires flash attention decoding")
             return None
 
+        logger.info("Using cuda managed memory")
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
@@ -178,11 +179,20 @@ class VineyardLLMCache:
              query_tokens
             ) = query_args
 
+        query_tensors = []
+        for i in range(query_token_size):
+            query_tensors.append([])
+            for j in range(self.layer):
+                query_tensors[-1].append((
+                    VineyardKVTensor(0, 0),
+                    VineyardKVTensor(0, 0)
+                ))
+
         start_time = time.time()
         matched = self.cache.query(
             prefix=query_prefix,
             tokens=query_tokens,
-            kv_cache_list=self.tensors[:query_token_size],
+            kv_cache_list=query_tensors,
         )
         duration = time.time() - start_time
         self.metrics.time_query.append(duration)
@@ -225,11 +235,38 @@ class VineyardLLMCache:
         # save to GPU kv cache
         torch.cuda.synchronize()
         start_time = time.time()
-        buffer = self.buffer[:, :, offset:offset+matched].cuda()
+
+        layer_k_tensors = []
+        layer_v_tensors = []
+        for i in range(self.layer):
+            token_k_tensors = []
+            token_v_tensors = []
+            for j in range(matched):
+                token_k_tensors.append(
+                    torch.frombuffer(
+                        query_tensors[j][i][0], dtype=self.torch_dtype
+                    ).view(self.num_kv_heads, self.head_size)
+                )
+                token_v_tensors.append(
+                    torch.frombuffer(
+                        query_tensors[j][i][1], dtype=self.torch_dtype
+                    ).view(self.num_kv_heads, self.head_size)
+                )
+                # assert token_k_tensors[-1].is_pinned()
+                # assert token_v_tensors[-1].is_pinned()
+            layer_k_tensors.append(
+                torch.stack(tuple(token_k_tensors), dim=0).cuda(non_blocking=True)
+            )
+            layer_v_tensors.append(
+                torch.stack(tuple(token_v_tensors), dim=0).cuda(non_blocking=True)
+            )
+        buffer = [layer_k_tensors, layer_v_tensors]
+
         torch.cuda.synchronize()
         duration = time.time() - start_time
         self.metrics.time_load.append(duration)
         self.metrics.time_load.append(0 if matched == 0 else duration/matched)
+
         for j in range(self.layer):
             # use `reshape_and_cache_flash` rather than `copy_` as
             # the target kv cache slots is not contingous.
@@ -367,7 +404,7 @@ class VineyardLLMCache:
             self.metrics.time_unload.append(duration)   
             self.metrics.time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
             # print(f"time unload avg {np.mean(self.time_unload)} std {np.std(self.time_unload)}")
-            
+
             start_time = time.time()
             # updates into vineyard
             updated = self.cache.update(

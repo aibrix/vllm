@@ -136,7 +136,9 @@ def main(args):
               use_v2_block_manager=args.use_v2_block_manager,
               tensor_parallel_size=args.tensor_parallel_size,
               enable_prefix_caching=args.enable_prefix_caching,
-              enable_chunked_prefill=args.enable_chunked_prefill)
+              enable_chunked_prefill=args.enable_chunked_prefill,
+              max_num_seqs = args.max_num_seqs,
+            )
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
@@ -198,5 +200,9 @@ if __name__ == "__main__":
                         default='128:256',
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
+    parser.add_argument('--max-num-seqs', 
+                        type=int, 
+                        default=256,
+                        help='Maximum number of sequences per iteration.')
     args = parser.parse_args()
     main(args)

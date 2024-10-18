@@ -1,4 +1,4 @@
-"""Benchmark online serving throughput.
+r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands:
     vLLM OpenAI API server
@@ -89,10 +89,8 @@ def sample_sharegpt_requests(
     tokenizer: PreTrainedTokenizerBase,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int, None]]:
-    if fixed_output_len is not None and fixed_output_len < 4:
-        raise ValueError("output_len too small")
     # Load the dataset.
-    with open(dataset_path) as f:
+    with open(dataset_path, encoding='utf-8') as f:
         dataset = json.load(f)
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
@@ -117,7 +115,7 @@ def sample_sharegpt_requests(
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
+        if prompt_len < 4 or (fixed_output_len is None and output_len < 4):
             # Prune too short sequences.
             continue
         if prompt_len > 1024 or prompt_len + output_len > 2048:
@@ -141,7 +139,7 @@ def sample_sonnet_requests(
     ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
     # Load the dataset.
-    with open(dataset_path) as f:
+    with open(dataset_path, encoding='utf-8') as f:
         poem_lines = f.readlines()
 
     # Tokenize the poem lines.
@@ -178,9 +176,9 @@ def sample_sonnet_requests(
     # Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
     for _ in range(num_requests):
-        sampled_lines = "".join(
-            prefix_lines +
-            random.sample(poem_lines, num_input_lines - num_prefix_lines))
+        num_lines_needed = num_input_lines - num_prefix_lines
+        sampled_lines = "".join(prefix_lines +
+                                random.choices(poem_lines, k=num_lines_needed))
 
         prompt = f"{base_prompt}{sampled_lines}"
         message = [
@@ -204,6 +202,7 @@ def sample_hf_requests(
     dataset_split: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
+    random_seed: int,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
     dataset = load_dataset(dataset_path,
@@ -212,8 +211,8 @@ def sample_hf_requests(
                            streaming=True)
     assert "conversations" in dataset.features, (
         "HF Dataset must have 'conversations' column.")
-    filtered_dataset = dataset.shuffle().filter(
-        lambda x: len(x["conversations"]) >= 2)
+    filter_func = lambda x: len(x["conversations"]) >= 2
+    filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
     sampled_requests: List[Tuple[str, int, int, Dict[str,
                                                      Collection[str]]]] = []
     for data in filtered_dataset:
@@ -228,10 +227,11 @@ def sample_hf_requests(
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
                          ) if fixed_output_len is None else fixed_output_len
-        if prompt_len < 4 or output_len < 4:
+        if fixed_output_len is None and (prompt_len < 4 or output_len < 4):
             # Prune too short sequences.
             continue
-        if prompt_len > 1024 or prompt_len + output_len > 2048:
+        if fixed_output_len is None and \
+            (prompt_len > 1024 or prompt_len + output_len > 2048):
             # Prune too long sequences.
             continue
 
@@ -392,12 +392,13 @@ async def benchmark(
     input_requests: List[Tuple[str, int, int]],
     logprobs: Optional[int],
     best_of: int,
-    use_beam_search: bool,
     request_rate: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
+    ignore_eos: bool,
+    max_concurrency: Optional[int],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[backend]
@@ -419,8 +420,8 @@ async def benchmark(
         output_len=test_output_len,
         logprobs=logprobs,
         best_of=best_of,
-        use_beam_search=use_beam_search,
         multi_modal_content=test_mm_content,
+        ignore_eos=ignore_eos,
     )
     test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
@@ -432,44 +433,56 @@ async def benchmark(
 
     if profile:
         print("Starting profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/start_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-            use_beam_search=use_beam_search,
-            multi_modal_content=test_mm_content,
-        )
+        profile_input = RequestFuncInput(model=model_id,
+                                         prompt=test_prompt,
+                                         api_url=base_url + "/start_profile",
+                                         prompt_len=test_prompt_len,
+                                         output_len=test_output_len,
+                                         logprobs=logprobs,
+                                         best_of=best_of,
+                                         multi_modal_content=test_mm_content,
+                                         ignore_eos=ignore_eos)
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
             print("Profiler started")
 
     print(f"Traffic request rate: {request_rate}")
+    print(f"Maximum request concurrency: {max_concurrency}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
+
+    # This can be used once the minimum Python version is 3.10 or higher,
+    # and it will simplify the code in limited_request_func.
+    #    semaphore = (asyncio.Semaphore(max_concurrency)
+    #                 if max_concurrency else contextlib.nullcontext())
+    semaphore = (asyncio.Semaphore(max_concurrency)
+                 if max_concurrency else None)
+
+    async def limited_request_func(request_func_input, pbar):
+        if semaphore is None:
+            return await request_func(request_func_input=request_func_input,
+                                      pbar=pbar)
+        async with semaphore:
+            return await request_func(request_func_input=request_func_input,
+                                      pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len, mm_content = request
-        request_func_input = RequestFuncInput(
-            model=model_id,
-            prompt=prompt,
-            api_url=api_url,
-            prompt_len=prompt_len,
-            output_len=output_len,
-            logprobs=logprobs,
-            best_of=best_of,
-            use_beam_search=use_beam_search,
-            multi_modal_content=mm_content,
-        )
+        request_func_input = RequestFuncInput(model=model_id,
+                                              prompt=prompt,
+                                              api_url=api_url,
+                                              prompt_len=prompt_len,
+                                              output_len=output_len,
+                                              logprobs=logprobs,
+                                              best_of=best_of,
+                                              multi_modal_content=mm_content,
+                                              ignore_eos=ignore_eos)
         tasks.append(
             asyncio.create_task(
-                request_func(request_func_input=request_func_input,
-                             pbar=pbar)))
+                limited_request_func(request_func_input=request_func_input,
+                                     pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
     if profile:
@@ -482,7 +495,6 @@ async def benchmark(
             output_len=test_output_len,
             logprobs=logprobs,
             best_of=best_of,
-            use_beam_search=use_beam_search,
         )
         profile_output = await request_func(request_func_input=profile_input)
         if profile_output.success:
@@ -540,7 +552,7 @@ async def benchmark(
         # E.g., "Time to First Token"
         metric_header: str,
     ):
-        # This function print and add statistics of the specified
+        # This function prints and adds statistics of the specified
         # metric.
         if metric_attribute_name not in selected_percentile_metrics:
             return
@@ -652,6 +664,7 @@ def main(args: argparse.Namespace):
             dataset_split=args.hf_split,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            random_seed=args.seed,
             fixed_output_len=args.hf_output_len,
         )
 
@@ -678,7 +691,6 @@ def main(args: argparse.Namespace):
             input_requests=input_requests,
             logprobs=args.logprobs,
             best_of=args.best_of,
-            use_beam_search=args.use_beam_search,
             request_rate=args.request_rate,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
@@ -686,6 +698,8 @@ def main(args: argparse.Namespace):
             selected_percentiles=[
                 float(p) for p in args.metric_percentiles.split(",")
             ],
+            ignore_eos=args.ignore_eos,
+            max_concurrency=args.max_concurrency,
         ))
 
     # Save config and results to json
@@ -699,7 +713,6 @@ def main(args: argparse.Namespace):
         result_json["model_id"] = model_id
         result_json["tokenizer_id"] = tokenizer_id
         result_json["best_of"] = args.best_of
-        result_json["use_beam_search"] = args.use_beam_search
         result_json["num_prompts"] = args.num_prompts
 
         # Metadata
@@ -716,18 +729,21 @@ def main(args: argparse.Namespace):
         # Traffic
         result_json["request_rate"] = (
             args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["max_concurrency"] = args.max_concurrency
 
         # Merge with benchmark result
         result_json = {**result_json, **benchmark_result}
 
         # Save to file
         base_model_id = model_id.split("/")[-1]
-        file_name = f"{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"  #noqa
+        max_concurrency_str = (f"-concurrency{args.max_concurrency}"
+                               if args.max_concurrency is not None else "")
+        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:
             file_name = os.path.join(args.result_dir, file_name)
-        with open(file_name, "w") as outfile:
+        with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
 
 
@@ -773,6 +789,19 @@ if __name__ == "__main__":
                         default=None,
                         help="Path to the sharegpt/sonnet dataset. "
                         "Or the huggingface dataset ID if using HF dataset.")
+    parser.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help="Maximum number of concurrent requests. This can be used "
+        "to help simulate an environment where a higher level component "
+        "is enforcing a maximum number of concurrent requests. While the "
+        "--request-rate argument controls the rate at which requests are "
+        "initiated, this argument will control how many are actually allowed "
+        "to execute at a time. This means that when used in combination, the "
+        "actual request rate may be lower than specified with --request-rate, "
+        "if the server is not processing requests fast enough to keep up.")
+
     parser.add_argument(
         "--model",
         type=str,
@@ -864,6 +893,11 @@ if __name__ == "__main__":
         "{backend}-{args.request_rate}qps-{base_model_id}-{current_dt}.json"
         " format.",
     )
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request."
+        "Warning: ignore_eos is not supported in deepspeed_mii and tgi.")
     parser.add_argument(
         "--percentile-metrics",
         type=str,

@@ -2,11 +2,11 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 from huggingface_hub import HfApi, hf_hub_download
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 # yapf: disable
-from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
 # yapf: enable
@@ -30,12 +30,12 @@ def find_tokenizer_file(files: List[str]):
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure only one Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure only one Mistral "
+                      f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure that a Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure that a Mistral "
+                      f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
@@ -166,6 +166,10 @@ class MistralTokenizer:
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
 
+        last_message = cast(Dict[str, Any], messages[-1])
+        if last_message["role"] == "assistant":
+            last_message["prefix"] = True
+
         request = ChatCompletionRequest(messages=messages,
                                         tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
@@ -175,10 +179,29 @@ class MistralTokenizer:
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if isinstance(self.tokenizer, Tekkenizer):
-            return "".join(t for t in tokens
-                           if t not in self.tokenizer._all_special_tokens)
+            tokens = [
+                t for t in tokens
+                if t not in self.tokenizer._all_special_tokens
+            ]
+
+            if any(isinstance(t, bytes) for t in tokens):
+                # we need to encode and decode all tokens again
+                shift = self.tokenizer.num_special_tokens
+                byte_tokens = [
+                    t.encode("utf-8") if not isinstance(t, bytes) else t
+                    for t in tokens
+                ]
+                ids = [
+                    self.tokenizer._tekken_token2id_nospecial[t] + shift
+                    for t in byte_tokens
+                ]
+                decoded = self.tokenizer.decode(ids)
+            else:
+                decoded = "".join(tokens)
         else:
-            return self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+            decoded = self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+
+        return decoded
 
     def decode(self, ids: Union[List[int], int]) -> str:
         if isinstance(ids, int):
@@ -200,4 +223,11 @@ class MistralTokenizer:
                               self.tokenizer)
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
+
+        if any(t.strip() == "�" for t in tokens):
+            # if any stripped decoded token is undefined
+            # because it's invalid unicode then pass bytes
+            # See: https://github.com/vllm-project/vllm/pull/8640
+            tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
+
         return tokens

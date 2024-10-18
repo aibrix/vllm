@@ -6,8 +6,7 @@ import weakref
 import pytest
 
 from vllm import LLM
-
-from ...conftest import cleanup
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "facebook/opt-125m"
 
@@ -27,7 +26,7 @@ def llm():
 
         del llm
 
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup
@@ -44,7 +43,7 @@ def test_offline_mode(llm: LLM, monkeypatch):
         LLM(model=MODEL_NAME,
             max_num_batched_tokens=4096,
             tensor_parallel_size=1,
-            gpu_memory_utilization=0.10,
+            gpu_memory_utilization=0.20,
             enforce_eager=True)
     finally:
         # Reset the environment after the test

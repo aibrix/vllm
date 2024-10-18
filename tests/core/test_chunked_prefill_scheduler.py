@@ -45,7 +45,9 @@ def test_simple():
 
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
 
@@ -75,24 +77,29 @@ def test_chunk():
     max_seqs = 60
     max_model_len = 80
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 32
+    cache_config.num_gpu_blocks = 32
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
 
     # Add seq groups to scheduler.
     for i in range(2):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
 
     # Verify the second request is chunked.
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    print()
     assert set(get_sequence_groups(out)) == set(running)
     assert seq_group_meta[0].token_chunk_size == 60
     # Verify it is chunked.
@@ -118,19 +125,23 @@ def test_complex():
     max_seqs = 60
     max_model_len = 80
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 64
+    cache_config.num_gpu_blocks = 64
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
 
     # Add seq groups to scheduler.
     for i in range(2):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
         assert seq_group.is_prefill()
@@ -151,7 +162,9 @@ def test_complex():
 
     # Add 2 more requests.
     for i in range(2, 4):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
 
@@ -182,10 +195,12 @@ def test_maximal_decoding():
     max_seqs = 2
     max_model_len = 8
     max_num_batched_tokens = 2
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -194,7 +209,9 @@ def test_maximal_decoding():
 
     # Add seq groups to scheduler.
     for i in range(2):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=2)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=2,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
         assert seq_group.is_prefill()
@@ -211,7 +228,9 @@ def test_maximal_decoding():
     append_new_token(running[0], 1)
 
     # Create one more seq_group.
-    _, seq_group = create_dummy_prompt("3", prompt_length=2)
+    _, seq_group = create_dummy_prompt("3",
+                                       prompt_length=2,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
@@ -269,17 +288,21 @@ def test_prompt_limit():
     max_seqs = 32
     max_model_len = 64
     max_num_batched_tokens = 32
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
 
-    _, seq_group = create_dummy_prompt("1", prompt_length=48)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=48,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
@@ -303,12 +326,13 @@ def test_prompt_limit_exceed():
                                        max_model_len,
                                        enable_chunked_prefill=True)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
-
-    _, seq_group = create_dummy_prompt("2", prompt_length=48)
+    _, seq_group = create_dummy_prompt("2",
+                                       prompt_length=48,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     assert seq_group.is_prefill()
@@ -323,16 +347,21 @@ def test_swap():
     max_seqs = 30
     max_model_len = 200
     max_num_batched_tokens = 30
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
@@ -374,16 +403,21 @@ def test_running_prefill_prioritized_over_swap():
     max_seqs = 30
     max_model_len = 200
     max_num_batched_tokens = 30
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 32
+    cache_config.num_gpu_blocks = 32
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
@@ -413,7 +447,9 @@ def test_running_prefill_prioritized_over_swap():
     scheduler.block_manager.can_swap_in = MagicMock()
     scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
 
-    _, seq_group2 = create_dummy_prompt("2", prompt_length=60)
+    _, seq_group2 = create_dummy_prompt("2",
+                                        prompt_length=60,
+                                        block_size=block_size)
     scheduler.add_seq_group(seq_group2)
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
@@ -461,16 +497,20 @@ def test_chunked_prefill_preempt():
     max_seqs = 30
     max_model_len = 200
     max_num_batched_tokens = 30
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
-    _, seq_group = create_dummy_prompt("1", prompt_length=60)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     _, out = schedule_and_update_computed_tokens(scheduler)
     # The request is chunked.
@@ -522,17 +562,21 @@ def test_chunked_prefill_max_seqs():
     max_seqs = 2
     max_model_len = 80
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = 128
+    cache_config.num_gpu_blocks = 128
     scheduler = Scheduler(scheduler_config, cache_config, None)
     running: List[SequenceGroup] = []
 
-    _, seq_group = create_dummy_prompt("1", prompt_length=65)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=65,
+                                       block_size=block_size)
     scheduler.add_seq_group(seq_group)
     running.append(seq_group)
     # The first prefill is chunked.
@@ -542,7 +586,9 @@ def test_chunked_prefill_max_seqs():
 
     # Add new requests.
     for i in range(4):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=65)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=65,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
 
@@ -570,10 +616,12 @@ def test_perfix_caching():
     max_seqs = 10
     max_model_len = 80
     max_num_batched_tokens = 64
-    scheduler_config = SchedulerConfig(max_num_batched_tokens,
-                                       max_seqs,
-                                       max_model_len,
-                                       enable_chunked_prefill=True)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+    )
     cache_config = CacheConfig(block_size,
                                1.0,
                                1,

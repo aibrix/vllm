@@ -18,13 +18,17 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              ErrorResponse, UsageInfo)
+                                              ErrorResponse,
+                                              RequestResponseMetadata,
+                                              UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
+                                                    LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
@@ -45,7 +49,7 @@ class OpenAIServingCompletion(OpenAIServing):
         self,
         engine_client: EngineClient,
         model_config: ModelConfig,
-        served_model_names: List[str],
+        base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
@@ -54,7 +58,7 @@ class OpenAIServingCompletion(OpenAIServing):
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
-                         served_model_names=served_model_names,
+                         base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
@@ -89,9 +93,13 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        model_name = self.served_model_names[0]
+        model_name = self.base_model_paths[0].name
         request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.time())
+
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[RequestOutput, None]] = []
@@ -103,8 +111,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            guided_decode_logits_processor = (
-                await self._guided_decode_logits_processor(request, tokenizer))
             prompts = list(
                 self._tokenize_prompt_input_or_inputs(
                     request,
@@ -115,11 +121,15 @@ class OpenAIServingCompletion(OpenAIServing):
                 ))
 
             for i, prompt_inputs in enumerate(prompts):
-                sampling_params = request.to_sampling_params(
-                    tokenizer,
-                    guided_decode_logits_processor,
-                    default_max_tokens=self.max_model_len -
-                    len(prompt_inputs["prompt_token_ids"]))
+                sampling_params: Union[SamplingParams, BeamSearchParams]
+                default_max_tokens = self.max_model_len - len(
+                    prompt_inputs["prompt_token_ids"])
+                if request.use_beam_search:
+                    sampling_params = request.to_beam_search_params(
+                        default_max_tokens)
+                else:
+                    sampling_params = request.to_sampling_params(
+                        default_max_tokens)
 
                 request_id_item = f"{request_id}-{i}"
 
@@ -138,14 +148,25 @@ class OpenAIServingCompletion(OpenAIServing):
                         raw_request.headers):
                     log_tracing_disabled_warning()
 
-                generator = self.engine_client.generate(
-                    {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
-                    sampling_params,
-                    request_id_item,
-                    lora_request=lora_request,
-                    prompt_adapter_request=prompt_adapter_request,
-                    trace_headers=trace_headers,
-                )
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.engine_client.beam_search(
+                        prompt_inputs["prompt_token_ids"],
+                        request_id_item,
+                        sampling_params,
+                    )
+                else:
+                    generator = self.engine_client.generate(
+                        {
+                            "prompt_token_ids":
+                            prompt_inputs["prompt_token_ids"]
+                        },
+                        sampling_params,
+                        request_id_item,
+                        lora_request=lora_request,
+                        prompt_adapter_request=prompt_adapter_request,
+                        trace_headers=trace_headers,
+                        priority=request.priority,
+                    )
 
                 generators.append(generator)
         except ValueError as e:
@@ -164,13 +185,15 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Streaming response
         if stream:
-            return self.completion_stream_generator(request,
-                                                    result_generator,
-                                                    request_id,
-                                                    created_time,
-                                                    model_name,
-                                                    num_prompts=len(prompts),
-                                                    tokenizer=tokenizer)
+            return self.completion_stream_generator(
+                request,
+                result_generator,
+                request_id,
+                created_time,
+                model_name,
+                num_prompts=len(prompts),
+                tokenizer=tokenizer,
+                request_metadata=request_metadata)
 
         # Non-streaming response
         final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
@@ -197,6 +220,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 created_time,
                 model_name,
                 tokenizer,
+                request_metadata,
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
@@ -226,6 +250,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         num_prompts: int,
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -249,8 +274,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
-                    # TODO(simon): optimize the performance by avoiding full
-                    # text O(n^2) sending.
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
@@ -281,6 +304,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_text = output.text
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
+
+                        if not delta_text and not delta_token_ids \
+                            and not previous_num_tokens[i]:
+                            # Chunked prefill case, don't return empty chunks
+                            continue
 
                     if request.logprobs is not None:
                         assert out_logprobs is not None, (
@@ -345,6 +373,14 @@ class OpenAIServingCompletion(OpenAIServing):
                     exclude_unset=False, exclude_none=True))
                 yield f"data: {final_usage_data}\n\n"
 
+            # report to FastAPI middleware aggregate usage across all choices
+            total_prompt_tokens = sum(num_prompt_tokens)
+            total_completion_tokens = sum(previous_num_tokens)
+            request_metadata.final_usage_info = UsageInfo(
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_prompt_tokens + total_completion_tokens)
+
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
@@ -359,6 +395,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
         tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
         choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
@@ -431,6 +468,8 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+
+        request_metadata.final_usage_info = usage
 
         return CompletionResponse(
             id=request_id,

@@ -262,12 +262,13 @@ class GroupCoordinator:
             with maybe_pynccl_context:
                 yield graph_capture_context
 
-    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+    def all_reduce(self, input_: torch.Tensor, **kwargs) -> torch.Tensor:
         """
         NOTE: This operation will be applied in-place or out-of-place. 
         Always assume this function modifies its input, but use the return
         value as the output.
         """
+        operation: Optional[torch.distributed.ReduceOp] = kwargs.get('op', torch.distributed.ReduceOp.SUM)
         ca_comm = self.ca_comm
 
         # Bypass the function if we are using only 1 GPU.
@@ -290,7 +291,8 @@ class GroupCoordinator:
             import intel_extension_for_pytorch as ipex
             ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+            torch.distributed.all_reduce(input_, group=self.device_group, op = operation)
+            # torch.distributed.all_reduce(input_, group=self.device_group)
         return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:

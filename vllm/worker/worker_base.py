@@ -308,7 +308,19 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if inputs is None:
             return None
 
-        model_input, cache_hints, worker_input, kwargs = inputs
+        cache_hints = None
+        if len(inputs) == 4:
+            model_input, cache_hints, worker_input, kwargs = inputs
+        else:
+            model_input, worker_input, kwargs = inputs
+
+        cache_hints = None
+        kv_caches = self.kv_cache[worker_input.virtual_engine]
+        if self.model_runner.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
+            cache_hints = self.model_runner.vineyard_llm_cache.prefetch_kv_caches(
+                None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
+                kv_caches, 
+                getattr(self.model_runner, 'block_size', None))
         num_steps = worker_input.num_steps
 
         self.execute_worker(worker_input)
@@ -342,7 +354,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
             self.model_runner.vineyard_llm_cache.update_kv_caches(
                 cache_hints, 
-                execute_model_req.seq_group_metadata_list, 
+                None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
                 self.kv_cache[worker_input.virtual_engine], 
                 getattr(self.model_runner, 'block_size', None))
 

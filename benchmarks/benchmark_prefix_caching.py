@@ -28,6 +28,7 @@ ShareGPT example usage:
 import json
 import random
 import time
+import os
 from typing import List, Optional, Tuple
 
 from transformers import PreTrainedTokenizerBase
@@ -138,6 +139,8 @@ def main(args):
               enable_prefix_caching=args.enable_prefix_caching,
               enable_chunked_prefill=args.enable_chunked_prefill,
               max_num_seqs = args.max_num_seqs,
+              otlp_traces_endpoint=os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"],
+              collect_detailed_traces="all",
             )
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)

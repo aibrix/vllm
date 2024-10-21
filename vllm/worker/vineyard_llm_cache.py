@@ -146,7 +146,11 @@ class VineyardLLMCache:
             context_len = seq_data.get_num_computed_tokens()
             token_chunk_size = seq_group_metadata.token_chunk_size
             tokens = seq_data.get_prompt_token_ids()
-
+            print("-------")
+            print(f"context_len: {context_len}")
+            print(f"token_chunk_size: {token_chunk_size}")
+            print(f"token length: {len(tokens)}")
+            print("-------")
             # leave at least one token unmatched
             token_chunk_size -= 1
 
@@ -155,6 +159,11 @@ class VineyardLLMCache:
             query_token_size = context_len + token_chunk_size - query_context_len
             query_prefix = tokens[:query_context_len]
             query_tokens = tokens[query_context_len:query_context_len + query_token_size]
+
+            print(query_context_len)
+            print(query_token_size)
+            print("")
+
             query_args = [
                 seq_id,
                 context_len,
@@ -179,13 +188,13 @@ class VineyardLLMCache:
              query_tokens
             ) = query_args
 
-        start_time = time.time()
+        start_time = time.perf_counter()
         matched = self.cache.query(
             prefix=query_prefix,
             tokens=query_tokens,
             kv_cache_list=self.tensors[:query_token_size],
         )
-        duration = time.time() - start_time
+        duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
         self.metrics.normalized_time_query.append(duration/len(tokens))
         # synchronized across tensor parallel ranks
@@ -193,12 +202,16 @@ class VineyardLLMCache:
         # torch.distributed.all_reduce(matched_tensor, op=torch.distributed.ReduceOp.MIN,
         #                              group=get_tensor_model_parallel_group())
         matched = matched_tensor[0].item()
+        print("^^^^^^^^^^^^^^^^^")
+        print(f"cache fetching matched tokens: {matched}")
+        print(f"cache fetch duration: {duration}")
 
         # shift
         offset = context_len % self.chunk_size
         matched -= offset
 
-        matched = min(matched, token_chunk_size - 1)
+        # no need to minus 1 one more time. matched = min(matched, token_chunk_size - 1)
+        matched = min(matched, token_chunk_size)
         if matched <= 0:
             return seq_id, 0
         if seq_group_metadata is not None:
@@ -228,8 +241,10 @@ class VineyardLLMCache:
         copy_start.record()
         buffer = self.buffer[:, :, offset:offset+matched].cuda()
         copy_end.record()
-        torch.cuda.synchronize()
+        copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
+        print(f"dram -> gpu memory copy duration: {duration}")
+        print("^^^^^^^^^^^^^^^^^")
         self.metrics.time_load.append(duration)
         self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
         
@@ -370,21 +385,23 @@ class VineyardLLMCache:
         for j in range(self.layer):
             self.buffer[:, j, :update_token_size].copy_(
                 kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
-        torch.cuda.synchronize()
         end_unload.record()
+        end_unload.synchronize()
         duration = start_unload.elapsed_time(end_unload) / 1000.0
+        print(f"gpu memory -> dram copy duration: {duration}")
         self.metrics.time_unload.append(duration)   
         self.metrics.normalized_time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
         # print(f"time unload avg {np.mean(self.time_unload)} std {np.std(self.time_unload)}")
         
-        start_time = time.time()
+        start_time = time.perf_counter()
         # updates into vineyard
         updated = self.cache.update(
             prefix=update_prefix,
             tokens=update_tokens,
             kv_cache_list=self.tensors[:update_token_size],
         )
-        duration = time.time() - start_time
+        duration = time.perf_counter() - start_time
+        print(f"cache update token kv cache duration: {duration}")
         self.metrics.time_update.append(duration)   
         self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
         # print(f"time update avg {np.mean(self.time_update)} std {np.std(self.time_update)}")

@@ -309,6 +309,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             return None
 
         model_input, cache_hints, worker_input, kwargs = inputs
+
+        finish_processing_time = time.perf_counter()
+        input_processing_time = finish_processing_time - start_time
+        print('************')
+        print(f"cache_hints <request_id: tokens>: {cache_hints}")
+        print(f"input_processing_time: {input_processing_time}")
         num_steps = worker_input.num_steps
 
         self.execute_worker(worker_input)
@@ -337,13 +343,23 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             **kwargs,
         )
 
-        model_execute_time = time.perf_counter() - start_time
+        finish_model_execution_time = time.perf_counter()
+        model_execute_time = finish_model_execution_time - start_time
+        model_execute_time_input_processing_exclusive = finish_model_execution_time - finish_processing_time
+        print(f"model_execute_time: {model_execute_time}")
+        print(f"model_execute_time_input_processing_exclusive: {model_execute_time_input_processing_exclusive}")
+        print('************')
+
+        # is there a way to skip it? seems it updates the kv all the time.
         if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
             self.model_runner.vineyard_llm_cache.update_kv_caches(
                 cache_hints, 
                 execute_model_req.seq_group_metadata_list, 
                 self.kv_cache[worker_input.virtual_engine], 
                 getattr(self.model_runner, 'block_size', None))
+
+        duration = time.perf_counter() - finish_model_execution_time
+        print(f"cache_update_time: {duration}")
 
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors

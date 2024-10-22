@@ -330,6 +330,11 @@ class VineyardLLMCache:
             token_chunk_size = seq_group_metadata.token_chunk_size
             tokens = seq_data.get_prompt_token_ids()
 
+            print("-------")
+            print(f"context_len: {context_len}")
+            print(f"token_chunk_size: {token_chunk_size}")
+            print(f"token length: {len(tokens)}")
+
             # alignment `context_len` to `self.chunk_size`
             update_context_len = context_len - context_len % self.chunk_size
             update_token_size = context_len + token_chunk_size - update_context_len
@@ -344,6 +349,11 @@ class VineyardLLMCache:
                 update_prefix,
                 update_tokens,
             ]
+            print(f"update_context_len: {update_context_len}")
+            print(f"update_token_size: {update_token_size}")
+            print("-------")
+
+
             # torch.distributed.broadcast_object_list(update_args, src=0,
             #                                         group=get_tensor_model_parallel_group())
         else:
@@ -358,6 +368,9 @@ class VineyardLLMCache:
             ) = update_args
         if update_token_size <= 0:
             # restore the seq_group_metadata's and seq's metadata
+            print("called 1 ")
+            print(matched[seq_id])
+            print(seq_group_metadata.token_chunk_size)
             if seq_group_metadata is not None:
                 seq_data.update_num_computed_tokens(-matched[seq_id])
                 seq_group_metadata.token_chunk_size += matched[seq_id]
@@ -439,6 +452,7 @@ class VineyardLLMCache:
         num_prefill_requests = num_prefill_requests[0]
 
         updated = {}
+        print(f"prefix request length: {len(prefill_requests)}, num_prefill_requests: {num_prefill_requests}")
         for seq_group_meta in prefill_requests:
             seq_id, seq_updated = self.update_seq_kv_caches(
                 matched, seq_group_meta, kv_caches, block_size,

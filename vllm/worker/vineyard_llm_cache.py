@@ -152,7 +152,7 @@ class VineyardLLMCache:
             print(f"token length: {len(tokens)}")
             print("-------")
             # leave at least one token unmatched
-            token_chunk_size -= 1
+            # token_chunk_size -= 1
 
             # alignment `context_len` to `self.chunk_size`
             query_context_len = context_len - context_len % self.chunk_size
@@ -211,7 +211,7 @@ class VineyardLLMCache:
         matched -= offset
 
         # no need to minus 1 one more time. matched = min(matched, token_chunk_size - 1)
-        matched = min(matched, token_chunk_size)
+        matched = min(matched, token_chunk_size - 1)
         if matched <= 0:
             return seq_id, 0
         if seq_group_metadata is not None:

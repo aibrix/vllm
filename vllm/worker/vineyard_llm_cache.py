@@ -8,9 +8,7 @@ import torch.distributed
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
-                                             broadcast_object_list,
-                                             broadcast,
-                                             all_reduce,
+                                             get_tp_group,
                                              get_tensor_model_parallel_rank,
                                              get_tensor_model_parallel_world_size)
 from vllm.sequence import (SequenceData, SequenceGroupMetadata)
@@ -115,7 +113,6 @@ class VineyardLLMCache:
         block_size: int,
     ) -> Tuple[str, int]:
         from vllm._custom_ops import reshape_and_cache_flash
-
         if seq_group_metadata is not None:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -144,10 +141,10 @@ class VineyardLLMCache:
                 query_prefix,
                 query_tokens,
             ]
-            broadcast_object_list(query_args, src=0)
+            get_tp_group().broadcast_object_list(query_args, src=0)
         else:
             query_args = [None, None, None, None, None, None, None]
-            broadcast_object_list(query_args, src=0)
+            get_tp_group().broadcast_object_list(query_args, src=0)
             (seq_id,
              context_len,
              token_chunk_size,
@@ -166,7 +163,7 @@ class VineyardLLMCache:
 
         # synchronized across tensor parallel ranks
         matched_tensor = torch.tensor([matched], dtype=torch.long, device='cuda')
-        all_reduce(input_=matched_tensor, op=torch.distributed.ReduceOp.MIN)
+        get_tp_group().all_reduce(input_=matched_tensor, op=torch.distributed.ReduceOp.MIN)
         matched = matched_tensor[0].item()
 
         # shift
@@ -186,12 +183,10 @@ class VineyardLLMCache:
                 slot = block_number * block_size + block_offset
                 slot_mapping.append(slot)
             slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
-            broadcast(slot_mapping, src=0)
+            get_tp_group().broadcast(slot_mapping, src=0)
         else:
             slot_mapping = torch.zeros((matched,), dtype=torch.long, device='cuda')
-            broadcast(slot_mapping, src=0)
-
-
+            get_tp_group().broadcast(slot_mapping, src=0)
         # save to GPU kv cache
         buffer = self.buffer[:, :, offset:offset+matched].cuda()
         for j in range(self.layer):
@@ -226,17 +221,17 @@ class VineyardLLMCache:
         '''
         if block_size is None or kv_caches[0] is None:  # profile run
             return {}
-
         if seq_group_metadata_list is not None:
             prefill_requests = []
             for seq_group_meta in seq_group_metadata_list:
                 if seq_group_meta.is_prompt:
                     prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            broadcast_object_list(num_prefill_requests, src=0)
+            group = get_tp_group()
+            group.broadcast_object_list(num_prefill_requests, src=0)
         else:
             num_prefill_requests = [None]
-            broadcast_object_list(num_prefill_requests, src=0)
+            get_tp_group().broadcast_object_list(num_prefill_requests, src=0)
             prefill_requests = [None] * num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
 
@@ -281,17 +276,16 @@ class VineyardLLMCache:
                 update_prefix,
                 update_tokens,
             ]
-            broadcast_object_list(update_args, src=0)
+            get_tp_group().broadcast_object_list(update_args, src=0)
         else:
             update_args = [None, None, None, None, None]
-            broadcast_object_list(update_args, src=0)
+            get_tp_group().broadcast_object_list(update_args, src=0)
             (seq_id,
              update_context_len,
              update_token_size,
              update_prefix,
              update_tokens,
             ) = update_args
-
         if update_token_size <= 0:
             # restore the seq_group_metadata's and seq's metadata
             if seq_group_metadata is not None:
@@ -308,10 +302,10 @@ class VineyardLLMCache:
                 slot = block_number * block_size + block_offset
                 slot_mapping.append(slot)
             slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
-            broadcast(slot_mapping, src=0)
+            get_tp_group().broadcast(slot_mapping, src=0)
         else:
             slot_mapping = torch.zeros((update_token_size,), dtype=torch.long, device='cuda')
-            broadcast(slot_mapping, src=0)
+            get_tp_group().broadcast(slot_mapping, src=0)
 
         # fetch from GPU kv cache
         for j in range(self.layer):
@@ -348,10 +342,10 @@ class VineyardLLMCache:
                 if seq_group_meta.is_prompt:
                     prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            broadcast_object_list(num_prefill_requests, src=0)
+            get_tp_group().broadcast_object_list(num_prefill_requests, src=0)
         else:
             num_prefill_requests = [None]
-            broadcast_object_list(num_prefill_requests, src=0)
+            get_tp_group().broadcast_object_list(num_prefill_requests, src=0)
             prefill_requests = [None] * num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
 

@@ -478,7 +478,6 @@ class LLMEngine:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        logger.info(f"LLMEngine _initialize_kv_caches cache_service_metrics {self.cache_service_metrics}")
         self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks, cache_service_metrics = self.cache_service_metrics)
 
     @classmethod

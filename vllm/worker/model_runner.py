@@ -1134,7 +1134,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
     
     def set_cache_service_metrics(self, metrics: CacheServiceMetrics) -> None:
-        #logger.info(f"model_runner set_cache_service_metrics {metrics} ")
         if self.vineyard_llm_cache != None:
             self.vineyard_llm_cache.metrics = metrics
 

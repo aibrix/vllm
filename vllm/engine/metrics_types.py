@@ -73,6 +73,7 @@ class StatLoggerBase(ABC):
         self.local_interval = local_interval
         self.external_cache_service_metrics = CacheServiceMetrics
         self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+        
     @abstractmethod
     def log(self, stats: Stats) -> None:
         raise NotImplementedError

@@ -26,21 +26,21 @@ except ImportError:
 logger = init_logger(__name__)
 
 class CacheServiceMetrics:
-    hit_tokens: int = 0
-    total_tokens: int = 0
-    hit_blocks: int = 0
-    total_blocks: int = 0
-    counter: int = 0
-    time_query: list = []
-    time_load: list = []
-    time_reshape: list = []
-    time_unload: list = []
-    time_update: list = []
-    normalized_time_query: list = []
-    normalized_time_load: list = []
-    normalized_time_reshape: list = []
-    normalized_time_unload: list = []
-    normalized_time_update: list = []
+    hit_tokens: int = 0 # Total number of tokens hit. 
+    total_tokens: int = 0 # Total number of tokens requested. 
+    hit_blocks: int = 0 # Total number of blocks hit. 
+    total_blocks: int = 0  # Total number of blocks requested. 
+    counter: int = 0 # Total number of measurements. 
+    time_query: list = [] # Times used query cache from cache service. 
+    time_load: list = [] # Times used load fetched cache to device memory. 
+    time_reshape: list = [] # Times used reshaping tensors for flash attention KV format. 
+    time_unload: list = [] # Times used move computed KV from device memory. 
+    time_update: list = [] # Times used update computed KV to cache service. 
+    normalized_time_query: list = [] # Times used query cache from cache service normalized by number of tokens. 
+    normalized_time_load: list = [] # Times used load fetched cache to device memory normalized by number of tokens. 
+    normalized_time_reshape: list = [] # Times used reshaping tensors for flash attention KV format normalized by number of tokens. 
+    normalized_time_unload: list = [] # Times used move computed KV from device memory normalized by number of tokens. 
+    normalized_time_update: list = [] # Times used update computed KV to cache service normalized by number of tokens. 
     
      
     
@@ -375,7 +375,6 @@ class VineyardLLMCache:
         duration = start_unload.elapsed_time(end_unload) / 1000.0
         self.metrics.time_unload.append(duration)   
         self.metrics.normalized_time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
-        # print(f"time unload avg {np.mean(self.time_unload)} std {np.std(self.time_unload)}")
         
         start_time = time.time()
         # updates into vineyard
@@ -387,7 +386,6 @@ class VineyardLLMCache:
         duration = time.time() - start_time
         self.metrics.time_update.append(duration)   
         self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
-        # print(f"time update avg {np.mean(self.time_update)} std {np.std(self.time_update)}")
 
         # restore the seq_group_metadata's and seq's metadata
         if seq_group_metadata is not None:

@@ -26,6 +26,8 @@ from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs, is_list_of
 
+import numpy as np
+
 logger = init_logger(__name__)
 
 
@@ -716,10 +718,14 @@ class LLM:
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        times_to_first_token = []
+        normalized_times_to_first_token = []
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
+                    times_to_first_token.append(output.metrics.first_token_time - output.metrics.first_scheduled_time)
+                    normalized_times_to_first_token.append((output.metrics.first_token_time - output.metrics.first_scheduled_time)/len(output.prompt_token_ids))
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
@@ -734,10 +740,35 @@ class LLM:
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
                         pbar.update(1)
+            if self.llm_engine.cache_service_metrics is not None:
+                logger.info(
+                    "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%, total tokens hit %d, number of measurement collected %d",
+                    0 if self.llm_engine.cache_service_metrics.total_tokens == 0 else self.llm_engine.cache_service_metrics.hit_tokens/self.llm_engine.cache_service_metrics.total_tokens * 100,
+                    0 if self.llm_engine.cache_service_metrics.total_blocks == 0 else self.llm_engine.cache_service_metrics.hit_blocks/self.llm_engine.cache_service_metrics.total_blocks * 100, 
+                    self.llm_engine.cache_service_metrics.hit_tokens, 
+                    self.llm_engine.cache_service_metrics.counter,  
+                )
+                logger.info(
+                    "Cache service time query avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time load avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time reshape avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time unload avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time update avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time to first token avg %.4f std %.4f median %.4f, normalized time to first token %.4f std %.4f median %.4f",
+                    np.mean(self.llm_engine.cache_service_metrics.time_query), np.std(self.llm_engine.cache_service_metrics.time_query), np.median(self.llm_engine.cache_service_metrics.time_query),
+                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_query), np.std(self.llm_engine.cache_service_metrics.normalized_time_query), np.median(self.llm_engine.cache_service_metrics.normalized_time_query),
+                    np.mean(self.llm_engine.cache_service_metrics.time_load), np.std(self.llm_engine.cache_service_metrics.time_load), np.median(self.llm_engine.cache_service_metrics.time_load),
+                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_load), np.std(self.llm_engine.cache_service_metrics.normalized_time_load), np.median(self.llm_engine.cache_service_metrics.normalized_time_load),
+                    np.mean(self.llm_engine.cache_service_metrics.time_reshape), np.std(self.llm_engine.cache_service_metrics.time_reshape), np.median(self.llm_engine.cache_service_metrics.time_reshape),
+                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_reshape), np.std(self.llm_engine.cache_service_metrics.normalized_time_reshape), np.median(self.llm_engine.cache_service_metrics.normalized_time_reshape),
+                    np.mean(self.llm_engine.cache_service_metrics.time_unload), np.std(self.llm_engine.cache_service_metrics.time_unload), np.median(self.llm_engine.cache_service_metrics.time_unload), 
+                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_unload), np.std(self.llm_engine.cache_service_metrics.normalized_time_unload), np.median(self.llm_engine.cache_service_metrics.normalized_time_unload),
+                    np.mean(self.llm_engine.cache_service_metrics.time_update), np.std(self.llm_engine.cache_service_metrics.time_update), np.median(self.llm_engine.cache_service_metrics.time_update),
+                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_update), np.std(self.llm_engine.cache_service_metrics.normalized_time_update), np.median(self.llm_engine.cache_service_metrics.normalized_time_update),
+                    np.mean(times_to_first_token), np.std(times_to_first_token), np.median(times_to_first_token),
+                    np.mean(normalized_times_to_first_token), np.std(normalized_times_to_first_token), np.median(normalized_times_to_first_token),
+                    
+                )
+
 
         # Restore original behavior
         self.llm_engine.step_return_finished_only = False
-
+ 
         if use_tqdm:
             pbar.close()
         # Sort the outputs by request ID.

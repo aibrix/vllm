@@ -179,13 +179,13 @@ class VineyardLLMCache:
              query_tokens
             ) = query_args
 
-        start_time = time.time()
+        start_time = time.perf_counter()
         matched = self.cache.query(
             prefix=query_prefix,
             tokens=query_tokens,
             kv_cache_list=self.tensors[:query_token_size],
         )
-        duration = time.time() - start_time
+        duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
         self.metrics.normalized_time_query.append(duration/len(tokens))
         # synchronized across tensor parallel ranks
@@ -198,6 +198,8 @@ class VineyardLLMCache:
         offset = context_len % self.chunk_size
         matched -= offset
 
+        # we force to use token_chunk_size - 1 to trigger KV recomputation
+        # TODO: this should be revisited later. We are looking for solutions to fully avoid computation.
         matched = min(matched, token_chunk_size - 1)
         if matched <= 0:
             return seq_id, 0
@@ -228,7 +230,7 @@ class VineyardLLMCache:
         copy_start.record()
         buffer = self.buffer[:, :, offset:offset+matched].cuda()
         copy_end.record()
-        torch.cuda.synchronize()
+        copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
         self.metrics.time_load.append(duration)
         self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
@@ -370,20 +372,20 @@ class VineyardLLMCache:
         for j in range(self.layer):
             self.buffer[:, j, :update_token_size].copy_(
                 kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
-        torch.cuda.synchronize()
         end_unload.record()
+        end_unload.synchronize()
         duration = start_unload.elapsed_time(end_unload) / 1000.0
         self.metrics.time_unload.append(duration)   
         self.metrics.normalized_time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
         
-        start_time = time.time()
+        start_time = time.perf_counter()
         # updates into vineyard
         updated = self.cache.update(
             prefix=update_prefix,
             tokens=update_tokens,
             kv_cache_list=self.tensors[:update_token_size],
         )
-        duration = time.time() - start_time
+        duration = time.perf_counter() - start_time
         self.metrics.time_update.append(duration)   
         self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
 

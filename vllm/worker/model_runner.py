@@ -1500,7 +1500,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
         kv_caches: List[torch.Tensor] = [],
-    ) -> ModelInputForGPUWithSamplingMetadata:
+    ) -> Tuple[ModelInputForGPUWithSamplingMetadata, Optional[Dict[str, int]]]:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
 

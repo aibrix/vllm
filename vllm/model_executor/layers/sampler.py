@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import msgspec
 import torch
 import torch.nn as nn
+import time
 
 import vllm.envs as envs
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
@@ -222,9 +223,11 @@ class Sampler(nn.Module):
             logits: (num_tokens, vocab_size).
             sampling_metadata: Metadata for sampling.
         """
+        t0 = time.time()
         assert logits is not None
         _, vocab_size = logits.shape
 
+        print(logits.device)
         # Prepare sampling tensors with pinned memory to avoid blocking.
         if not sampling_metadata.reuse_sampling_tensors:
             self._init_sampling_tensors(logits, sampling_metadata)
@@ -243,6 +246,7 @@ class Sampler(nn.Module):
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
+        #print(sampling_tensors.device)
         # Apply presence and frequency penalties.
         if do_penalties:
             logits = _apply_penalties(logits, sampling_tensors.prompt_tokens,
@@ -266,8 +270,10 @@ class Sampler(nn.Module):
         # We use float32 for probabilities and log probabilities.
         # Compute the probabilities.
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
+        print(probs.device)
         # Compute the log probabilities.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        print(logprobs.device)
 
         # Sample the next tokens.
         maybe_deferred_sample_results, maybe_sampled_tokens_tensor = _sample(
@@ -278,6 +284,9 @@ class Sampler(nn.Module):
             include_gpu_probs_tensor=self.include_gpu_probs_tensor,
             modify_greedy_probs=self._should_modify_greedy_probs_inplace,
         )
+        #print(sample_results[0].device)
+        #print(maybe_sampled_tokens_tensor
+        #      .device)
 
         if self.include_gpu_probs_tensor:
             # Since we will defer sampler result Pythonization,
@@ -299,6 +308,13 @@ class Sampler(nn.Module):
                                   SampleResultArgsType)
             prompt_logprobs, sample_logprobs = get_logprobs(
                 logprobs, sampling_metadata, maybe_deferred_sample_results)
+
+        if prompt_logprobs[0] is not None:
+            print(prompt_logprobs[0].device)
+        # if sample_logprobs[0] is not None:
+        #     print(sample_logprobs[0].device)
+        t1 = time.time()
+        #print(f"Ts1-Ts0:{t1-t0}")
 
         return _build_sampler_output(
             maybe_deferred_sample_results,
@@ -507,8 +523,18 @@ def _random_sample(
         same as the length of selected_seq_groups. If the corresponding
         seq_group has do_sample=False, tuple contains ([], [])
     """
+    torch.cuda.synchronize()
+    r = torch.randn(4, 1, device='cuda')
+    t0 = time.time()
+
+    r = r.cpu()
+    t1 = time.time()
+    print(f"t1-t00000:{t1-t0}")
+    random_sample_t0 = time.time()
+
     # Find the maximum best_of value of the prompt phase requests.
     random_samples = random_samples.cpu()
+    random_sample_t1 = time.time()
     sample_idx = 0
     results: SampleResultType = []
     for seq_group in selected_seq_groups:
@@ -520,6 +546,7 @@ def _random_sample(
         sampling_params = seq_group.sampling_params
         is_prompt = seq_group.is_prompt
         num_parent_seqs = len(seq_ids)
+        random_sample_t2 = time.time()
         if is_prompt:
             # Prompt phase.
             parent_ids = [0] * sampling_params.best_of
@@ -532,6 +559,15 @@ def _random_sample(
                                             num_parent_seqs, 0].tolist()
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
+
+        random_sample_t3 = time.time()
+    random_sample_t4 = time.time()
+    print(f"random_sample_t1-random_sample_t0:{random_sample_t1-random_sample_t0}")
+    print(f"random_sample_t2-random_sample_t1:{random_sample_t2-random_sample_t1}")
+    print(f"random_sample_t3-random_sample_t2:{random_sample_t3-random_sample_t2}")
+    print(f"random_sample_t4-random_sample_t3:{random_sample_t4-random_sample_t3}")
+    print(f"random_samples:{random_samples.shape}")
+    print(random_samples)
     return results
 
 
@@ -840,6 +876,7 @@ def _sample_with_torch(
         beam_search_logprobs=beam_search_logprobs,
         sample_results_dict=sample_results_dict)
 
+    # horenc: time stamps in this function didn't move 
     if not sampling_metadata.skip_sampler_cpu_output:
         # GPU<->CPU sync happens here.
         # This also converts the sampler output to a Python object.

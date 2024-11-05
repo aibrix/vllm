@@ -280,6 +280,12 @@ def _prepare_seq_groups(
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
+            # When using a KV cache with chunk-prefill enabled and sampling not
+            # explictly enabled, for the first 'n' chunks (except the last chunk
+            # before the decode phase), if there is a full hit in the KV cache,
+            # the sampling step will be skipped and thus query_lens and seq_lens
+            # are set to None. In this case, therefore, we just set prompt_logprob_len
+            # and sample_len to zeros as they will not be used.
             if query_lens is not None and seq_lens is not None:
                 query_len, seq_len = query_lens[i], seq_lens[i]
                 # If we need sampling, exclude num_prefill_sample tokens

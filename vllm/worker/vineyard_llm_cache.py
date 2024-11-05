@@ -195,7 +195,7 @@ class VineyardLLMCache:
         )
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
-        self.metrics.normalized_time_query.append(duration/len(tokens))
+        self.metrics.normalized_time_query.append(duration/(len(query_tokens) + len(query_prefix)))
         # synchronized across tensor parallel ranks
         matched_tensor = torch.tensor([matched], dtype=torch.long, device='cuda')
         get_tp_group().all_reduce(input_=matched_tensor, op=torch.distributed.ReduceOp.MIN)
@@ -230,6 +230,7 @@ class VineyardLLMCache:
         self.metrics.counter += 1
 
         # save to GPU kv cache
+        torch.cuda.synchronize()
         copy_start = torch.cuda.Event(enable_timing=True)
         copy_end = torch.cuda.Event(enable_timing=True)
         copy_start.record()
@@ -240,7 +241,7 @@ class VineyardLLMCache:
         # leading to faster overall performance.
         buffer = self.cuda_buffer.copy_(self.buffer)[:, :, :matched]
         copy_end.record()
-        copy_end.synchronize()
+        torch.cuda.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
         self.metrics.time_load.append(duration)
         self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)

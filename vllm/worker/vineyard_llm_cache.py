@@ -157,7 +157,10 @@ class VineyardLLMCache:
             token_chunk_size = seq_group_metadata.token_chunk_size
             tokens = seq_data.get_prompt_token_ids()
 
-            # leave at least one token unmatched
+            # Previously, at least one token is left unmatched to always trigger sampling.
+            # However, when there is full KV cache hit, there is no need to sample
+            # unless it is explicitly required.
+            # # leave at least one token unmatched
             # token_chunk_size -= 1
 
             # alignment `context_len` to `self.chunk_size`
@@ -198,7 +201,8 @@ class VineyardLLMCache:
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
         self.metrics.normalized_time_query.append(duration/len(tokens))
-        # no need to minus 1 one more time. matched = min(matched, token_chunk_size - 1)
+        # If sampling is required, we need to leave one token unmatched
+        # to trigger the following sampling step in engine worker's workflow.
         if seq_group_metadata is not None and seq_group_metadata.is_sampling_enabled:
             matched = min(matched, token_chunk_size - 1)
         # synchronized across tensor parallel ranks

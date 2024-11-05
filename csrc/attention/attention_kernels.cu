@@ -25,6 +25,7 @@
 #include <cuda_bf16.h>
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+#include <fstream>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -44,22 +45,42 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
+//0930 1 1  000000     loc1722andfunc
+///* DATTN_UNIFIED_QK_MAX & DATTN_SHIFT_PERHEAD_QKMAX cannot be on at the same time */
+/* DATTN_SHIFT_PERHEAD_QKMAX relies on DATTN_UNIFIED_QK_MAX */
+#define DATTN_UNIFIED_QK_MAX 1 // 0:Vanilla 1:Unified qk_max
+#define DATTN_SHIFT_PERHEAD_QKMAX 1 // 0:Unified qk_max 1:Shifting window per-head qk_max
+#define DATTN_DEBUG_OVERFLOW_ROLLBACK 0 // 1:statistics 0:perf
+#define DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE 0
+#define VANILLA_DEBUG_PERHEAD_QKMAX 0 // Cannot run - no layer_num info passed in
 /* DATTN_DEBUG_PERHEAD_QKMAX & DATTN_UNIFIED_QK_MAX cannot be on at the same time */
-#define VANILLA_DEBUG_PERHEAD_QKMAX 1 /* Cannot - no layer_num info passed in */
 #define DATTN_DEBUG_PERHEAD_QK 0
 #define DATTN_DEBUG_PERHEAD_QKMAX 0
-#define DATTN_UNIFIED_QK_MAX 1
 #define WARNING(msg) printf("\033[33mWARNING: %s\033[0m\n", msg)
 
 #if DATTN_UNIFIED_QK_MAX
-//#define DATTENTION_QK_MAX 7.0f // llama2-7B long 99.99mean
-//#define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean
+//#define DATTENTION_QK_MAX 6.54f // llama2-7B medium 99.99mean // (-0.41+13.49)/2 = 6.54
+//#define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean // (-9.27+12.73)/2 = 1.73
 //#define DATTENTION_QK_MAX 12.73f //  llama2-7B short 99.99high
-//#define DATTENTION_QK_MAX 13.49f //  llama2-7B long 99.99high
+//#define DATTENTION_QK_MAX 13.49f //  llama2-7B medium 99.99high
 //#define DATTENTION_QK_MAX 4.58f //  llama2-7B short 99high
-//#define DATTENTION_QK_MAX 5.96f //  llama2-7B long 99high
-// #define DATTENTION_QK_MAX -57.545f // patent OPT6.7B short
-#define DATTENTION_QK_MAX 16.38f // patent OPT6.7B medium
+//#define DATTENTION_QK_MAX 5.96f //  llama2-7B medium 99high
+//#define DATTENTION_QK_MAX -57.545f // patent OPT6.7B short Method3 for short prompts = (-823.94+708.85)/2 = -57.545
+//#define DATTENTION_QK_MAX 16.38f // patent OPT6.7B medium Method3 for medium prompts = (-854.23+886.99)/2 = 16.38
+//#define DATTENTION_QK_MAX -80.253522f // short phi
+// #define DATTENTION_QK_MAX -70.842063f // medium phi
+
+// Based on DATTN_UNIFIED_QK_MAX 1 #define DATTN_SHIFT_PERHEAD_QKMAX 0
+//#define DATTENTION_QK_MAX -30.036194f // 1_1 (1+0) $ python jack_multiprocess_find_avg_perhead_allqk.py | tee jack_multiprocess_find_avg_perhead_allqk241007.log
+#define DATTENTION_QK_MAX -69.647877 // 2_1 Mix(short+medium) phi
+
+#if DATTN_SHIFT_PERHEAD_QKMAX // per-head
+#define MAX_LAYERS 32
+#define MAX_HEADS 32
+__constant__ __align__(32) float qk_max_values[MAX_LAYERS * MAX_HEADS];
+// Flag to ensure set_qk_max_values is only called once
+std::once_flag init_flag;
+#endif
 #endif
 
 
@@ -783,7 +804,8 @@ __global__ void dattention_kernel(
   const float scale,
   const float* __restrict__ alibi_slopes,  // [num_heads]
   const float k_scale,
-  const float v_scale 
+  const float v_scale,
+  uint64_t *h_counter_array // rollback counter perthread
 ) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
@@ -794,9 +816,11 @@ __global__ void dattention_kernel(
     // No work to do. Terminate the thread block.
     return;
   }
-  
+
+#if DATTN_UNIFIED_QK_MAX
   __shared__ bool recompute;
   recompute = false;
+#endif
 
   const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
   const int num_blocks_per_partition =
@@ -839,12 +863,20 @@ __global__ void dattention_kernel(
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
-#if (DATTN_DEBUG_PERHEAD_QK || DATTN_DEBUG_PERHEAD_QKMAX)
+#if (DATTN_UNIFIED_QK_MAX || DATTN_DEBUG_PERHEAD_QK || DATTN_DEBUG_PERHEAD_QKMAX)
   int64_t layer_idx = layer_offset/(num_heads * HEAD_SIZE * BLOCK_SIZE);
 #endif
 
-#if DATTN_UNIFIED_QK_MAX
+#if DATTN_DEBUG_OVERFLOW_ROLLBACK
   static uint64_t local_rollback = 0;
+#endif
+#if DATTN_UNIFIED_QK_MAX
+#if !DATTN_SHIFT_PERHEAD_QKMAX
+  float dattn_qkmax = DATTENTION_QK_MAX;
+#else // use per-head info
+  int dattn_qkmax_idx = (layer_idx * num_heads) + head_idx;
+  float dattn_qkmax = qk_max_values[dattn_qkmax_idx];
+#endif
 #endif
 
   // A vector type to store a part of a key or a query.
@@ -930,7 +962,7 @@ __global__ void dattention_kernel(
   // Each thread group in a warp fetches a key from the block, and computes dot product with the query.
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
-  #if 0
+#if 0
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to
     // int64 because int32 can lead to overflow when this variable is multiplied
     // by large numbers (e.g., kv_block_stride).
@@ -959,7 +991,7 @@ __global__ void dattention_kernel(
         continue;
       }
     }
-  #endif
+#endif
     // computing the starting address of the block for the given layer
     cache_t * key_cache = cache_start + block_idx*whole_block_size + layer_offset;
 
@@ -1020,19 +1052,63 @@ __global__ void dattention_kernel(
         }
 #endif
 
-#if DATTN_UNIFIED_QK_MAX // new
+#if DATTN_UNIFIED_QK_MAX
+        // may skip mask != 0?
+// #if !DATTN_SHIFT_PERHEAD_QKMAX
+//         dattn_qkmax = DATTENTION_QK_MAX;
+// #else // use per-head info
+//         int dattn_qkmax_idx = (layer_idx * num_heads) + head_idx;
+//         dattn_qkmax = qk_max_values[dattn_qkmax_idx];
+//         // Debug
+//         // printf("AAA[%d]= %f [(%02" PRId64 " * %02d) + %02d]\n", dattn_qkmax_idx, dattn_qkmax,
+//         //       layer_idx, num_heads, head_idx);
+//         // Debug - per-head
+//         // if (layer_idx == 2 && head_idx == 8) // 0~31
+//         //   printf("DDDmax[%d]= %f [(%02" PRId64 " * %02d) + %02d]\n", dattn_qkmax_idx, dattn_qkmax,
+//         //        layer_idx, num_heads, head_idx);
+//         // if (layer_idx == 3 && head_idx == 29) // 0~31
+//         //   printf("DDDmin[%d]= %f [(%02" PRId64 " * %02d) + %02d]\n", dattn_qkmax_idx, dattn_qkmax,
+//         //        layer_idx, num_heads, head_idx);
+// #endif
         /***** debug ******/
         //if (unlikely(is_half_inf(__expf(qk - DATTENTION_QK_MAX)))) {
         // if (unlikely(qk >=11.0903f || qk <= -11.0903f)) {
         //   printf("qk_max causes float16 overflow!!\n");
         // }
         // #define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean
-        if (unlikely((qk - DATTENTION_QK_MAX) >=88.72283f ||
-            (qk - DATTENTION_QK_MAX) <= -87.33654f)) {
-          /* Rollback */
-          recompute = true;
+        float upper_bound = 88.72283f, lower_bound = -87.33654f;
+        //float upper_bound = 50.0f, lower_bound = -87.33654f;
+        if (unlikely((qk - dattn_qkmax) >= upper_bound ||
+            (qk - dattn_qkmax) <= lower_bound)) {
+          if ((qk - dattn_qkmax) >= upper_bound) {
+            /* Rollback */
+            recompute = true;
+          }
           // WARNING("qk_max causes float32 overflow!!");
-          // printf("\033[33mWARNING: Recompute. qk_max overflow!! qk = %.6f\033[0m\n", qk);
+          // printf("\033[34mDEBUG: qk_max overflow!! qk %.6f - dattn_qkmax %.6f = %.6f\033[0m\n",
+          //       qk, dattn_qkmax, qk - dattn_qkmax);
+#if DATTN_DEBUG_OVERFLOW_ROLLBACK
+          // Detailed statistics
+          if (unlikely((qk - dattn_qkmax) >= 88.72283f &&
+              (qk - dattn_qkmax) <= -87.33654f)) {
+            printf("\033[36mDEBUG: qk_max overflow!! bothflow qk %.6f - dattn_qkmax %.6f = %.6f "
+                  "tid %d seq_idx %d layer_idx %02" PRId64 " head_idx %02d\033[0m\n",
+                  qk, dattn_qkmax, qk - dattn_qkmax,
+                  threadIdx.x, seq_len, seq_idx, layer_idx, head_idx);
+          } else if (unlikely((qk - dattn_qkmax) >= 88.72283f)) {
+            printf("\033[35mDEBUG: qk_max overflow!! overflow qk %.6f - dattn_qkmax %.6f = %.6f "
+                  "tid %d seq_idx %d layer_idx %02" PRId64 " head_idx %02d\033[0m\n",
+                  qk, dattn_qkmax, qk - dattn_qkmax,
+                  threadIdx.x, seq_len, seq_idx, layer_idx, head_idx);
+          } else if (unlikely((qk - dattn_qkmax) <= -87.33654f)) {
+            printf("\033[34mDEBUG: qk_max overflow!! underflow qk %.6f - dattn_qkmax %.6f = %.6f "
+                  "tid %d seq_idx %d layer_idx %02" PRId64 " head_idx %02d\033[0m\n",
+                  qk, dattn_qkmax, qk - dattn_qkmax,
+                  threadIdx.x, seq_len, seq_idx, layer_idx, head_idx);
+          }
+#endif
+        } else {
+          // Cannot pollute qk_max. Rollback needs it. other threads may trigger it.
         }
 #else // vanilla
         // recompute = true;
@@ -1040,6 +1116,13 @@ __global__ void dattention_kernel(
       }
 
     // within warp PA thread group
+      //if(to_profile2) {
+      //  time2 = clock64();
+      //  fourthTime += time2 - time1; 
+      //  time1 = time2; 
+      //}
+
+      // within warp PA thread group
     }
   }
   
@@ -1055,23 +1138,39 @@ __global__ void dattention_kernel(
   // Multiple thread blocks/warps here
   __syncthreads(); // Introduced by our mechanism
 
-  /* For synchronizing all recomput */
   if (likely(recompute == false)) {
-    /* Set unfied qk_max value */
-    qk_max = DATTENTION_QK_MAX;
-  } else {
+    /* Set unified qk_max value */
+    // Do it here because not only thread group leader needs this value.
+// #if !DATTN_SHIFT_PERHEAD_QKMAX
+//     // qk_max = dattn_qkmax; // TODO test (clean code)
+//     // dattn_qkmax = DATTENTION_QK_MAX;
+//     qk_max = DATTENTION_QK_MAX;
+// #else
+// //    int dattn_qkmax_idx = (layer_idx * num_heads) + head_idx;
+// //    dattn_qkmax = qk_max_values[dattn_qkmax_idx]; // not all the threads in a thread group have set dattn_qkmax!!
+//     qk_max = dattn_qkmax;
+// #endif
+    qk_max = dattn_qkmax; // Have already set the value to use
+  } else { // if (unlikely(recompute)) {
     /* Someone overflowed */
     // Perform reduction across all threads in the same thread block
     qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
     //if(threadIdx.x == 0) {
     //  printf("[%d, %d, %d]: scale %f qk_max %f. layer_offset %ld, kv_head_stride %d - %d. q_stride %ld\n", blockIdx.x, blockIdx.y, threadIdx.x, scale, qk_max, layer_offset, KV_HEAD_STRIDE, kv_head_stride, q_stride);
     //}
+#if DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    h_counter_array[idx] += 1;  // 計數器 +1
 
+#endif
+#if DATTN_DEBUG_OVERFLOW_ROLLBACK
     local_rollback++;
-    if (!threadIdx.x) {
-      printf("\033[33mWARNING: local_rollback = %" PRIu64 " threadIdx.x %d + seq_idx %d * NUM_THREADS %d\033[0m\n",
-          local_rollback, threadIdx.x, seq_idx, NUM_THREADS);
+    if (!threadIdx.x) { // 0~127, 16*4 tokens
+      printf("\033[33mWARNING: local_rollback = %" PRIu64 " tid %d + seq_len %d + seq_idx %d per warp layer_idx %02" PRId64 " head_idx %02d\033[0m\n",
+          local_rollback, threadIdx.x, seq_len, seq_idx, layer_idx, head_idx);
+          //num_heads + head_idx
     }
+#endif
   }
 #else // vanilla
   // Perform reduction across all threads in the same thread block
@@ -1607,7 +1706,7 @@ void paged_attention_v2(
               col_ptr, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
-              alibi_slopes_ptr, k_scale, v_scale);  \
+              alibi_slopes_ptr, k_scale, v_scale, h_counter_array);  \
     vllm::paged_attention_v2_reduce_kernel<cache_t, HEAD_SIZE, NUM_THREADS,     \
                                          PARTITION_SIZE>                       \
       <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
@@ -1628,9 +1727,56 @@ void paged_attention_v2(
               col_ptr, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
-              alibi_slopes_ptr, k_scale, v_scale);  \
+              alibi_slopes_ptr, k_scale, v_scale, h_counter_array);  \
    }
-          
+
+
+#if DATTN_SHIFT_PERHEAD_QKMAX
+// Function to read qk_max values from a file and copy them to the constant memory array
+void set_qk_max_values(const std::string& filename) {
+    // Static variable to ensure initialization happens only once
+    static bool is_initialized = false;
+
+    printf("\033[33mDebug: per-head init called once\033[0m\n");
+
+    // Check if already initialized
+    if (is_initialized) {
+        return;  // Skip initialization if already done
+    }
+    printf("[horenc] Should appear only ONE time (how many threads init qk_max)\n");
+
+    // Create a host vector to hold qk_max values for each layer and head
+    std::vector<float> qk_max_values_host(MAX_LAYERS * MAX_HEADS);
+
+    // Open the file
+    std::ifstream infile(filename);
+    if (!infile.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << std::endl;
+        return;
+    }
+
+    // Read values from the file into the host array
+    for (int i = 0; i < MAX_LAYERS * MAX_HEADS; ++i) {
+        if (!(infile >> qk_max_values_host[i])) {
+            std::cerr << "Error: Insufficient values in file, expecting "
+                      << MAX_LAYERS * MAX_HEADS << " values." << std::endl;
+            return;
+        }
+    }
+
+    // Close the file
+    infile.close();
+
+    // Copy data from host memory to device constant memory
+    cudaMemcpyToSymbol(qk_max_values, qk_max_values_host.data(), qk_max_values_host.size() * sizeof(float));
+}
+
+// Wrapper function to ensure set_qk_max_values is only called once
+void initialize_qk_max_values(const std::string& filename) {
+    std::call_once(init_flag, set_qk_max_values, filename);
+}
+#endif
+
 template <typename scalar_t, typename cache_t, vllm::Fp8KVCacheDataType KV_DTYPE, 
           int BLOCK_SIZE, int NUM_THREADS = 128, int PARTITION_SIZE = 512>
 void dattention_launcher(
@@ -1702,6 +1848,19 @@ void dattention_launcher(
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
+#if DATTN_SHIFT_PERHEAD_QKMAX
+  // call once
+  // qk_max_hardcoded_values_medium.txt
+  // qk_max_hardcoded_values_short.txt
+  // phi_hardcoded_values_short_medium_summary_240930.txt
+  //initialize_qk_max_values("qk_max_hardcoded_values_medium.txt");
+  //initialize_qk_max_values("qk_max_hardcoded_values_short.txt");
+  //initialize_qk_max_values("phi_hardcoded_values_short_medium_summary_240930.txt"); // = best_phi_values_short_medium_summary_241006.txt
+  initialize_qk_max_values("best_phi_values_short_medium_summary_241006.txt"); // 2-2 // = phi_hardcoded_values_short_medium_summary_240930.txt
+  //initialize_qk_max_values("avg_phi_values_short_medium_summary_241006.txt"); // 1-2
+  //initialize_qk_max_values("1_1_in_a_file_241024.txt"); // write 1_1 into a file
+#endif
+
   dim3 grid(num_heads, num_seqs, max_num_partitions);
 
   fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
@@ -1715,6 +1874,15 @@ void dattention_launcher(
 
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
+
+  uint64_t *h_counter_array = NULL;
+#if DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE // rollback counter
+  uint64_t *d_counter_array;
+  h_counter_array = (uint64_t*)malloc(NUM_THREADS * sizeof(uint64_t));
+  // alloc memory
+  cudaMalloc(&d_counter_array, NUM_THREADS * sizeof(uint64_t));
+  cudaMemset(d_counter_array, 0, NUM_THREADS * sizeof(uint64_t));  // init to 0
+#endif
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -1748,6 +1916,36 @@ void dattention_launcher(
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }  
+
+  if(to_profile) {
+    cudaDeviceSynchronize();
+    end_time = std::chrono::high_resolution_clock::now();
+    total += end_time - start_time; 
+    if(step_index % 512 == 0) {
+      fprintf(stderr, "step_index-%ld time %f\n", step_index, total);  
+      total = std::chrono::duration<double, std::milli>(0); 
+    }
+  }
+
+#if DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE // rollback counter
+  // TODO: I don't know when is done..... I cannot do&free it all at once
+  // copy results from GPU to host
+  cudaMemcpy(h_counter_array, d_counter_array, NUM_THREADS * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+
+  // accumulate all threads' counter
+  uint64_t total_count = 0;
+  for (int i = 0; i < NUM_THREADS; i++) {
+      printf("t[%d] count: %lu\n", i, h_counter_array[i]);
+      total_count += h_counter_array[i];
+  }
+
+  // print result
+  printf("Total count: %lu\n", total_count);
+
+  // free memory
+  cudaFree(d_counter_array);
+  free(h_counter_array);
+#endif
 }
 
 void dattention(

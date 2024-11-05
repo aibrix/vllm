@@ -1659,6 +1659,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        #if self.profile == True:
+        #    T2 = time.time()
+
+        #self.start_event.record()
+        
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1673,7 +1678,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 and self.observability_config.collect_model_forward_time):
             model_forward_end.record()
 
-        T3 = time.time()
+        # T3 = time.time()
 
         # Compute the logits in the last pipeline stage.
         if not get_pp_group().is_last_rank:
@@ -1706,7 +1711,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         
         #check_data=model_input.sampling_metadata.seq_groups[0].seq_data[0] 
         #print(f"Sampling logits:{logits.shape}, sampling_metadata prompts-{len(check_data.prompt_token_ids)}, output-{len(check_data.output_token_ids)}\n")
-        T4 = time.time()
+        # T4 = time.time()
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,
@@ -1729,9 +1734,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             output.model_forward_time = (orig_model_forward_time +
                                          model_forward_time)
 
-        T5 = time.time()
-        print(f"T3-T2: {T3-T2}")
-        print(f"T5-T4: {T5-T4}")
+        # T5 = time.time()
+        # print(f"T3-T2: {T3-T2}")
+        # print(f"T5-T4: {T5-T4}")
         if self.return_hidden_states:
             # we only need to pass hidden states of most recent token
             assert model_input.sampling_metadata is not None

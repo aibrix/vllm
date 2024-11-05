@@ -158,7 +158,7 @@ class VineyardLLMCache:
             tokens = seq_data.get_prompt_token_ids()
 
             # leave at least one token unmatched
-            token_chunk_size -= 1
+            # token_chunk_size -= 1
 
             # alignment `context_len` to `self.chunk_size`
             query_context_len = context_len - context_len % self.chunk_size
@@ -198,6 +198,9 @@ class VineyardLLMCache:
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
         self.metrics.normalized_time_query.append(duration/len(tokens))
+        # no need to minus 1 one more time. matched = min(matched, token_chunk_size - 1)
+        if seq_group_metadata is not None and seq_group_metadata.is_sampling_enabled:
+            matched = min(matched, token_chunk_size - 1)
         # synchronized across tensor parallel ranks
         matched_tensor = torch.tensor([matched], dtype=torch.long, device='cuda')
         # torch.distributed.all_reduce(matched_tensor, op=torch.distributed.ReduceOp.MIN,
@@ -208,9 +211,6 @@ class VineyardLLMCache:
         offset = context_len % self.chunk_size
         matched -= offset
 
-        # we force to use token_chunk_size - 1 to trigger KV recomputation
-        # TODO: this should be revisited later. We are looking for solutions to fully avoid computation.
-        matched = min(matched, token_chunk_size - 1)
         if matched <= 0:
             return seq_id, 0
         if seq_group_metadata is not None:

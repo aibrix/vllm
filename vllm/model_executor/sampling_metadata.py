@@ -280,13 +280,16 @@ def _prepare_seq_groups(
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
-            assert query_lens is not None and seq_lens is not None
-            query_len, seq_len = query_lens[i], seq_lens[i]
-            # If we need sampling, exclude num_prefill_sample tokens from
-            # prompt logprob.
-            prompt_logprob_len = (query_len - num_prefill_sample
-                                  if do_sample else query_len)
-            sample_len = num_prefill_sample if do_sample else 0
+            if query_lens is not None and seq_lens is not None:
+                query_len, seq_len = query_lens[i], seq_lens[i]
+                # If we need sampling, exclude num_prefill_sample tokens
+                # from prompt logprob.
+                prompt_logprob_len = (query_len - num_prefill_sample
+                                      if do_sample else query_len)
+                sample_len = num_prefill_sample if do_sample else 0
+            else:
+                prompt_logprob_len = 0
+                sample_len = 0
         else:
             # Decode
             prompt_logprob_len = 0

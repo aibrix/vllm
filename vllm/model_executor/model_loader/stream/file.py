@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import NoReturn, Optional
 
 import numpy as np
+import boto3
 from boto3.s3.transfer import TransferConfig
 
 from .utils import (
@@ -32,6 +33,7 @@ logger = init_logger(__name__)
 
 
 class LoadFile:
+
     def __init__(self, file_source: str) -> None:
         self.file_source = file_source
 
@@ -43,12 +45,13 @@ class LoadFile:
 
     def load_to_buffer(self, offset: int, count: int) -> memoryview:
         raise NotImplementedError
-    
+
     def download(self, target_dir) -> NoReturn:
         raise NotImplementedError
 
 
 class LocalFile(LoadFile):
+
     def __init__(self, file: str) -> None:
         if not Path(file).exists():
             raise ValueError(f"file {file} not exist")
@@ -59,8 +62,7 @@ class LocalFile(LoadFile):
     def load_whole_file(self, num_threads: int = 1):
         if num_threads != 1:
             logger.warning(
-                f"num_threads {num_threads} is not supported for local file."
-            )
+                f"num_threads {num_threads} is not supported for local file.")
 
         tensor_bytes = np.memmap(
             self.file,
@@ -83,6 +85,7 @@ class LocalFile(LoadFile):
 
 
 class RemoteFile(LoadFile):
+
     def __init__(self, file: str, file_source: str) -> None:
         self.file = file
         super().__init__(file_source=file_source)
@@ -91,23 +94,49 @@ class RemoteFile(LoadFile):
         tensor_bytes = self.load_to_bytes(offset=offset, count=count)
         return tensor_bytes.getbuffer()
 
+    def download_file(self, target_dir: str):
+        raise NotImplementedError
+
 
 class S3File(RemoteFile):
-    def __init__(self, file: str) -> None:
-        self.file = file
-        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(file)
+
+    def __init__(
+        self,
+        scheme: str,
+        bucket_name: str,
+        bucket_path: str,
+        s3_client: Optional[boto3.client] = None,
+        s3_access_key_id: Optional[str] = None,
+        s3_secret_access_key: Optional[str] = None,
+        s3_region: Optional[str] = None,
+        s3_endpinit: Optional[str] = None,
+    ) -> None:
         self.bucket_name = bucket_name
         self.bucket_path = bucket_path
+        if s3_client is None:
+            try:
+                s3_client = _create_s3_client(ak=s3_access_key_id,
+                                              sk=s3_secret_access_key,
+                                              endpoint=s3_endpinit,
+                                              region=s3_region)
+            except Exception as e:
+                raise ValueError(f"create s3 client failed for {e}.")
+        self.s3_client = s3_client
         try:
-            s3_client = _create_s3_client()
-            s3_client.head_object(Bucket=bucket_name, Key=bucket_path)
+            self.s3_client.head_object(Bucket=bucket_name, Key=bucket_path)
         except Exception as e:
-            raise ValueError(f"S3 bucket path {bucket_path} not exist for {e}.")
-        super().__init__(file=file, file_source="s3")
+            raise ValueError("S3 bucket path {bucket_path} not exist for {e}.")
+
+        file = scheme + "://" + bucket_name + "/" + bucket_path
+        super().__init__(file=file, file_source=scheme)
+
+    @classmethod
+    def from_uri(cls, file_uri: str, **kwargs):
+        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(
+            file_uri)
+        cls(scheme, bucket_name, bucket_path, **kwargs)
 
     def load_whole_file(self, num_threads: int):
-        s3_client = _create_s3_client()
-
         config_kwargs = {
             "max_concurrency": num_threads,
             "use_threads": True,
@@ -115,7 +144,7 @@ class S3File(RemoteFile):
         config = TransferConfig(**config_kwargs)
 
         data = BytesIO()
-        s3_client.download_fileobj(
+        self.s3_client.download_fileobj(
             Bucket=self.bucket_name,
             Key=self.bucket_path,
             Fileobj=data,
@@ -124,80 +153,30 @@ class S3File(RemoteFile):
         return data.getbuffer()
 
     def load_to_bytes(self, offset: int, count: int):
-        s3_client = _create_s3_client()
-
         range_header = f"bytes={offset}-{offset+count-1}"
-        resp = s3_client.get_object(
-            Bucket=self.bucket_name, Key=self.bucket_path, Range=range_header
-        )
+        resp = self.s3_client.get_object(Bucket=self.bucket_name,
+                                         Key=self.bucket_path,
+                                         Range=range_header)
         return read_to_bytes_io(resp.get("Body"))
 
-
-@dataclass
-class StreamModel:
-    model_uri: str
-    num_threads: int = 16
-    aws_access_key_id: Optional[str] = None
-    aws_secret_access_key: Optional[str] = None
-    aws_region: Optional[str] = None
-    aws_endpinit: Optional[str] = None
-
-    def __post_init__(self):
-        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(self.model_uri)
-        self.model_source_type = scheme
-        self.bucket_name = bucket_name
-        
-        # list config and safetensors files in model_uri
-        if self.model_source_type == "local":
-            local_dir = Path(bucket_path)
-            if not local_dir.exists():
-                raise ValueError(f"local path {local_dir} not exist")
-            files = [file for file in local_dir.iterdir() if file.is_file()]
-            
-            self.config_files = [file for file in files if file.suffix == ".json"]
-            self.safetensors_files = [file for file in files if file.suffix == ".safetensors"]
-        else:
-            self.client = _create_s3_client(ak=self.aws_access_key_id,
-                                            sk=self.aws_secret_access_key,
-                                            endpoint=self.aws_endpinit,
-                                            region=self.aws_endpinit)
-            objects_out = self.client.list_objects_type2(
-                self.bucket_name, prefix=bucket_path, delimiter="/"
-            )
-            files = [obj.key for obj in objects_out.contents]
-            
-            self.config_files = [file for file in files if file.endswith(".json")]
-            self.safetensors_files = [file for file in files if file.endswith(".safetensors")]
-
-        if len(self.config_files) == 0:
-            raise ValueError(f"no config file found in {self.model_uri}")
-        if len(self.safetensors_files) == 0:
-            raise ValueError(f"no safetensors file found in {self.model_uri}")
-
-
-    def download_config(self, target_dir: str) -> Path:
-        if self.model_source_type == "local":
-            logger.info("local config no need to download")
-            return Path(self.model_uri)
-        
+    def download_file(self, target_dir: str, num_threads: int):
+        # ensure target dir exist
         target_path = Path(target_dir)
         target_path.mkdir(parents=True, exist_ok=True)
-        for config_file in self.config_files:
-            _file_name = config_file.split("/")[-1]
-            local_file = target_path.joinpath(_file_name).absolute()
-            config_kwargs = {
-                "max_concurrency": self.num_threads,
-                "use_threads": True,
-            }
-            config = TransferConfig(**config_kwargs)
-            self.client.download_file(
-                Bucket=self.bucket_name,
-                Key=config_file,
-                Filename=str(
-                    local_file
-                ),  # S3 client does not support Path, convert it to str
-                Config=config,
-            )
-        return target_path
-
         
+        _file_name = self.bucket_path.split("/")[-1]
+        local_file = target_path.joinpath(_file_name).absolute()
+        config_kwargs = {
+            "max_concurrency": num_threads,
+            "use_threads": True,
+        }
+        config = TransferConfig(**config_kwargs)
+        self.s3_client.download_file(
+            Bucket=self.bucket_name,
+            Key=self.bucket_path,
+            Filename=str(
+                local_file
+            ),  # S3 client does not support Path, convert it to str
+            Config=config,
+        )
+        logger.info(f"download file from `{self.bucket_path}` to `{target_dir}` success.")

@@ -9,6 +9,8 @@ from botocore.config import Config
 
 from . import SUPPORTED_STREAM_STORAGE
 
+DEFAULT_POOL_CONNECTIONS = 10
+
 
 def read_to_bytes_io(content, chunk_size=None):
     chunk_size = int(os.getenv("STREAM_READ_CHUNK_SIZE", 8388608))  # 8MB
@@ -55,36 +57,42 @@ def _parse_bucket_info_from_uri(uri: str) -> Tuple[str, str, str]:
     # uri is local path when scheme is empty
     scheme = "local" if scheme == "" else scheme
     if scheme not in SUPPORTED_STREAM_STORAGE:
-        raise ValueError(f"{scheme} not supported, 
-                         only {SUPPORTED_STREAM_STORAGE} supported")
+        raise ValueError(
+            f"{scheme} not supported, only {SUPPORTED_STREAM_STORAGE} supported"
+        )
 
     bucket_name = parsed.netloc
     bucket_path = parsed.path.lstrip("/") if scheme != "" else parsed.path
     return scheme, bucket_name, bucket_path
 
 
-def _create_s3_client(ak, sk, endpoint, region):
+def _create_s3_client(ak, sk, endpoint, region, num_threads=DEFAULT_POOL_CONNECTIONS):
     ak = ak or os.getenv("AWS_ACCESS_KEY_ID")
     sk = sk or os.getenv("AWS_SECRET_ACCESS_KEY")
     endpoint = endpoint or os.getenv("AWS_ENDPOINT_URL")
     region = region or os.getenv("AWS_REGION")
 
+    max_pool_connections = num_threads \
+        if num_threads > DEFAULT_POOL_CONNECTIONS \
+            else DEFAULT_POOL_CONNECTIONS
+
     my_config = Config(
         # signature_version = 'v4',
-        s3={"addressing_style": "virtual"}
+        s3={"addressing_style": "virtual"},
+        max_pool_connections=max_pool_connections,
     )
-    return boto3.client(
-        service_name="s3",
-        region_name=region,
-        endpoint_url=endpoint,
-        aws_access_key_id=ak,
-        aws_secret_access_key=sk,
-        config=my_config
-    )
+    return boto3.client(service_name="s3",
+                        region_name=region,
+                        endpoint_url=endpoint,
+                        aws_access_key_id=ak,
+                        aws_secret_access_key=sk,
+                        config=my_config)
 
 
 class TensorMeta:
-    def __init__(self, name: str, base_offset: int, dtype: str, shape: List[int], data_offsets: List[int]) -> None:
+
+    def __init__(self, name: str, base_offset: int, dtype: str,
+                 shape: List[int], data_offsets: List[int]) -> None:
         self._name = name
         self._base_offset = base_offset
         self._dtype = get_dtype(dtype)
@@ -124,20 +132,19 @@ class TensorMeta:
         self._tensor = tensor
 
     def __str__(self) -> str:
-        return str(
-            {
-                "name": self._name,
-                "dtype": self._dtype,
-                "shape": self._shape,
-                "data_offsets": self._data_offsets,
-            }
-        )
+        return str({
+            "name": self._name,
+            "dtype": self._dtype,
+            "shape": self._shape,
+            "data_offsets": self._data_offsets,
+        })
 
     def __repr__(self) -> str:
         return self.__str__()
 
 
-def split_continue_tensors(tensor_metas: List[TensorMeta], num_readers:int) -> List[Tuple[TensorMeta]]:
+def split_continue_tensors(tensor_metas: List[TensorMeta],
+                           num_readers: int) -> List[Tuple[TensorMeta]]:
     """
     Note: Usually, the number of groups for splitting tensors
           is greater than num_deaders.
@@ -146,7 +153,7 @@ def split_continue_tensors(tensor_metas: List[TensorMeta], num_readers:int) -> L
     assert num_readers > 0, "num_readers should be greater than 0"
 
     if len(tensor_metas) <= num_readers:
-        return [(item,) for item in tensor_metas]
+        return [(item, ) for item in tensor_metas]
 
     max_offset = tensor_metas[-1].data_offsets[1]
     avg_size = max_offset // num_readers
@@ -167,12 +174,13 @@ def split_continue_tensors(tensor_metas: List[TensorMeta], num_readers:int) -> L
     return groups
 
 
-def split_continue_tensors_v1(tensor_metas: List[TensorMeta], num_readers:int) -> List[Tuple[TensorMeta]]:
+def split_continue_tensors_v1(tensor_metas: List[TensorMeta],
+                              num_readers: int) -> List[Tuple[TensorMeta]]:
     assert len(tensor_metas) > 0, "tensor_metas should not be empty"
     assert num_readers > 0, "num_readers should be greater than 0"
 
     if len(tensor_metas) <= num_readers:
-        return [(item,) for item in tensor_metas]
+        return [(item, ) for item in tensor_metas]
 
     max_offset = tensor_metas[-1].data_offsets[1]
     avg_size = max_offset // num_readers

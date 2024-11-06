@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import Optional, Union
 
-import numpy as np
 import boto3
+import numpy as np
 from boto3.s3.transfer import TransferConfig
+
+from vllm.logger import init_logger
 
 from .utils import (
     _create_s3_client,
@@ -27,17 +28,14 @@ from .utils import (
     read_to_bytes_io,
 )
 
-from vllm.logger import init_logger
-
 logger = init_logger(__name__)
 
 
 class LoadFile:
-
     def __init__(self, file_source: str) -> None:
         self.file_source = file_source
 
-    def load_whole_file(self, num_threads: int = 1) -> NoReturn:
+    def load_whole_file(self, num_threads: int = 1):
         raise NotImplementedError
 
     def load_to_bytes(self, offset: int, count: int) -> BytesIO:
@@ -46,13 +44,12 @@ class LoadFile:
     def load_to_buffer(self, offset: int, count: int) -> memoryview:
         raise NotImplementedError
 
-    def download(self, target_dir) -> NoReturn:
+    def download(self, target_dir):
         raise NotImplementedError
 
 
 class LocalFile(LoadFile):
-
-    def __init__(self, file: str) -> None:
+    def __init__(self, file: Union[str, Path]) -> None:
         if not Path(file).exists():
             raise ValueError(f"file {file} not exist")
 
@@ -62,7 +59,8 @@ class LocalFile(LoadFile):
     def load_whole_file(self, num_threads: int = 1):
         if num_threads != 1:
             logger.warning(
-                f"num_threads {num_threads} is not supported for local file.")
+                "num_threads %s is not supported for local file.", num_threads
+            )
 
         tensor_bytes = np.memmap(
             self.file,
@@ -85,7 +83,6 @@ class LocalFile(LoadFile):
 
 
 class RemoteFile(LoadFile):
-
     def __init__(self, file: str, file_source: str) -> None:
         self.file = file
         super().__init__(file_source=file_source)
@@ -94,12 +91,11 @@ class RemoteFile(LoadFile):
         tensor_bytes = self.load_to_bytes(offset=offset, count=count)
         return tensor_bytes.getbuffer()
 
-    def download_file(self, target_dir: str):
+    def download_file(self, target_dir: str, num_threads: int = 1):
         raise NotImplementedError
 
 
 class S3File(RemoteFile):
-
     def __init__(
         self,
         scheme: str,
@@ -115,28 +111,31 @@ class S3File(RemoteFile):
         self.bucket_path = bucket_path
         if s3_client is None:
             try:
-                s3_client = _create_s3_client(ak=s3_access_key_id,
-                                              sk=s3_secret_access_key,
-                                              endpoint=s3_endpinit,
-                                              region=s3_region)
+                s3_client = _create_s3_client(
+                    ak=s3_access_key_id,
+                    sk=s3_secret_access_key,
+                    endpoint=s3_endpinit,
+                    region=s3_region,
+                )
             except Exception as e:
-                raise ValueError(f"create s3 client failed for {e}.")
+                raise ValueError(f"create s3 client failed for {e}.") from e
         self.s3_client = s3_client
         try:
             self.s3_client.head_object(Bucket=bucket_name, Key=bucket_path)
         except Exception as e:
-            raise ValueError("S3 bucket path {bucket_path} not exist for {e}.")
+            raise ValueError(
+                f"S3 bucket path {bucket_path} not exist for {e}."
+            ) from e
 
         file = scheme + "://" + bucket_name + "/" + bucket_path
         super().__init__(file=file, file_source=scheme)
 
     @classmethod
     def from_uri(cls, file_uri: str, **kwargs):
-        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(
-            file_uri)
+        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(file_uri)
         cls(scheme, bucket_name, bucket_path, **kwargs)
 
-    def load_whole_file(self, num_threads: int):
+    def load_whole_file(self, num_threads: int = 1):
         config_kwargs = {
             "max_concurrency": num_threads,
             "use_threads": True,
@@ -154,16 +153,16 @@ class S3File(RemoteFile):
 
     def load_to_bytes(self, offset: int, count: int):
         range_header = f"bytes={offset}-{offset+count-1}"
-        resp = self.s3_client.get_object(Bucket=self.bucket_name,
-                                         Key=self.bucket_path,
-                                         Range=range_header)
+        resp = self.s3_client.get_object(
+            Bucket=self.bucket_name, Key=self.bucket_path, Range=range_header
+        )
         return read_to_bytes_io(resp.get("Body"))
 
-    def download_file(self, target_dir: str, num_threads: int):
+    def download_file(self, target_dir: str, num_threads: int = 1):
         # ensure target dir exist
         target_path = Path(target_dir)
         target_path.mkdir(parents=True, exist_ok=True)
-        
+
         _file_name = self.bucket_path.split("/")[-1]
         local_file = target_path.joinpath(_file_name).absolute()
         config_kwargs = {
@@ -179,4 +178,8 @@ class S3File(RemoteFile):
             ),  # S3 client does not support Path, convert it to str
             Config=config,
         )
-        logger.info(f"download file from `{self.bucket_path}` to `{target_dir}` success.")
+        logger.info(
+            "download file from `%s` to `%s` success.",
+            self.bucket_path,
+            target_dir,
+        )

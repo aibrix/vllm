@@ -28,7 +28,8 @@ def filter_suffix_files(files: List[str], suffix: str) -> List[str]:
 
 
 def get_dtype(dtype_str: str):
-    # torch.float8 formats require 2.1; we do not support these dtypes on earlier versions
+    # torch.float8 formats require 2.1; 
+    # we do not support these dtypes on earlier versions
     _float8_e4m3fn = getattr(torch, "float8_e4m3fn", None)
     _float8_e5m2 = getattr(torch, "float8_e5m2", None)
     _TYPES = {
@@ -66,33 +67,44 @@ def _parse_bucket_info_from_uri(uri: str) -> Tuple[str, str, str]:
     return scheme, bucket_name, bucket_path
 
 
-def _create_s3_client(ak, sk, endpoint, region, num_threads=DEFAULT_POOL_CONNECTIONS):
+def _create_s3_client(
+    ak, sk, endpoint, region, num_threads=DEFAULT_POOL_CONNECTIONS
+):
     ak = ak or os.getenv("AWS_ACCESS_KEY_ID")
     sk = sk or os.getenv("AWS_SECRET_ACCESS_KEY")
     endpoint = endpoint or os.getenv("AWS_ENDPOINT_URL")
     region = region or os.getenv("AWS_REGION")
 
-    max_pool_connections = num_threads \
-        if num_threads > DEFAULT_POOL_CONNECTIONS \
-            else DEFAULT_POOL_CONNECTIONS
+    max_pool_connections = (
+        num_threads
+        if num_threads > DEFAULT_POOL_CONNECTIONS
+        else DEFAULT_POOL_CONNECTIONS
+    )
 
     my_config = Config(
         # signature_version = 'v4',
         s3={"addressing_style": "virtual"},
         max_pool_connections=max_pool_connections,
     )
-    return boto3.client(service_name="s3",
-                        region_name=region,
-                        endpoint_url=endpoint,
-                        aws_access_key_id=ak,
-                        aws_secret_access_key=sk,
-                        config=my_config)
+    return boto3.client(
+        service_name="s3",
+        region_name=region,
+        endpoint_url=endpoint,
+        aws_access_key_id=ak,
+        aws_secret_access_key=sk,
+        config=my_config,
+    )
 
 
 class TensorMeta:
-
-    def __init__(self, name: str, base_offset: int, dtype: str,
-                 shape: List[int], data_offsets: List[int]) -> None:
+    def __init__(
+        self,
+        name: str,
+        base_offset: int,
+        dtype: str,
+        shape: List[int],
+        data_offsets: List[int],
+    ) -> None:
         self._name = name
         self._base_offset = base_offset
         self._dtype = get_dtype(dtype)
@@ -117,11 +129,11 @@ class TensorMeta:
         return self._data_offsets
 
     @property
-    def real_offset(self) -> List[int]:
+    def real_offset(self) -> int:
         return self._data_offsets[0] + self._base_offset
 
     @property
-    def count(self) -> List[int]:
+    def count(self) -> int:
         return self._data_offsets[1] - self._data_offsets[0]
 
     @property
@@ -132,19 +144,22 @@ class TensorMeta:
         self._tensor = tensor
 
     def __str__(self) -> str:
-        return str({
-            "name": self._name,
-            "dtype": self._dtype,
-            "shape": self._shape,
-            "data_offsets": self._data_offsets,
-        })
+        return str(
+            {
+                "name": self._name,
+                "dtype": self._dtype,
+                "shape": self._shape,
+                "data_offsets": self._data_offsets,
+            }
+        )
 
     def __repr__(self) -> str:
         return self.__str__()
 
 
-def split_continue_tensors(tensor_metas: List[TensorMeta],
-                           num_readers: int) -> List[Tuple[TensorMeta]]:
+def split_continue_tensors(
+    tensor_metas: List[TensorMeta], num_readers: int
+) -> List[Tuple[TensorMeta, ...]]:
     """
     Note: Usually, the number of groups for splitting tensors
           is greater than num_deaders.
@@ -153,12 +168,12 @@ def split_continue_tensors(tensor_metas: List[TensorMeta],
     assert num_readers > 0, "num_readers should be greater than 0"
 
     if len(tensor_metas) <= num_readers:
-        return [(item, ) for item in tensor_metas]
+        return [(item,) for item in tensor_metas]
 
     max_offset = tensor_metas[-1].data_offsets[1]
     avg_size = max_offset // num_readers
-    group = []
-    groups = []
+    group: List[TensorMeta] = []
+    groups: List[Tuple[TensorMeta, ...]] = []
     group_size = 0
     for tensor_meta in tensor_metas:
         if len(group) == 0 or group_size + tensor_meta.count <= avg_size:
@@ -174,18 +189,19 @@ def split_continue_tensors(tensor_metas: List[TensorMeta],
     return groups
 
 
-def split_continue_tensors_v1(tensor_metas: List[TensorMeta],
-                              num_readers: int) -> List[Tuple[TensorMeta]]:
+def split_continue_tensors_v1(
+    tensor_metas: List[TensorMeta], num_readers: int
+) -> List[Tuple[TensorMeta, ...]]:
     assert len(tensor_metas) > 0, "tensor_metas should not be empty"
     assert num_readers > 0, "num_readers should be greater than 0"
 
     if len(tensor_metas) <= num_readers:
-        return [(item, ) for item in tensor_metas]
+        return [(item,) for item in tensor_metas]
 
     max_offset = tensor_metas[-1].data_offsets[1]
     avg_size = max_offset // num_readers
-    group = []
-    groups = []
+    group: List[TensorMeta] = []
+    groups: List[Tuple[TensorMeta, ...]] = []
     current_max_offset = avg_size
     for tensor_meta in tensor_metas:
         start, end = tensor_meta.data_offsets

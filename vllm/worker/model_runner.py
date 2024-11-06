@@ -1011,6 +1011,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 model_config=self.model_config,
                 parallel_config=self.parallel_config,
                 kv_cache_dtype=self.kv_cache_dtype,
+                max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
                 torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                         self.model_config.dtype),
                 metrics = metrics,

@@ -49,6 +49,7 @@ class VineyardLLMCache:
         self,
         head_size: int,
         num_kv_heads: int,
+        max_num_batched_tokens: int,
         cache_capacity: int = 1024,
         layer: int = 2,
         kv_cache_dtype: str = None,
@@ -59,6 +60,7 @@ class VineyardLLMCache:
 
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.cache_capacity = cache_capacity
         self.layer = layer
         self.kv_cache_dtype = kv_cache_dtype
@@ -72,13 +74,19 @@ class VineyardLLMCache:
             world_size=get_tensor_model_parallel_world_size(),
         )
         self.chunk_size = self.cache.chunk_size
-        self.token_capacity = 2**15
+
+        if self.max_num_batched_tokens % self.chunk_size != 0:
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) must" \
+                f"be a multiple of chunk_size ({self.chunk_size})"
+            )
         self.buffer = torch.empty(
-            (2, self.layer, self.token_capacity, self.num_kv_heads, self.head_size),
+            (2, self.layer, self.max_num_batched_tokens, self.num_kv_heads, self.head_size),
             dtype=torch_dtype, device='cpu',
         ).pin_memory()
+        self.cuda_buffer = self.buffer.cuda()
         self.tensors = []
-        for i in range(self.token_capacity):
+        for i in range(self.max_num_batched_tokens):
             self.tensors.append([])
             for j in range(self.layer):
                 k_tensor = self.buffer[0, j, i]
@@ -104,6 +112,7 @@ class VineyardLLMCache:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         kv_cache_dtype: str,
+        max_num_batched_tokens: int,
         torch_dtype: torch.dtype = torch.bfloat16,
         metrics: CacheServiceMetrics = None,
     ) -> Optional["VineyardLLMCache"]:
@@ -122,6 +131,7 @@ class VineyardLLMCache:
         return VineyardLLMCache(
             head_size=head_size,
             num_kv_heads=num_kv_heads,
+            max_num_batched_tokens=max_num_batched_tokens,
             cache_capacity=2**20,
             layer=num_layers,
             kv_cache_dtype=kv_cache_dtype,
@@ -228,7 +238,12 @@ class VineyardLLMCache:
         copy_start = torch.cuda.Event(enable_timing=True)
         copy_end = torch.cuda.Event(enable_timing=True)
         copy_start.record()
-        buffer = self.buffer[:, :, offset:offset+matched].cuda()
+        # Copying the entire buffer to the GPU in a single operation and then
+        # slicing it into smaller, non-contiguou chunks on the GPU is more
+        # efficient than performing multiple smaller copy operations. This
+        # approach reduces the number of transfers between CPU and GPU,
+        # leading to faster overall performance.
+        buffer = self.cuda_buffer.copy_(self.buffer)[:, :, :matched]
         copy_end.record()
         copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
@@ -369,9 +384,11 @@ class VineyardLLMCache:
         start_unload = torch.cuda.Event(enable_timing=True)
         end_unload = torch.cuda.Event(enable_timing=True)
         start_unload.record()
+        # using a cuda staging buffer to avoid the inefficiency of non-contiguous HBM->DRAM memcpy
         for j in range(self.layer):
-            self.buffer[:, j, :update_token_size].copy_(
+            self.cuda_buffer[:, j, :update_token_size].copy_(
                 kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
+        self.buffer.copy_(self.cuda_buffer)
         end_unload.record()
         end_unload.synchronize()
         duration = start_unload.elapsed_time(end_unload) / 1000.0

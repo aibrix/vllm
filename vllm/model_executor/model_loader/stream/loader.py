@@ -52,13 +52,13 @@ def get_safetensors_metas(file: LoadFile):
                 dtype=tensor_meta["dtype"],
                 shape=tensor_meta["shape"],
                 data_offsets=tensor_meta["data_offsets"],
-            )
-        )
+            ))
     # Ensure tensors chunks could be split continuously
     return sorted(metas, key=lambda obj: obj.real_offset)
 
 
 class StreamLoader:
+
     def __init__(
         self,
         file: LoadFile,
@@ -89,22 +89,22 @@ class StreamLoader:
         # TODO use stream nonblocking IO
         for tensor_meta in tensor_metas:
             tensor_buffer = self.file.load_to_buffer(
-                offset=tensor_meta.real_offset, count=tensor_meta.count
-            )
+                offset=tensor_meta.real_offset, count=tensor_meta.count)
             tensor = torch.frombuffer(
-                tensor_buffer, dtype=tensor_meta.dtype
-            ).view(tensor_meta.shape)
+                tensor_buffer, dtype=tensor_meta.dtype).view(tensor_meta.shape)
             if is_cuda:
                 tensor = tensor.to(device, non_blocking=True)
             tensor_meta.set_tensor(tensor)
             transfer_out_queue.put(tensor_meta)
 
     def get_weights_iterator(
-        self, device: Union[torch.device, str] = "cpu"
+        self,
+        device: Union[torch.device, str] = "cpu"
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-        tensors_per_reader: List[Tuple[TensorMeta, ...]] = (
-            split_continue_tensors(self.tensors_metas, self.num_thread)
-        )
+        tensors_per_reader: List[Tuple[TensorMeta,
+                                       ...]] = (split_continue_tensors(
+                                           self.tensors_metas,
+                                           self.num_thread))
 
         effective_num_readers = len(tensors_per_reader)
         self._reader_pool = concurrent.futures.ThreadPoolExecutor(
@@ -112,8 +112,7 @@ class StreamLoader:
             thread_name_prefix="SafetensorsReader",
         )
         transfer_out_queue: queue.SimpleQueue[Union[Exception, TensorMeta]] = (
-            queue.SimpleQueue()
-        )  # type: ignore
+            queue.SimpleQueue())  # type: ignore
         futures: List[concurrent.futures.Future] = []
 
         barrier = threading.Barrier(effective_num_readers)
@@ -131,9 +130,9 @@ class StreamLoader:
 
         try:
             for _ in range(len(self.tensors_metas)):
-                tensor_meta: Union[TensorMeta, Exception] = (
-                    transfer_out_queue.get(timeout=3600)
-                )
+                tensor_meta: Union[TensorMeta,
+                                   Exception] = (transfer_out_queue.get(
+                                       timeout=3600))
                 if isinstance(tensor_meta, Exception):
                     raise tensor_meta
                 yield tensor_meta.name, tensor_meta.tensor
@@ -141,18 +140,17 @@ class StreamLoader:
             raise
 
     def get_weights_iterator_wo_threads(
-        self, device: Union[torch.device, str] = "cpu"
+        self,
+        device: Union[torch.device, str] = "cpu"
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         device = torch.device(device)
         is_cuda = device.type == "cuda"
         # TODO use stream nonblocking IO
         for tensor_meta in self.tensors_metas:
             tensor_buffer = self.file.load_to_bytes(
-                offset=tensor_meta.real_offset, count=tensor_meta.count
-            )
+                offset=tensor_meta.real_offset, count=tensor_meta.count)
             tensor = torch.frombuffer(
-                tensor_buffer, dtype=tensor_meta.dtype
-            ).view(tensor_meta.shape)
+                tensor_buffer, dtype=tensor_meta.dtype).view(tensor_meta.shape)
 
             if is_cuda:
                 tensor = tensor.to(device, non_blocking=True)
@@ -173,8 +171,7 @@ class StreamModel:
 
     def __post_init__(self):
         scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(
-            self.model_uri
-        )
+            self.model_uri)
         if not bucket_path.endswith("/"):
             bucket_path += "/"
         self.model_source_type = scheme
@@ -198,8 +195,7 @@ class StreamModel:
                 num_threads=self.num_threads,
             )
             objects_out = self.s3_client.list_objects_v2(
-                Bucket=self.bucket_name, Delimiter="/", Prefix=bucket_path
-            )
+                Bucket=self.bucket_name, Delimiter="/", Prefix=bucket_path)
             files = [
                 str(content.get("Key"))
                 for content in objects_out.get("Contents", [])
@@ -215,9 +211,9 @@ class StreamModel:
         if len(self.safetensors_files) == 0:
             raise ValueError(f"no safetensors file found in {self.model_uri}")
 
-    def download_config(
-        self, target_dir: str, force_download: bool = False
-    ) -> Path:
+    def download_config(self,
+                        target_dir: str,
+                        force_download: bool = False) -> Path:
         if self.model_source_type == "local":
             logger.info("local config no need to download")
             return Path(self.model_uri)
@@ -258,6 +254,5 @@ class StreamModel:
                 use_direct_io=self.use_direct_io,
             )
             for name, tensor in safetensors_loader.get_weights_iterator(
-                device=device
-            ):
+                    device=device):
                 yield name, tensor

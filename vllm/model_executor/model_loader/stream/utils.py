@@ -14,12 +14,8 @@ DEFAULT_POOL_CONNECTIONS = 10
 
 
 def meta_file(local_path: Union[Path, str], file_name: str) -> Path:
-    return (
-        Path(local_path)
-        .joinpath(DOWNLOAD_CACHE_DIR)
-        .joinpath(f"{file_name}.metadata")
-        .absolute()
-    )
+    return (Path(local_path).joinpath(DOWNLOAD_CACHE_DIR).joinpath(
+        f"{file_name}.metadata").absolute())
 
 
 def save_meta_data(file_path: Union[Path, str], etag: str):
@@ -72,9 +68,8 @@ def need_to_download(
     if force_download:
         return True
 
-    return not check_file_exist(
-        local_file, meta_data_file, expected_file_size, expected_etag
-    )
+    return not check_file_exist(local_file, meta_data_file, expected_file_size,
+                                expected_etag)
 
 
 def read_to_bytes_io(content, chunk_size=None):
@@ -132,19 +127,19 @@ def _parse_bucket_info_from_uri(uri: str) -> Tuple[str, str, str]:
     return scheme, bucket_name, bucket_path
 
 
-def _create_s3_client(
-    ak, sk, endpoint, region, num_threads=DEFAULT_POOL_CONNECTIONS
-):
+def _create_s3_client(ak,
+                      sk,
+                      endpoint,
+                      region,
+                      num_threads=DEFAULT_POOL_CONNECTIONS):
     ak = ak or os.getenv("AWS_ACCESS_KEY_ID")
     sk = sk or os.getenv("AWS_SECRET_ACCESS_KEY")
     endpoint = endpoint or os.getenv("AWS_ENDPOINT_URL")
     region = region or os.getenv("AWS_REGION")
 
-    max_pool_connections = (
-        num_threads
-        if num_threads > DEFAULT_POOL_CONNECTIONS
-        else DEFAULT_POOL_CONNECTIONS
-    )
+    max_pool_connections = (num_threads
+                            if num_threads > DEFAULT_POOL_CONNECTIONS else
+                            DEFAULT_POOL_CONNECTIONS)
 
     my_config = Config(
         # signature_version = 'v4',
@@ -162,6 +157,7 @@ def _create_s3_client(
 
 
 class TensorMeta:
+
     def __init__(
         self,
         name: str,
@@ -209,22 +205,19 @@ class TensorMeta:
         self._tensor = tensor
 
     def __str__(self) -> str:
-        return str(
-            {
-                "name": self._name,
-                "dtype": self._dtype,
-                "shape": self._shape,
-                "data_offsets": self._data_offsets,
-            }
-        )
+        return str({
+            "name": self._name,
+            "dtype": self._dtype,
+            "shape": self._shape,
+            "data_offsets": self._data_offsets,
+        })
 
     def __repr__(self) -> str:
         return self.__str__()
 
 
-def split_continue_tensors(
-    tensor_metas: List[TensorMeta], num_readers: int
-) -> List[Tuple[TensorMeta, ...]]:
+def split_continue_tensors(tensor_metas: List[TensorMeta],
+                           num_readers: int) -> List[Tuple[TensorMeta, ...]]:
     """
     Note: Usually, the number of groups for splitting tensors
           is greater than num_deaders.
@@ -233,7 +226,7 @@ def split_continue_tensors(
     assert num_readers > 0, "num_readers should be greater than 0"
 
     if len(tensor_metas) <= num_readers:
-        return [(item,) for item in tensor_metas]
+        return [(item, ) for item in tensor_metas]
 
     max_offset = tensor_metas[-1].data_offsets[1]
     avg_size = max_offset // num_readers
@@ -255,13 +248,13 @@ def split_continue_tensors(
 
 
 def split_continue_tensors_v1(
-    tensor_metas: List[TensorMeta], num_readers: int
-) -> List[Tuple[TensorMeta, ...]]:
+        tensor_metas: List[TensorMeta],
+        num_readers: int) -> List[Tuple[TensorMeta, ...]]:
     assert len(tensor_metas) > 0, "tensor_metas should not be empty"
     assert num_readers > 0, "num_readers should be greater than 0"
 
     if len(tensor_metas) <= num_readers:
-        return [(item,) for item in tensor_metas]
+        return [(item, ) for item in tensor_metas]
 
     max_offset = tensor_metas[-1].data_offsets[1]
     avg_size = max_offset // num_readers

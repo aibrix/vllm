@@ -1175,14 +1175,13 @@ class StreamModelLoader(BaseModelLoader):
         else:
             self.stream_loader_config = StreamConfig(
                 **load_config.model_loader_extra_config)
-        
+
         self.stream_model = self.stream_loader_config.construct_stream_model()
 
     def _verify_config(self, model_config: ModelConfig,
                        parallel_config: ParallelConfig):
         self.stream_loader_config.verify_with_model_config(model_config)
         self.stream_loader_config.verify_with_parallel_config(parallel_config)
-
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -1197,9 +1196,10 @@ class StreamModelLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, cache_config,
                                           scheduler_config)
-            
-            model.load_weights(self.stream_model.get_weights_iterator(device_config.device))
-        
+
+            model.load_weights(
+                self.stream_model.get_weights_iterator(device_config.device))
+
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:

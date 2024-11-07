@@ -29,6 +29,7 @@ logger = init_logger(__name__)
 
 
 class LoadFile:
+
     def __init__(self, file_source: str) -> None:
         self.file_source = file_source
 
@@ -46,6 +47,7 @@ class LoadFile:
 
 
 class LocalFile(LoadFile):
+
     def __init__(self, file: Union[str, Path]) -> None:
         if not Path(file).exists():
             raise ValueError(f"file {file} not exist")
@@ -55,9 +57,8 @@ class LocalFile(LoadFile):
 
     def load_whole_file(self, num_threads: int = 1):
         if num_threads != 1:
-            logger.warning(
-                "num_threads %s is not supported for local file.", num_threads
-            )
+            logger.warning("num_threads %s is not supported for local file.",
+                           num_threads)
 
         tensor_bytes = np.memmap(
             self.file,
@@ -80,6 +81,7 @@ class LocalFile(LoadFile):
 
 
 class RemoteFile(LoadFile):
+
     def __init__(self, file: str, file_source: str) -> None:
         self.file = file
         super().__init__(file_source=file_source)
@@ -93,6 +95,7 @@ class RemoteFile(LoadFile):
 
 
 class S3File(RemoteFile):
+
     def __init__(
         self,
         scheme: str,
@@ -121,15 +124,15 @@ class S3File(RemoteFile):
             self.s3_client.head_object(Bucket=bucket_name, Key=bucket_path)
         except Exception as e:
             raise ValueError(
-                f"S3 bucket path {bucket_path} not exist for {e}."
-            ) from e
+                f"S3 bucket path {bucket_path} not exist for {e}.") from e
 
         file = scheme + "://" + bucket_name + "/" + bucket_path
         super().__init__(file=file, file_source=scheme)
 
     @classmethod
     def from_uri(cls, file_uri: str, **kwargs):
-        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(file_uri)
+        scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(
+            file_uri)
         cls(scheme, bucket_name, bucket_path, **kwargs)
 
     def load_whole_file(self, num_threads: int = 1):
@@ -150,9 +153,9 @@ class S3File(RemoteFile):
 
     def load_to_bytes(self, offset: int, count: int):
         range_header = f"bytes={offset}-{offset+count-1}"
-        resp = self.s3_client.get_object(
-            Bucket=self.bucket_name, Key=self.bucket_path, Range=range_header
-        )
+        resp = self.s3_client.get_object(Bucket=self.bucket_name,
+                                         Key=self.bucket_path,
+                                         Range=range_header)
         return read_to_bytes_io(resp.get("Body"))
 
     def download_file(
@@ -162,13 +165,11 @@ class S3File(RemoteFile):
         force_download: bool = False,
     ):
         try:
-            meta_data = self.s3_client.head_object(
-                Bucket=self.bucket_name, Key=self.bucket_path
-            )
+            meta_data = self.s3_client.head_object(Bucket=self.bucket_name,
+                                                   Key=self.bucket_path)
         except Exception as e:
-            raise ValueError(
-                "S3 bucket path %s not exist for %s.", self.bucket_path, e
-            ) from e
+            raise ValueError("S3 bucket path %s not exist for %s.",
+                             self.bucket_path, e) from e
 
         # ensure target dir exist
         target_path = Path(target_dir)
@@ -181,10 +182,10 @@ class S3File(RemoteFile):
         etag = meta_data.get("ETag", "")
         file_size = meta_data.get("ContentLength", 0)
 
-        meta_data_file = meta_file(local_path=target_path, file_name=_file_name)
-        if not need_to_download(
-            local_file, meta_data_file, file_size, etag, force_download
-        ):
+        meta_data_file = meta_file(local_path=target_path,
+                                   file_name=_file_name)
+        if not need_to_download(local_file, meta_data_file, file_size, etag,
+                                force_download):
             logger.info("file `%s` already exist.", self.bucket_path)
             return
 

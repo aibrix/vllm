@@ -1012,6 +1012,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
+        start_time = time.perf_counter()
         with CudaMemoryProfiler() as m:
             self.model = get_model(model_config=self.model_config,
                                    device_config=self.device_config,
@@ -1020,10 +1021,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                                    parallel_config=self.parallel_config,
                                    scheduler_config=self.scheduler_config,
                                    cache_config=self.cache_config)
-
+        end_time = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
-        logger.info("Loading model weights took %.4f GB",
-                    self.model_memory_usage / float(2**30))
+        logger.info("Loading model weights took %.4f GB, cost %.2f s",
+                    self.model_memory_usage / float(2**30),
+                    end_time - start_time)
 
         if self.lora_config:
             assert supports_lora(self.model), "Model does not support LoRA"

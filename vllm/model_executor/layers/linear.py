@@ -19,6 +19,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PerTensorScaleParameter,
                                            RowvLLMParameter)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
@@ -131,8 +132,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        func = ops.flat_gemm if x.shape[0] <= 8 else F.linear
 
-        return F.linear(x, layer.weight, bias)
+        return func(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):

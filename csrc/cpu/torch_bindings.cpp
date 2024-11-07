@@ -14,6 +14,11 @@ void int8_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
+  // flat_gemm
+  ops.def(
+      "flat_gemm(Tensor x, Tensor weight, Tensor? bias) -> Tensor");
+  ops.impl("flat_gemm", torch::kCUDA, &flat_gemm);
+
   // Attention ops
   // Compute the attention between an input query and the cached keys/values
   // using PagedAttention.

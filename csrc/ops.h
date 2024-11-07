@@ -7,6 +7,9 @@
 
 #include "core/scalar_type.hpp"
 
+torch::Tensor flat_gemm(const torch::Tensor& x, const torch::Tensor& weight,
+                        const std::optional<torch::Tensor>& bias);
+
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,

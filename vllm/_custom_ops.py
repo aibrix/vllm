@@ -569,6 +569,11 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                                        azp, bias)
     return out
 
+# flat_gemm
+def flat_gemm(x: torch.Tensor, 
+              weight: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.ops._C.flat_gemm(x, weight, bias)
 
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,

@@ -25,7 +25,10 @@ from vllm.logger import init_logger
 from .utils import (
     _create_s3_client,
     _parse_bucket_info_from_uri,
+    meta_file,
+    need_to_download,
     read_to_bytes_io,
+    save_meta_data,
 )
 
 logger = init_logger(__name__)
@@ -158,13 +161,29 @@ class S3File(RemoteFile):
         )
         return read_to_bytes_io(resp.get("Body"))
 
-    def download_file(self, target_dir: str, num_threads: int = 1):
+    def download_file(self, target_dir: str, num_threads: int = 1, force_download: bool = False):
+        try:
+            meta_data = self.s3_client.head_object(Bucket=self.bucket_name,
+                                                   Key=self.bucket_path)
+        except Exception as e:
+            raise ValueError("S3 bucket path %s not exist for %s.", self.bucket_path, e)
+
         # ensure target dir exist
         target_path = Path(target_dir)
         target_path.mkdir(parents=True, exist_ok=True)
-
+        
         _file_name = self.bucket_path.split("/")[-1]
         local_file = target_path.joinpath(_file_name).absolute()
+
+        # check if file exist
+        etag = meta_data.get("ETag", "")
+        file_size = meta_data.get("ContentLength", 0)
+        
+        meta_data_file = meta_file(local_path=target_path, file_name=_file_name)
+        if not need_to_download(local_file, meta_data_file, file_size, etag, force_download):
+            logger.info("file `%s` already exist.", self.bucket_path)
+            return
+
         config_kwargs = {
             "max_concurrency": num_threads,
             "use_threads": True,
@@ -178,6 +197,7 @@ class S3File(RemoteFile):
             ),  # S3 client does not support Path, convert it to str
             Config=config,
         )
+        save_meta_data(meta_data_file, etag)
         logger.info(
             "download file from `%s` to `%s` success.",
             self.bucket_path,

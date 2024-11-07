@@ -28,7 +28,6 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.model_loader.stream.loader import StreamModel
 from vllm.model_executor.model_loader.stream_loader import StreamConfig
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
@@ -1202,6 +1201,9 @@ class StreamModelLoader(BaseModelLoader):
             model.load_weights(self.stream_model.get_weights_iterator(device_config.device))
         
         return model.eval()
+
+    def download_model(self, model_config: ModelConfig) -> None:
+        pass  # Nothing to download
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:

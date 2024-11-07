@@ -217,7 +217,7 @@ class StreamModel:
         if len(self.safetensors_files) == 0:
             raise ValueError(f"no safetensors file found in {self.model_uri}")
 
-    def download_config(self, target_dir: str) -> Path:
+    def download_config(self, target_dir: str, force_download: bool = False) -> Path:
         if self.model_source_type == "local":
             logger.info("local config no need to download")
             return Path(self.model_uri)
@@ -231,7 +231,9 @@ class StreamModel:
             )
 
             config_s3.download_file(
-                target_dir=target_dir, num_threads=self.num_threads
+                target_dir=target_dir,
+                num_threads=self.num_threads,
+                force_download=force_download
             )
 
         target_path = Path(target_dir)

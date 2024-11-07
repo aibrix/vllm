@@ -1,15 +1,82 @@
 import os
 from io import BytesIO
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import boto3
 import torch
 from botocore.config import Config
 
-from . import SUPPORTED_STREAM_STORAGE
+from . import SUPPORTED_STREAM_STORAGE, DOWNLOAD_CACHE_DIR
 
 DEFAULT_POOL_CONNECTIONS = 10
+
+
+def meta_file(local_path: Union[Path, str], file_name: str) -> Path:
+    return (
+        Path(local_path)
+        .joinpath(DOWNLOAD_CACHE_DIR)
+        .joinpath(f"{file_name}.metadata")
+        .absolute()
+    )
+
+
+def save_meta_data(file_path: Union[Path, str], etag: str):
+    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, "w") as f:
+        f.write(etag)
+
+
+def load_meta_data(file_path: Union[Path, str]):
+    if Path(file_path).exists():
+        with open(file_path, "r") as f:
+            return f.read()
+    return None
+
+
+def check_file_exist(
+    local_file: Union[Path, str],
+    meta_file: Union[Path, str],
+    expected_file_size: int,
+    expected_etag: str,
+) -> bool:
+    if expected_file_size is None or expected_file_size <= 0:
+        return False
+
+    if expected_etag is None or expected_etag == "":
+        return False
+
+    if not Path(local_file).exists():
+        return False
+
+    file_size = os.path.getsize(local_file)
+    if file_size != expected_file_size:
+        return False
+
+    if not Path(meta_file).exists():
+        return False
+
+    etag = load_meta_data(meta_file)
+    return etag == expected_etag
+
+
+def need_to_download(
+    local_file: Union[Path, str],
+    meta_data_file: Union[Path, str],
+    expected_file_size: int,
+    expected_etag: str,
+    force_download: bool,
+) -> bool:
+    _file_name = Path(local_file).name
+    if force_download:
+        return True
+
+    if check_file_exist(
+        local_file, meta_data_file, expected_file_size, expected_etag
+    ):
+        return False
+    return True
 
 
 def read_to_bytes_io(content, chunk_size=None):

@@ -14,3 +14,4 @@
 
 
 SUPPORTED_STREAM_STORAGE = ("s3", "tos", "local")
+DOWNLOAD_CACHE_DIR = ".cache"

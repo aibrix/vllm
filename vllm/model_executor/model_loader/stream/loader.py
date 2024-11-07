@@ -175,6 +175,8 @@ class StreamModel:
         scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(
             self.model_uri
         )
+        if not bucket_path.endswith("/"):
+            bucket_path += "/"
         self.model_source_type = scheme
         self.bucket_name = bucket_name
 

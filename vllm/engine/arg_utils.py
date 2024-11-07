@@ -2,6 +2,7 @@ import argparse
 import dataclasses
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple,
                     Type, Union)
 
@@ -807,14 +808,15 @@ class EngineArgs:
             model_loader_extra_config = self.model_loader_extra_config or {}
             if isinstance(model_loader_extra_config, str):
                 model_loader_extra_config = json.loads(
-                    model_loader_extra_config
-                )
+                    model_loader_extra_config)
 
             stream_config = StreamConfig(**model_loader_extra_config)
             stream_model = stream_config.construct_stream_model()
-            config_dir = self.download_dir or "/tmp/stream_load/"
+
+            config_dir = self.download_dir or str(
+                Path("/tmp/stream_load/").joinpath(self.model))
             config_path = stream_model.download_config(config_dir)
-            
+
             reset_tokenizer = self.model == self.tokenizer
             self.served_model_name = self.served_model_name or self.model
             self.model = str(config_path)

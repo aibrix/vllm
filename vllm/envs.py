@@ -64,6 +64,10 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VINEYARD_CACHE_CPU_MEM_LIMIT_GB: float = 10
+    VINEYARD_CACHE_ENABLE_ASYNC_UPDATE: bool = False
+    VINEYARD_CACHE_ASYNC_UPDATE_CPU_MEM_UTIL: float = 0.2
+    VINEYARD_CACHE_MIN_INFLIGHT_TASKS: int = 1
     VINEYARD_CACHE_MAX_INFLIGHT_TASKS: int = 32
 
 
@@ -432,6 +436,24 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
+
+    # CPU memory limit for vineyard cache, in GB
+    "VINEYARD_CACHE_CPU_MEM_LIMIT_GB":
+    lambda: float(os.getenv("VINEYARD_CACHE_CPU_MEM_LIMIT_GB", "10")),
+
+    # If set, vineyard will use async update
+    "VINEYARD_CACHE_ENABLE_ASYNC_UPDATE": lambda: (
+        os.environ.get("VINEYARD_CACHE_ENABLE_ASYNC_UPDATE", "0").strip().lower()
+        in ("1", "true")
+    ),
+
+    # CPU memory utilization for async update, default 20%
+    "VINEYARD_CACHE_ASYNC_UPDATE_CPU_MEM_UTIL":
+    lambda: float(os.getenv("VINEYARD_CACHE_ASYNC_UPDATE_CPU_MEM_UTIL", "0.2")),
+
+    # Min number of inflight async tasks for vineyard cache
+    "VINEYARD_CACHE_MIN_INFLIGHT_TASKS":
+    lambda: int(os.getenv("VINEYARD_CACHE_MIN_INFLIGHT_TASKS", "1")),
 
     # Max number of inflight async tasks for vineyard cache
     "VINEYARD_CACHE_MAX_INFLIGHT_TASKS":

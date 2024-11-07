@@ -44,6 +44,12 @@ class CacheServiceMetrics:
     normalized_time_reshape: list = [] # Times used reshaping tensors for flash attention KV format normalized by number of tokens. 
     normalized_time_unload: list = [] # Times used move computed KV from device memory normalized by number of tokens. 
     normalized_time_update: list = [] # Times used update computed KV to cache service normalized by number of tokens. 
+    err_async_update_task_queue_full: int = 0 # Number of Full exceptions when enqueuing async update tasks
+
+    lock: threading.Lock = threading.Lock()
+    time_async_update_queue: list = [] # Queuing delays of async update tasks
+    time_async_update_exec: list = [] # Execution times of async update tasks
+    counter_async_update_updated: list = [] # Number of udpated tokens
 
 
 class VineyardLLMCache:
@@ -56,7 +62,10 @@ class VineyardLLMCache:
         layer: int = 2,
         kv_cache_dtype: str = None,
         torch_dtype: torch.dtype = torch.bfloat16,
-        metrics: CacheServiceMetrics = None
+        metrics: CacheServiceMetrics = None,
+        enable_async_update: bool = False,
+        min_inflight_tasks: int = 1,
+        max_inflight_tasks: int = 1,
     ):
         self._init_vineyard_logger()
 
@@ -84,28 +93,36 @@ class VineyardLLMCache:
             )
         self.fetch_buffer, self.fetch_tensors = self._pinned_tensor_creator()
         self.cuda_buffer = self.fetch_buffer.cuda()
-        # we use an object pool to reuse the pinned tensors and restrict the number of
-        # inflight tasks. if an update operation cannot get a tensor from the pool,
-        # meaning we already have VINEYARD_CACHE_MAX_INFLIGHT_TASKS tasks issued,
-        # it then simply skips the update. A completed task will return the used
-        # tensor back to the pool.
-        self.tensor_pool = ObjectPool(
-            2, envs.VINEYARD_CACHE_MAX_INFLIGHT_TASKS, self._pinned_tensor_creator
-        )
-        self.metrics = metrics
+        self.enable_async_update = enable_async_update
 
-        self._update_tasks = Queue(maxsize=envs.VINEYARD_CACHE_MAX_INFLIGHT_TASKS)
-        # The cache backend is designed to drop updates whose prefix chunks are
-        # not already present in the cache, which imposes an ordering requirement
-        # on updates: we must perform updates in the issued order. For simplicity,
-        # we use a single thread to process all updates sequentially.
-        self._background_loop = threading.Thread(
-            target=self._run_background_loop, daemon=True
-        )
-        self._background_loop.start()
+        if self.enable_async_update:
+            # we use an object pool to reuse the pinned tensors and restrict the number of
+            # inflight tasks. if an update operation cannot get a tensor from the pool,
+            # meaning we already have max_inflight_tasks tasks issued, it then simply skips
+            # the update. A completed task will return the used tensor back to the pool.
+            self.tensor_pool = ObjectPool(
+                min_inflight_tasks,
+                max_inflight_tasks,
+                self._pinned_tensor_creator,
+            )
+
+            self._update_tasks = Queue(maxsize=max_inflight_tasks)
+            # The cache backend is designed to drop updates whose prefix chunks are
+            # not already present in the cache, which imposes an ordering requirement
+            # on updates: we must perform updates in the issued order. For simplicity,
+            # we use a single thread to process all updates sequentially.
+            self._background_loop = threading.Thread(
+                target=self._run_background_loop, daemon=True
+            )
+            self._background_loop.start()
+
+        self.metrics = metrics
         logger.info(f"VineyardLLMCache init {metrics}")
+        logger.info(self)
 
     def _pinned_tensor_creator(self) -> Tuple[torch.Tensor, List[List[List[VineyardKVTensor]]]]:
+        '''Create a pinned tensor and a list of tensors to hold the KV tensors.
+        '''
         buffer = torch.empty(
             (2, self.layer, self.max_num_batched_tokens, self.num_kv_heads, self.head_size),
             dtype=self.torch_dtype, device='cpu',
@@ -132,6 +149,8 @@ class VineyardLLMCache:
             vineyard.logger.addHandler(handler)
 
     def _run_background_loop(self):
+        '''Start a background loop to process the update tasks.
+        '''
         logger.info("VineyardKVCache background loop is running")
         while True:
             # Wait until there is a task in the queue
@@ -162,24 +181,56 @@ class VineyardLLMCache:
             logger.warn("VineyardLLMCache requires flash attention decoding")
             return None
 
+        cpu_mem_limit = int(envs.VINEYARD_CACHE_CPU_MEM_LIMIT_GB * 1024**3)
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
+        token_nbytes = num_layers * num_kv_heads * head_size * 2
+
+        # we will use one temp buffer to hold the kv tensors fetched from v6d cache
+        # , i.e., `fetch_buffer`
+        num_temp_cpu_buffer = 1
+        kwargs = {}
+
+        # if async update is enabled, we will use a portion of cpu memory as temp
+        # buffers to hold the kv tensors being updated into the v6d cache
+        if envs.VINEYARD_CACHE_ENABLE_ASYNC_UPDATE:
+            # get the mem limit
+            async_update_cpu_mem_util = envs.VINEYARD_CACHE_ASYNC_UPDATE_CPU_MEM_UTIL
+            async_update_cpu_mem_limit = async_update_cpu_mem_util * cpu_mem_limit
+            max_inflight_tasks = int(
+                async_update_cpu_mem_limit // (max_num_batched_tokens * token_nbytes)
+            )
+            max_inflight_tasks = min(max_inflight_tasks, envs.VINEYARD_CACHE_MAX_INFLIGHT_TASKS)
+            num_temp_cpu_buffer += max_inflight_tasks
+            kwargs["enable_async_update"] = True
+            kwargs["min_inflight_tasks"] = min(envs.VINEYARD_CACHE_MIN_INFLIGHT_TASKS, max_inflight_tasks)
+            kwargs["max_inflight_tasks"] = max_inflight_tasks
+            logger.info(f"VineyardLLMCache async update: {kwargs}")
+
+        # convert cache capacity to number of tokens
+        cache_capacity = (
+            cpu_mem_limit
+            - num_temp_cpu_buffer * max_num_batched_tokens * token_nbytes
+        ) // token_nbytes
         logger.info(f"VineyardLLMCache from_envs {metrics}")
         return VineyardLLMCache(
             head_size=head_size,
             num_kv_heads=num_kv_heads,
             max_num_batched_tokens=max_num_batched_tokens,
-            cache_capacity=2**20,
+            cache_capacity=cache_capacity,
             layer=num_layers,
             kv_cache_dtype=kv_cache_dtype,
             torch_dtype=torch_dtype,
-            metrics = metrics
+            metrics = metrics,
+            **kwargs,
         )
 
     def _update_seq_group_metadata(
         self, seq_group_metadata: SequenceGroupMetadata, value: int
     ) -> None:
+        '''Update sequence group's metadata
+        '''
         if seq_group_metadata is not None:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -237,6 +288,9 @@ class VineyardLLMCache:
              query_prefix,
              query_tokens
             ) = query_args
+
+        if query_token_size <= 0:
+            return seq_id, 0
 
         start_time = time.perf_counter()
         matched = self.cache.query(
@@ -368,16 +422,33 @@ class VineyardLLMCache:
         tokens: List[int],
         kv_cache_list: List[List[Tuple[VineyardKVTensor, VineyardKVTensor]]],
         buffer_tensors_tuple: Tuple[torch.Tensor, List[List[List[VineyardKVTensor]]]],
+        scheduled_time: float,
     ) -> None:
+        '''Update the KV cache with the given prefix and tokens.
+        '''
         try:
+            start_time = time.perf_counter()
+            queue_duration = start_time - scheduled_time
             updated = self.cache.update(prefix, tokens, kv_cache_list)
-            logger.debug(
-                f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
-            )
+            exec_duration = time.perf_counter() - start_time
+            if self.enable_async_update:
+                logger.debug(
+                    f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}, "
+                    f"queue_duration={queue_duration:.4f}, exec_duration={exec_duration:.4f}"
+                )
+                with self.metrics.lock:
+                    self.metrics.time_async_update_queue.append(queue_duration)
+                    self.metrics.time_async_update_exec.append(exec_duration)
+                    self.metrics.counter_async_update_updated.append(updated)
+            else:
+                logger.debug(
+                    f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
+                )
         except Exception:
             pass
         finally:
-            self.tensor_pool.put(buffer_tensors_tuple)
+            if self.enable_async_update:
+                self.tensor_pool.put(buffer_tensors_tuple)
 
     def update_seq_kv_caches(
         self,
@@ -427,11 +498,20 @@ class VineyardLLMCache:
             self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
             return
 
-        buffer_tensors_tuple = self.tensor_pool.get(block=False)
-        if buffer_tensors_tuple is None:
-            # restore the seq_group_metadata's and seq's metadata
-            self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
-            return
+        if self.enable_async_update:
+            buffer_tensors_tuple = self.tensor_pool.get(block=False)
+            # buffer_tensors_tuple is None means that we have max number of async
+            # updates in the flight. Right now, we just skip updates if we have no
+            # buffer.
+            if buffer_tensors_tuple is None:
+                # restore the seq_group_metadata's and seq's metadata
+                self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
+                return
+        else:
+            # if async update is disabled, its safe to reuse the same buffer and
+            # tensors used in the fetch operation
+            buffer_tensors_tuple = self.fetch_buffer, self.fetch_tensors
+
         update_buffer, update_tensors = buffer_tensors_tuple
 
         if seq_group_metadata is not None:
@@ -467,24 +547,29 @@ class VineyardLLMCache:
 
         start_time = time.perf_counter()
 
-        # async update
         update_task = partial(self._update_kv_cache,
             prefix=update_prefix,
             tokens=update_tokens,
             kv_cache_list=update_tensors[:update_token_size],
             buffer_tensors_tuple=buffer_tensors_tuple,
+            scheduled_time=start_time,
         )
-        try:
-            logger.debug(
-                f"submit update task: #prefix={len(update_prefix)}, #tokens={len(update_tokens)}"
-            )
-            self._update_tasks.put_nowait(update_task)
-            logger.debug(
-                f"task queue size={self._update_tasks.qsize()}, tensor pool size={self.tensor_pool.size}"
-            )
-        except Full:
-            logger.warning(f"update_seq_kv_caches: queue is full, skip this update")
-            self.tensor_pool.put(buffer_tensors_tuple)
+        if self.enable_async_update:
+            # async update
+            try:
+                logger.debug(
+                    f"submit update task: #prefix={len(update_prefix)}, #tokens={len(update_tokens)}"
+                )
+                self._update_tasks.put_nowait(update_task)
+                logger.debug(
+                    f"task queue size={self._update_tasks.qsize()}, tensor pool size={self.tensor_pool.size}"
+                )
+            except Full:
+                logger.warning(f"update_seq_kv_caches: queue is full, skip this update")
+                self.metrics.err_async_update_task_queue_full += 1
+                self.tensor_pool.put(buffer_tensors_tuple)
+        else:
+            update_task()
 
         duration = time.perf_counter() - start_time
         self.metrics.time_update.append(duration)   

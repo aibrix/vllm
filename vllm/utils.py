@@ -1273,8 +1273,8 @@ class ObjectPool:
         self.max_pool_size: int = max_pool_size
         self.object_creator: Callable[[], T] = object_creator
         self._pool: Queue = Queue(maxsize=max_pool_size)
-        self._lock = threading.Lock()
-        self._size = min_pool_size
+        self._lock: threading.Lock = threading.Lock()
+        self._size: int = min_pool_size
 
         # Pre-fill the pool with min_pool_size objects
         for _ in range(min_pool_size):
@@ -1294,26 +1294,30 @@ class ObjectPool:
         Returns:
             The object if available, otherwise None.
         """
-        try:
-            return self._pool.get(block=block, timeout=timeout)
-        except Empty:
-            with self._lock:
+        with self._lock:
+            try:
+                return self._pool.get(block=block, timeout=timeout)
+            except Empty:
                 # If the pool is empty but we haven't hit the max size,
                 # create a new object
                 if self._size < self.max_pool_size:
                     self._size += 1
                     return self.object_creator()
-            return None
+                return None
 
     def put(self, object: T) -> None:
         """
-        Return an object to the pool, discarding it if the pool is full.
+        Return an object to the pool. Only objects returned by get()
+        can be put back to the pool. Therefore, the pool should never
+        be full.
 
         Args:
             object: The object to return to the pool.
         """
         if object is not None:
-            self._pool.put(object, block=False)
+            with self._lock:
+                assert self._pool.qsize() < self._size
+                self._pool.put(object, block=False)
 
     @property
     def size(self) -> int:

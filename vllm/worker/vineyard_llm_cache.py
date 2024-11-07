@@ -123,7 +123,9 @@ class VineyardLLMCache:
         logger.info(f"VineyardLLMCache init {metrics}")
         logger.info(self)
 
-    def _pinned_tensor_creator(self) -> Tuple[torch.Tensor, List[List[List[VineyardKVTensor]]]]:
+    def _pinned_tensor_creator(
+        self,
+    ) -> Tuple[torch.Tensor, List[List[Tuple[VineyardKVTensor, VineyardKVTensor]]]]:
         '''Create a pinned tensor and a list of tensors to hold the KV tensors.
         '''
         buffer = torch.empty(
@@ -423,15 +425,31 @@ class VineyardLLMCache:
         self,
         prefix: List[int],
         tokens: List[int],
-        kv_cache_list: List[List[Tuple[VineyardKVTensor, VineyardKVTensor]]],
-        buffer_tensors_tuple: Tuple[torch.Tensor, List[List[List[VineyardKVTensor]]]],
+        buffer_tensors_tuple: Tuple[
+            torch.Tensor, List[List[Tuple[VineyardKVTensor, VineyardKVTensor]]]
+        ],
         scheduled_time: float,
     ) -> None:
-        '''Update the KV cache with the given prefix and tokens.
+        '''Update the KV cache.
+
+        Args:
+            prefix: Prefix tokens.
+            tokens: Tokens to be cached.
+            buffer_tensors_tuple: Within the tuple, the first element is a continugous,
+                                  pinned buffer, and the second element is a logical view
+                                  of the buffer that is used to let v6d to know about the
+                                  actual layout of the KV tensors.
+                                  If async update is enabled, the `buffer_tensors_tuple`
+                                  is allocated from the object pool, and thus we need to
+                                  return it back to the pool after completing the update
+                                  operation.
+            scheduled_time: The timestamp that the task is scheduled.
         '''
         try:
             start_time = time.perf_counter()
             queue_duration = start_time - scheduled_time
+            update_token_size = len(tokens)
+            kv_cache_list = buffer_tensors_tuple[1][:update_token_size]
             updated = self.cache.update(prefix, tokens, kv_cache_list)
             exec_duration = time.perf_counter() - start_time
             if self.enable_async_update:
@@ -515,7 +533,7 @@ class VineyardLLMCache:
             # tensors used in the fetch operation
             buffer_tensors_tuple = self.fetch_buffer, self.fetch_tensors
 
-        update_buffer, update_tensors = buffer_tensors_tuple
+        update_buffer, _ = buffer_tensors_tuple
 
         if seq_group_metadata is not None:
             block_table = seq_group_metadata.block_tables[seq_id]
@@ -553,7 +571,6 @@ class VineyardLLMCache:
         update_task = partial(self._update_kv_cache,
             prefix=update_prefix,
             tokens=update_tokens,
-            kv_cache_list=update_tensors[:update_token_size],
             buffer_tensors_tuple=buffer_tensors_tuple,
             scheduled_time=start_time,
         )

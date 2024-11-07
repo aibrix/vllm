@@ -1,6 +1,9 @@
 import logging
-import time
 import numpy as np
+import time
+import threading
+from functools import partial
+from queue import Queue, Full
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import torch
@@ -12,7 +15,7 @@ from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tensor_model_parallel_rank,
                                              get_tensor_model_parallel_world_size)
 from vllm.sequence import (SequenceData, SequenceGroupMetadata)
-from vllm.utils import init_logger
+from vllm.utils import init_logger, ObjectPool
 
 try:
     from vineyard.llm import KVCache as VineyardKVCache
@@ -41,9 +44,8 @@ class CacheServiceMetrics:
     normalized_time_reshape: list = [] # Times used reshaping tensors for flash attention KV format normalized by number of tokens. 
     normalized_time_unload: list = [] # Times used move computed KV from device memory normalized by number of tokens. 
     normalized_time_update: list = [] # Times used update computed KV to cache service normalized by number of tokens. 
-    
-     
-    
+
+
 class VineyardLLMCache:
     def __init__(
         self,
@@ -80,23 +82,45 @@ class VineyardLLMCache:
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) must" \
                 f"be a multiple of chunk_size ({self.chunk_size})"
             )
-        self.buffer = torch.empty(
+        self.fetch_buffer, self.fetch_tensors = self._pinned_tensor_creator()
+        self.cuda_buffer = self.fetch_buffer.cuda()
+        # we use an object pool to reuse the pinned tensors and restrict the number of
+        # inflight tasks. if an update operation cannot get a tensor from the pool,
+        # meaning we already have VINEYARD_CACHE_MAX_INFLIGHT_TASKS tasks issued,
+        # it then simply skips the update. A completed task will return the used
+        # tensor back to the pool.
+        self.tensor_pool = ObjectPool(
+            2, envs.VINEYARD_CACHE_MAX_INFLIGHT_TASKS, self._pinned_tensor_creator
+        )
+        self.metrics = metrics
+
+        self._update_tasks = Queue(maxsize=envs.VINEYARD_CACHE_MAX_INFLIGHT_TASKS)
+        # The cache backend is designed to drop updates whose prefix chunks are
+        # not already present in the cache, which imposes an ordering requirement
+        # on updates: we must perform updates in the issued order. For simplicity,
+        # we use a single thread to process all updates sequentially.
+        self._background_loop = threading.Thread(
+            target=self._run_background_loop, daemon=True
+        )
+        self._background_loop.start()
+        logger.info(f"VineyardLLMCache init {metrics}")
+
+    def _pinned_tensor_creator(self) -> Tuple[torch.Tensor, List[List[List[VineyardKVTensor]]]]:
+        buffer = torch.empty(
             (2, self.layer, self.max_num_batched_tokens, self.num_kv_heads, self.head_size),
-            dtype=torch_dtype, device='cpu',
+            dtype=self.torch_dtype, device='cpu',
         ).pin_memory()
-        self.cuda_buffer = self.buffer.cuda()
-        self.tensors = []
+        tensors = []
         for i in range(self.max_num_batched_tokens):
-            self.tensors.append([])
+            tensors.append([])
             for j in range(self.layer):
-                k_tensor = self.buffer[0, j, i]
-                v_tensor = self.buffer[1, j, i]
-                self.tensors[-1].append((
+                k_tensor = buffer[0, j, i]
+                v_tensor = buffer[1, j, i]
+                tensors[-1].append((
                     VineyardKVTensor(k_tensor.data_ptr(), k_tensor.numel() * k_tensor.element_size()),
                     VineyardKVTensor(v_tensor.data_ptr(), v_tensor.numel() * v_tensor.element_size()),
                 ))
-        self.metrics = metrics
-        logger.info(f"VineyardLLMCache init {metrics}")
+        return buffer, tensors
 
     def _init_vineyard_logger(self):
         import vineyard
@@ -106,6 +130,20 @@ class VineyardLLMCache:
         vineyard.logger.handlers.clear()
         for handler in logger.handlers:
             vineyard.logger.addHandler(handler)
+
+    def _run_background_loop(self):
+        logger.info("VineyardKVCache background loop is running")
+        while True:
+            # Wait until there is a task in the queue
+            update_fn = self._update_tasks.get()
+            # Run the task
+            try:
+                update_fn()
+                logger.debug(
+                    f"Completed an update op, current task queue size={self._update_tasks.qsize()}"
+                )
+            except Exception:
+                pass
 
     @staticmethod
     def from_envs(
@@ -138,6 +176,17 @@ class VineyardLLMCache:
             torch_dtype=torch_dtype,
             metrics = metrics
         )
+
+    def _update_seq_group_metadata(
+        self, seq_group_metadata: SequenceGroupMetadata, value: int
+    ) -> None:
+        if seq_group_metadata is not None:
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            assert len(seq_ids) == 1
+            seq_id = seq_ids[0]
+            seq_data = seq_group_metadata.seq_data[seq_id]
+            seq_data.update_num_computed_tokens(value)
+            seq_group_metadata.token_chunk_size -= value
 
     def prefetch_seq_kv_caches(
         self,
@@ -193,7 +242,7 @@ class VineyardLLMCache:
         matched = self.cache.query(
             prefix=query_prefix,
             tokens=query_tokens,
-            kv_cache_list=self.tensors[:query_token_size],
+            kv_cache_list=self.fetch_tensors[:query_token_size],
         )
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
@@ -243,13 +292,13 @@ class VineyardLLMCache:
         # efficient than performing multiple smaller copy operations. This
         # approach reduces the number of transfers between CPU and GPU,
         # leading to faster overall performance.
-        buffer = self.cuda_buffer.copy_(self.buffer)[:, :, :matched]
+        buffer = self.cuda_buffer.copy_(self.fetch_buffer)[:, :, :matched]
         copy_end.record()
         copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
         self.metrics.time_load.append(duration)
         self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
-        
+
         reshape_start = torch.cuda.Event(enable_timing=True)
         reshape_end = torch.cuda.Event(enable_timing=True)
         reshape_start.record()
@@ -271,11 +320,9 @@ class VineyardLLMCache:
         duration = reshape_start.elapsed_time(reshape_end) / 1000.0
         self.metrics.time_reshape.append(duration)
         self.metrics.normalized_time_reshape.append(0 if matched == 0 else duration/matched)
-        
+
         # update the seq_group_metadata's and seq's metadata
-        if seq_group_metadata is not None:
-            seq_data.update_num_computed_tokens(matched)
-            seq_group_metadata.token_chunk_size -= matched
+        self._update_seq_group_metadata(seq_group_metadata, matched)
 
         return seq_id, matched
 
@@ -315,13 +362,30 @@ class VineyardLLMCache:
             logger.debug(f"prefetch_kv_caches: matched=%r", matched)
         return matched
 
+    def _update_kv_cache(
+        self,
+        prefix: List[int],
+        tokens: List[int],
+        kv_cache_list: List[List[Tuple[VineyardKVTensor, VineyardKVTensor]]],
+        buffer_tensors_tuple: Tuple[torch.Tensor, List[List[List[VineyardKVTensor]]]],
+    ) -> None:
+        try:
+            updated = self.cache.update(prefix, tokens, kv_cache_list)
+            logger.debug(
+                f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
+            )
+        except Exception:
+            pass
+        finally:
+            self.tensor_pool.put(buffer_tensors_tuple)
+
     def update_seq_kv_caches(
         self,
         matched: Dict[str, int],
         seq_group_metadata: SequenceGroupMetadata,
         kv_caches: List[torch.Tensor],
         block_size: int,
-    ) -> Tuple[str, int]:
+    ) -> None:
         if seq_group_metadata is not None:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
@@ -360,10 +424,16 @@ class VineyardLLMCache:
             ) = update_args
         if update_token_size <= 0:
             # restore the seq_group_metadata's and seq's metadata
-            if seq_group_metadata is not None:
-                seq_data.update_num_computed_tokens(-matched[seq_id])
-                seq_group_metadata.token_chunk_size += matched[seq_id]
-            return seq_id, 0
+            self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
+            return
+
+        buffer_tensors_tuple = self.tensor_pool.get(block=False)
+        if buffer_tensors_tuple is None:
+            # restore the seq_group_metadata's and seq's metadata
+            self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
+            return
+        update_buffer, update_tensors = buffer_tensors_tuple
+
         if seq_group_metadata is not None:
             block_table = seq_group_metadata.block_tables[seq_id]
             slot_mapping = []
@@ -388,30 +458,40 @@ class VineyardLLMCache:
         for j in range(self.layer):
             self.cuda_buffer[:, j, :update_token_size].copy_(
                 kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
-        self.buffer.copy_(self.cuda_buffer)
+        update_buffer.copy_(self.cuda_buffer)
         end_unload.record()
         end_unload.synchronize()
         duration = start_unload.elapsed_time(end_unload) / 1000.0
         self.metrics.time_unload.append(duration)   
         self.metrics.normalized_time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
-        
+
         start_time = time.perf_counter()
-        # updates into vineyard
-        updated = self.cache.update(
+
+        # async update
+        update_task = partial(self._update_kv_cache,
             prefix=update_prefix,
             tokens=update_tokens,
-            kv_cache_list=self.tensors[:update_token_size],
+            kv_cache_list=update_tensors[:update_token_size],
+            buffer_tensors_tuple=buffer_tensors_tuple,
         )
+        try:
+            logger.debug(
+                f"submit update task: #prefix={len(update_prefix)}, #tokens={len(update_tokens)}"
+            )
+            self._update_tasks.put_nowait(update_task)
+            logger.debug(
+                f"task queue size={self._update_tasks.qsize()}, tensor pool size={self.tensor_pool.size}"
+            )
+        except Full:
+            logger.warning(f"update_seq_kv_caches: queue is full, skip this update")
+            self.tensor_pool.put(buffer_tensors_tuple)
+
         duration = time.perf_counter() - start_time
         self.metrics.time_update.append(duration)   
         self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
 
         # restore the seq_group_metadata's and seq's metadata
-        if seq_group_metadata is not None:
-            seq_data.update_num_computed_tokens(-matched[seq_id])
-            seq_group_metadata.token_chunk_size += matched[seq_id]
-
-        return seq_id, updated
+        self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
 
     def update_kv_caches(
         self,
@@ -419,9 +499,9 @@ class VineyardLLMCache:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
         block_size: int,
-    ) -> Dict[str, int]:
+    ) -> None:
         if block_size is None or kv_caches[0] is None:  # profile run
-            return {}
+            return
 
         if seq_group_metadata_list is not None:
             prefill_requests = []
@@ -438,15 +518,10 @@ class VineyardLLMCache:
             prefill_requests = [None] * num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
 
-        updated = {}
         for seq_group_meta in prefill_requests:
-            seq_id, seq_updated = self.update_seq_kv_caches(
+            self.update_seq_kv_caches(
                 matched, seq_group_meta, kv_caches, block_size,
             )
-            updated[seq_id] = seq_updated
-        if updated:
-            logger.debug(f"update_kv_caches: updated=%r", updated)
-        return updated
 
     def __repr__(self):
         return (

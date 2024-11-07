@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VINEYARD_CACHE_MAX_INFLIGHT_TASKS: int = 32
 
 
 def get_default_cache_root():
@@ -431,6 +432,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
+
+    # Max number of inflight async tasks for vineyard cache
+    "VINEYARD_CACHE_MAX_INFLIGHT_TASKS":
+    lambda: int(os.getenv("VINEYARD_CACHE_MAX_INFLIGHT_TASKS", "32")),
 }
 
 # end-env-vars-definition

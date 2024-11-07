@@ -1246,8 +1246,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         kv_caches = [None] * num_layers
         finished_requests_ids = [seq.request_id for seq in seqs]
-        model_input, cache_hints = self.prepare_model_input(
-            seqs, finished_requests_ids=finished_requests_ids, kv_caches = kv_caches)
+        model_input = self.prepare_model_input(
+            seqs, finished_requests_ids=finished_requests_ids)
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1255,9 +1255,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 dtype=self.model_config.dtype,
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
-        if self.vineyard_llm_cache and kv_caches[0] is not None:
-            self.vineyard_llm_cache.update_kv_caches(
-                cache_hints, seqs, kv_caches, getattr(self, 'block_size', None))
         torch.cuda.synchronize()
         return
 
@@ -1483,6 +1480,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
+    count = 0
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -1500,7 +1498,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None,
-        kv_caches: List[torch.Tensor] = [],
     ) -> Tuple[ModelInputForGPUWithSamplingMetadata, Optional[Dict[str, int]]]:
         """Prepare the model input based on a given sequence group, including
         metadata for the sampling step.
@@ -1515,7 +1512,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
-        cache_hints = None
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
@@ -1532,7 +1528,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
-                                   virtual_engine=virtual_engine), cache_hints
+                                   virtual_engine=virtual_engine)
                 
 
     @torch.inference_mode()

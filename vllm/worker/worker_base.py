@@ -180,6 +180,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     is_driver_worker: bool
     model_runner: ModelRunnerBase
     observability_config: Optional[ObservabilityConfig] = None
+    count = 0
 
     @property
     @abstractmethod
@@ -250,13 +251,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)
         model_input: ModelRunnerInputBase
-        cache_hints: Dict[str, int]
-        model_input, cache_hints = (
-            self.model_runner.prepare_model_input(
+        model_input = self.model_runner.prepare_model_input(
                 execute_model_req.seq_group_metadata_list,
                 execute_model_req.virtual_engine,
-                execute_model_req.finished_requests_ids,
-                self.kv_cache[worker_input.virtual_engine]))
+                execute_model_req.finished_requests_ids)
 
         kwargs = extract_previous_hidden_states(execute_model_req)
 
@@ -271,12 +269,12 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                 model_input,
                 async_callback=execute_model_req.async_callback)
 
-        return model_input, cache_hints, worker_input, kwargs
+        return model_input, worker_input, kwargs
 
     def prepare_input(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
-    ) -> Optional[Tuple[BroadcastableModelInput, Dict[str, int], WorkerInput, Dict[
+    ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[
             str, torch.Tensor]]]:
         """
         Prepare the inputs to ModelRunner and workers.
@@ -303,24 +301,22 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         start_time = time.perf_counter()
-
+            
+        cache_hints = None
+        if execute_model_req != None:
+            kv_caches = self.kv_cache[execute_model_req.virtual_engine]
+            if self.model_runner.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
+                self.count += 1
+                cache_hints = self.model_runner.vineyard_llm_cache.prefetch_kv_caches(
+                    None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
+                    kv_caches, 
+                    getattr(self.model_runner, 'block_size', None))
+            
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None
 
-        cache_hints = None
-        if len(inputs) == 4:
-            model_input, cache_hints, worker_input, kwargs = inputs
-        else:
-            model_input, worker_input, kwargs = inputs
-
-        cache_hints = None
-        kv_caches = self.kv_cache[worker_input.virtual_engine]
-        if self.model_runner.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
-            cache_hints = self.model_runner.vineyard_llm_cache.prefetch_kv_caches(
-                None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
-                kv_caches, 
-                getattr(self.model_runner, 'block_size', None))
+        model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
 
         self.execute_worker(worker_input)
@@ -350,13 +346,19 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
         model_execute_time = time.perf_counter() - start_time
+        if cache_hints is not None: 
+            print(f"execution time {model_execute_time}")
         # TODO: make update_kv_caches async
         if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
+            import threading
+            start_time = time.perf_counter()
             self.model_runner.vineyard_llm_cache.update_kv_caches(
                 cache_hints, 
                 None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
                 self.kv_cache[worker_input.virtual_engine], 
                 getattr(self.model_runner, 'block_size', None))
+            duration = time.perf_counter() - start_time
+            print(f"update for seq id {execute_model_req.seq_group_metadata_list[0].request_id} thread {threading.get_ident()} duration {duration} count {self.count} from worker_base")
 
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors

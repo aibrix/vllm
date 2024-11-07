@@ -49,7 +49,7 @@ typedef __hip_bfloat16 __nv_bfloat16;
 ///* DATTN_UNIFIED_QK_MAX & DATTN_SHIFT_PERHEAD_QKMAX cannot be on at the same time */
 /* DATTN_SHIFT_PERHEAD_QKMAX relies on DATTN_UNIFIED_QK_MAX */
 #define DATTN_UNIFIED_QK_MAX 1 // 0:Vanilla 1:Unified qk_max
-#define DATTN_SHIFT_PERHEAD_QKMAX 1 // 0:Unified qk_max 1:Shifting window per-head qk_max
+#define DATTN_SHIFT_PERHEAD_QKMAX 0 // 0:Unified qk_max 1:Shifting window per-head qk_max
 #define DATTN_DEBUG_OVERFLOW_ROLLBACK 0 // 1:statistics 0:perf
 #define DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE 0
 #define VANILLA_DEBUG_PERHEAD_QKMAX 0 // Cannot run - no layer_num info passed in
@@ -59,7 +59,7 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #define WARNING(msg) printf("\033[33mWARNING: %s\033[0m\n", msg)
 
 #if DATTN_UNIFIED_QK_MAX
-//#define DATTENTION_QK_MAX 6.54f // llama2-7B medium 99.99mean // (-0.41+13.49)/2 = 6.54
+#define DATTENTION_QK_MAX 6.54f // llama2-7B medium 99.99mean // (-0.41+13.49)/2 = 6.54
 //#define DATTENTION_QK_MAX 1.73f //  llama2-7B short 99.99mean // (-9.27+12.73)/2 = 1.73
 //#define DATTENTION_QK_MAX 12.73f //  llama2-7B short 99.99high
 //#define DATTENTION_QK_MAX 13.49f //  llama2-7B medium 99.99high
@@ -72,7 +72,7 @@ typedef __hip_bfloat16 __nv_bfloat16;
 
 // Based on DATTN_UNIFIED_QK_MAX 1 #define DATTN_SHIFT_PERHEAD_QKMAX 0
 //#define DATTENTION_QK_MAX -30.036194f // 1_1 (1+0) $ python jack_multiprocess_find_avg_perhead_allqk.py | tee jack_multiprocess_find_avg_perhead_allqk241007.log
-#define DATTENTION_QK_MAX -69.647877 // 2_1 Mix(short+medium) phi
+//#define DATTENTION_QK_MAX -69.647877 // 2_1 Mix(short+medium) phi
 
 #if DATTN_SHIFT_PERHEAD_QKMAX // per-head
 #define MAX_LAYERS 32

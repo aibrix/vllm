@@ -172,6 +172,8 @@ class StreamModel:
     s3_secret_access_key: Optional[str] = None
     s3_region: Optional[str] = None
     s3_endpinit: Optional[str] = None
+    use_pinmem: bool = False
+    use_direct_io: bool = False
 
     def __post_init__(self):
         scheme, bucket_name, bucket_path = _parse_bucket_info_from_uri(
@@ -250,6 +252,8 @@ class StreamModel:
             safetensors_loader = StreamLoader(
                 file=safetensors_s3,
                 num_thread=self.num_threads,
+                use_pinmem=self.use_pinmem,
+                use_direct_io=self.use_direct_io,
             )
             for name, tensor in safetensors_loader.get_weights_iterator(
                 device=device

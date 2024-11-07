@@ -16,6 +16,8 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.model_loader.stream.loader import StreamModel
+from vllm.model_executor.model_loader.stream_loader import StreamConfig
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser
 
@@ -258,7 +260,9 @@ class EngineArgs:
             'CoreWeave. See the Tensorize vLLM Model script in the Examples '
             'section for more information.\n'
             '* "bitsandbytes" will load the weights using bitsandbytes '
-            'quantization.\n')
+            'quantization.\n'
+            '* "stream" will load the weights using stream from remote storage,'
+            'like S3 or TOS.\n')
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -796,6 +800,16 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
+        if self.load_format == "stream":
+            # download config json to `download_dir`
+            # and replace `model` with `download_dir`
+            stream_config = StreamConfig(**self.model_loader_extra_config)
+            stream_model = stream_config.construct_stream_model()
+            config_dir = self.download_dir or "/tmp/stream_load/"
+            config_path = stream_model.download_config(config_dir)
+            
+            self.served_model_name = self.served_model_name or self.model
+            self.model = str(config_path)
         return ModelConfig(
             model=self.model,
             tokenizer=self.tokenizer,

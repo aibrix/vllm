@@ -28,6 +28,8 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.model_loader.stream.loader import StreamModel
+from vllm.model_executor.model_loader.stream_loader import StreamConfig
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -1164,6 +1166,44 @@ class GGUFModelLoader(BaseModelLoader):
         return model
 
 
+class StreamModelLoader(BaseModelLoader):
+    """Model loader using AiBrix's stream loader library."""
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if isinstance(load_config.model_loader_extra_config, StreamConfig):
+            self.stream_loader_config = load_config.model_loader_extra_config
+        else:
+            self.stream_loader_config = StreamConfig(
+                **load_config.model_loader_extra_config)
+        
+        self.stream_model = self.stream_loader_config.construct_stream_model()
+
+    def _verify_config(self, model_config: ModelConfig,
+                       parallel_config: ParallelConfig):
+        self.stream_loader_config.verify_with_model_config(model_config)
+        self.stream_loader_config.verify_with_parallel_config(parallel_config)
+
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+        self._verify_config(model_config, parallel_config)
+
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, cache_config,
+                                          scheduler_config)
+            
+            model.load_weights(self.stream_model.get_weights_iterator(device_config.device))
+        
+        return model.eval()
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -1184,5 +1224,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.GGUF:
         return GGUFModelLoader(load_config)
+
+    if load_config.load_format == LoadFormat.STREAM:
+        return StreamModelLoader(load_config)
 
     return DefaultModelLoader(load_config)

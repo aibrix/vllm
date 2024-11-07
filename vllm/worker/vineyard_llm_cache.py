@@ -47,6 +47,7 @@ class CacheServiceMetrics:
     err_async_update_task_queue_full: int = 0 # Number of Full exceptions when enqueuing async update tasks
 
     lock: threading.Lock = threading.Lock()
+    # The following metrics need to be protected by `lock`
     time_async_update_queue: list = [] # Queuing delays of async update tasks
     time_async_update_exec: list = [] # Execution times of async update tasks
     counter_async_update_updated: list = [] # Number of udpated tokens
@@ -106,6 +107,8 @@ class VineyardLLMCache:
                 self._pinned_tensor_creator,
             )
 
+            # `_update_tasks` is a task queue being accessed by both the main thread
+            # and the background thread.
             self._update_tasks = Queue(maxsize=max_inflight_tasks)
             # The cache backend is designed to drop updates whose prefix chunks are
             # not already present in the cache, which imposes an ordering requirement

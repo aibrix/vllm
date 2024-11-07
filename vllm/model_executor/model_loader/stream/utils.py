@@ -8,7 +8,7 @@ import boto3
 import torch
 from botocore.config import Config
 
-from . import SUPPORTED_STREAM_STORAGE, DOWNLOAD_CACHE_DIR
+from . import DOWNLOAD_CACHE_DIR, SUPPORTED_STREAM_STORAGE
 
 DEFAULT_POOL_CONNECTIONS = 10
 
@@ -72,11 +72,9 @@ def need_to_download(
     if force_download:
         return True
 
-    if check_file_exist(
+    return not check_file_exist(
         local_file, meta_data_file, expected_file_size, expected_etag
-    ):
-        return False
-    return True
+    )
 
 
 def read_to_bytes_io(content, chunk_size=None):
@@ -95,7 +93,7 @@ def filter_suffix_files(files: List[str], suffix: str) -> List[str]:
 
 
 def get_dtype(dtype_str: str):
-    # torch.float8 formats require 2.1; 
+    # torch.float8 formats require 2.1;
     # we do not support these dtypes on earlier versions
     _float8_e4m3fn = getattr(torch, "float8_e4m3fn", None)
     _float8_e5m2 = getattr(torch, "float8_e5m2", None)

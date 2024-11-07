@@ -799,12 +799,16 @@ class EngineArgs:
 
     def create_model_config(self) -> ModelConfig:
         if self.load_format == "stream":
-            from vllm.model_executor.model_loader.stream_loader import StreamConfig
+            from vllm.model_executor.model_loader.stream_loader import (
+                StreamConfig)
+
             # download config json to `download_dir`
             # and replace `model` with `download_dir`
             model_loader_extra_config = self.model_loader_extra_config or {}
             if isinstance(model_loader_extra_config, str):
-                model_loader_extra_config = json.loads(model_loader_extra_config)
+                model_loader_extra_config = json.loads(
+                    model_loader_extra_config
+                )
 
             stream_config = StreamConfig(**model_loader_extra_config)
             stream_model = stream_config.construct_stream_model()

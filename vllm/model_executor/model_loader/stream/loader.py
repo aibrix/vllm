@@ -26,12 +26,8 @@ import torch
 from vllm.logger import init_logger
 
 from .file import LoadFile, LocalFile, S3File
-from .utils import (
-    TensorMeta,
-    _create_s3_client,
-    _parse_bucket_info_from_uri,
-    split_continue_tensors,
-)
+from .utils import (TensorMeta, _create_s3_client, _parse_bucket_info_from_uri,
+                    split_continue_tensors)
 
 logger = init_logger(__name__)
 
@@ -106,18 +102,18 @@ class StreamLoader:
     def get_weights_iterator(
         self, device: Union[torch.device, str] = "cpu"
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-        tensors_per_reader: List[
-            Tuple[TensorMeta, ...]
-        ] = split_continue_tensors(self.tensors_metas, self.num_thread)
+        tensors_per_reader: List[Tuple[TensorMeta, ...]] = (
+            split_continue_tensors(self.tensors_metas, self.num_thread)
+        )
 
         effective_num_readers = len(tensors_per_reader)
         self._reader_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=effective_num_readers,
             thread_name_prefix="SafetensorsReader",
         )
-        transfer_out_queue: queue.SimpleQueue[
-            Union[Exception, TensorMeta]
-        ] = queue.SimpleQueue()  # type: ignore
+        transfer_out_queue: queue.SimpleQueue[Union[Exception, TensorMeta]] = (
+            queue.SimpleQueue()
+        )  # type: ignore
         futures: List[concurrent.futures.Future] = []
 
         barrier = threading.Barrier(effective_num_readers)
@@ -135,9 +131,9 @@ class StreamLoader:
 
         try:
             for _ in range(len(self.tensors_metas)):
-                tensor_meta: Union[
-                    TensorMeta, Exception
-                ] = transfer_out_queue.get(timeout=3600)
+                tensor_meta: Union[TensorMeta, Exception] = (
+                    transfer_out_queue.get(timeout=3600)
+                )
                 if isinstance(tensor_meta, Exception):
                     raise tensor_meta
                 yield tensor_meta.name, tensor_meta.tensor
@@ -188,7 +184,9 @@ class StreamModel:
             local_dir = Path(self.model_uri)
             if not local_dir.exists():
                 raise ValueError(f"local path {local_dir} not exist")
-            files = [str(file) for file in local_dir.iterdir() if file.is_file()]
+            files = [
+                str(file) for file in local_dir.iterdir() if file.is_file()
+            ]
         else:
             self.s3_client = _create_s3_client(
                 ak=self.s3_access_key_id,
@@ -205,9 +203,7 @@ class StreamModel:
                 for content in objects_out.get("Contents", [])
             ]
 
-        self.config_files = [
-            file for file in files if file.endswith(".json")
-        ]
+        self.config_files = [file for file in files if file.endswith(".json")]
         self.safetensors_files = [
             file for file in files if file.endswith(".safetensors")
         ]
@@ -217,7 +213,9 @@ class StreamModel:
         if len(self.safetensors_files) == 0:
             raise ValueError(f"no safetensors file found in {self.model_uri}")
 
-    def download_config(self, target_dir: str, force_download: bool = False) -> Path:
+    def download_config(
+        self, target_dir: str, force_download: bool = False
+    ) -> Path:
         if self.model_source_type == "local":
             logger.info("local config no need to download")
             return Path(self.model_uri)
@@ -233,7 +231,7 @@ class StreamModel:
             config_s3.download_file(
                 target_dir=target_dir,
                 num_threads=self.num_threads,
-                force_download=force_download
+                force_download=force_download,
             )
 
         target_path = Path(target_dir)

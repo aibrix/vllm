@@ -292,12 +292,11 @@ class VineyardLLMCache:
                 if seq_group_meta.is_prompt:
                     prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            group = get_tp_group()
-            group.broadcast_object_list(num_prefill_requests, src=0)
+            get_tp_group().broadcast_object_list(num_prefill_requests, src=0)
         else:
             num_prefill_requests = [None]
             get_tp_group().broadcast_object_list(num_prefill_requests, src=0)
-            prefill_requests = [None] * num_prefill_requests[0]
+            prefill_requests = [None] *  num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
         matched = {}
         for seq_group_meta in prefill_requests:

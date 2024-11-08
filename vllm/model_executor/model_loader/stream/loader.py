@@ -254,5 +254,5 @@ class StreamModel:
                 use_direct_io=self.use_direct_io,
             )
             for name, tensor in safetensors_loader.get_weights_iterator(
-                    device=device):
+                    device="cpu"):
                 yield name, tensor

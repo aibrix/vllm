@@ -73,15 +73,16 @@ def need_to_download(
 
 
 def read_to_bytes_io(content, chunk_size=None):
-    chunk_size = int(os.getenv("STREAM_READ_CHUNK_SIZE", 8388608))  # 8MB
-    bytes_io = BytesIO()
+    chunk_size = int(os.getenv("STREAM_READ_CHUNK_SIZE", 8388608))  # 8MB    
     buf = content.read(chunk_size)
+    _all_bufs = [buf]
+
     while buf:
-        bytes_io.write(buf)
         buf = content.read(chunk_size)
+        _all_bufs.append(buf)
+    bytes_io = BytesIO(b"".join(_all_bufs))
     bytes_io.seek(0)
     return bytes_io
-
 
 def filter_suffix_files(files: List[str], suffix: str) -> List[str]:
     return [file for file in files if file.endswith(suffix)]

@@ -1197,8 +1197,7 @@ class StreamModelLoader(BaseModelLoader):
                                           lora_config, cache_config,
                                           scheduler_config)
 
-            model.load_weights(
-                self.stream_model.get_weights_iterator("cpu"))
+            model.load_weights(self.stream_model.get_weights_iterator("cpu"))
 
         return model.eval()
 

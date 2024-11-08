@@ -1198,7 +1198,7 @@ class StreamModelLoader(BaseModelLoader):
                                           scheduler_config)
 
             model.load_weights(
-                self.stream_model.get_weights_iterator(device_config.device))
+                self.stream_model.get_weights_iterator("cpu"))
 
         return model.eval()
 

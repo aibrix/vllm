@@ -32,6 +32,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
@@ -261,12 +262,12 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id, conversation, tokenizer,
+                request, lora_request, result_generator, request_id, conversation, tokenizer,
                 request_metadata)
 
         try:
             return await self.chat_completion_full_generator(
-                request, result_generator, request_id, conversation, tokenizer,
+                request, lora_request, result_generator, request_id, conversation, tokenizer,
                 request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -281,12 +282,13 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
+        lora_request: LoRARequest,
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
-        model_name = self.base_model_paths[0].name
+        model_name = self._get_model_name(lora_request)
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -609,6 +611,7 @@ class OpenAIServingChat(OpenAIServing):
     async def chat_completion_full_generator(
         self,
         request: ChatCompletionRequest,
+        lora_request: LoRARequest,
         result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
@@ -616,7 +619,7 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata: RequestResponseMetadata,
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = self.base_model_paths[0].name
+        model_name = self._get_model_name(lora_request)
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 

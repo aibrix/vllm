@@ -327,7 +327,7 @@ class NaiveBlockAllocator(BlockAllocator):
             block.block_id = block_id  # Assign block_id
 
     def get_prefix_cache_hit_rate(self) -> float:
-        return -1
+        return 0
 
 
 class NaiveBlock(Block):

@@ -88,4 +88,4 @@ class PlaceholderBlockSpaceManager(BlockSpaceManager):
         pass
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
-        return -1
+        return 0

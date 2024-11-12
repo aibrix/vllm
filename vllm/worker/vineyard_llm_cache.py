@@ -286,11 +286,12 @@ class VineyardLLMCache:
         '''
         if block_size is None or kv_caches[0] is None:  # profile run
             return {}
-        if seq_group_metadata_list is not None:
+        if get_tensor_model_parallel_rank() == 0:
             prefill_requests = []
-            for seq_group_meta in seq_group_metadata_list:
-                if seq_group_meta.is_prompt:
-                    prefill_requests.append(seq_group_meta)
+            if seq_group_metadata_list is not None:
+                for seq_group_meta in seq_group_metadata_list:
+                    if seq_group_meta.is_prompt:
+                        prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
             get_tp_group().broadcast_object_list(num_prefill_requests, src=0)
         else:

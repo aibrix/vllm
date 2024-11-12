@@ -147,7 +147,7 @@ class VineyardLLMCache:
         block_size: int,
     ) -> Tuple[str, int]:
         from vllm._custom_ops import reshape_and_cache_flash
-        if seq_group_metadata is not None:
+        if get_tensor_model_parallel_rank() == 0:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
@@ -210,7 +210,7 @@ class VineyardLLMCache:
         matched = min(matched, token_chunk_size - 1)
         if matched <= 0:
             return seq_id, 0
-        if seq_group_metadata is not None:
+        if get_tensor_model_parallel_rank() == 0:
             block_table = seq_group_metadata.block_tables[seq_id]
             slot_mapping = []
             for i in range(context_len, context_len + matched):
@@ -316,7 +316,7 @@ class VineyardLLMCache:
         kv_caches: List[torch.Tensor],
         block_size: int,
     ) -> Tuple[str, int]:
-        if seq_group_metadata is not None:
+        if get_tensor_model_parallel_rank() == 0:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
@@ -356,7 +356,7 @@ class VineyardLLMCache:
                 seq_data.update_num_computed_tokens(-matched[seq_id])
                 seq_group_metadata.token_chunk_size += matched[seq_id]
             return seq_id, 0
-        if seq_group_metadata is not None:
+        if get_tensor_model_parallel_rank() == 0:
             block_table = seq_group_metadata.block_tables[seq_id]
             slot_mapping = []
             for i in range(update_context_len, update_context_len + update_token_size):
@@ -413,7 +413,7 @@ class VineyardLLMCache:
         if block_size is None or kv_caches[0] is None:  # profile run
             return {}
 
-        if seq_group_metadata_list is not None:
+        if get_tensor_model_parallel_rank() == 0:
             prefill_requests = []
             for seq_group_meta in seq_group_metadata_list:
                 if seq_group_meta.is_prompt:

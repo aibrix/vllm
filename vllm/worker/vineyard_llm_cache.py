@@ -157,8 +157,11 @@ class VineyardLLMCache:
             token_chunk_size = seq_group_metadata.token_chunk_size
             tokens = seq_data.get_prompt_token_ids()
 
-            # leave at least one token unmatched
-            token_chunk_size -= 1
+            # Previously, at least one token is left unmatched to always trigger sampling.
+            # However, when there is full KV cache hit, there is no need to sample
+            # unless it is explicitly required.
+            # # leave at least one token unmatched
+            # token_chunk_size -= 1
 
             # alignment `context_len` to `self.chunk_size`
             query_context_len = context_len - context_len % self.chunk_size
@@ -198,6 +201,10 @@ class VineyardLLMCache:
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
         self.metrics.normalized_time_query.append(duration/len(tokens))
+        # If sampling is required, we need to leave one token unmatched
+        # to trigger the following sampling step in engine worker's workflow.
+        if seq_group_metadata is not None and seq_group_metadata.is_sampling_enabled:
+            matched = min(matched, token_chunk_size - 1)
         # synchronized across tensor parallel ranks
         matched_tensor = torch.tensor([matched], dtype=torch.long, device='cuda')
         # torch.distributed.all_reduce(matched_tensor, op=torch.distributed.ReduceOp.MIN,
@@ -208,9 +215,6 @@ class VineyardLLMCache:
         offset = context_len % self.chunk_size
         matched -= offset
 
-        # we force to use token_chunk_size - 1 to trigger KV recomputation
-        # TODO: this should be revisited later. We are looking for solutions to fully avoid computation.
-        matched = min(matched, token_chunk_size - 1)
         if matched <= 0:
             return seq_id, 0
         if seq_group_metadata is not None:

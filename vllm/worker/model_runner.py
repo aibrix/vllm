@@ -45,7 +45,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
+                           SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, PyObjectCache, async_tensor_h2d,
                         flatten_2d_lists, is_hip, is_pin_memory_available,
                         get_kv_cache_torch_dtype, supports_dynamo)
@@ -1563,6 +1564,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 model_input.prompt_adapter_mapping)
 
         self.attn_state.begin_forward(model_input)
+
+        # When using a KV cache with chunk-prefill enabled and sampling not
+        # explictly enabled, for the first 'n' chunks (except the last chunk
+        # before the decode phase), if there is a full hit in the KV cache,
+        # all KV tensors are fetched from the cache, and input tokens are
+        # set to None. Thus, if we encounter None for input_tokens, we just
+        # skip sampling and return an empty outputs.
+        if model_input.input_tokens is None:
+            outputs=[
+                CompletionSequenceGroupOutput(
+                    samples=[],
+                    prompt_logprobs=None
+                )
+            ]
+            return [SamplerOutput(outputs=outputs)]
 
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None

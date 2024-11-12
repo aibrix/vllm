@@ -292,7 +292,6 @@ class GroupCoordinator:
             ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group, op = operation)
-            # torch.distributed.all_reduce(input_, group=self.device_group)
         return input_
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:

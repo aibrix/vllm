@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
 
 import torch
 import torch.distributed
@@ -6,9 +6,9 @@ import torch.distributed
 from .parallel_state import get_tp_group
 
 
-def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
+def tensor_model_parallel_all_reduce(input_: torch.Tensor, op: torch.distributed.ReduceOp.SUM) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
-    return get_tp_group().all_reduce(input_)
+    return get_tp_group().all_reduce(input_, op=op)
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,
@@ -23,6 +23,16 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
     """Gather the input tensor across model parallel group."""
     return get_tp_group().gather(input_, dst, dim)
 
+def tensor_model_parallel_broadcast(input_: torch.Tensor,
+                                 src: int = 0,
+                                 ) -> torch.Tensor:
+    """Broadcast the input tensor across model parallel group."""
+    return get_tp_group().broadcast(input_, src)
+
+def model_parallel_broadcast_object_list(input_: List[Any],
+                                 src: int = 0) -> List[Any]:
+    """Broadcast object list across model parallel group."""
+    return get_tp_group().broadcast_object_list(input_, src)
 
 def broadcast_tensor_dict(tensor_dict: Optional[Dict[Any, Union[torch.Tensor,
                                                                 Any]]] = None,

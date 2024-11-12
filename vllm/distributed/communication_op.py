@@ -6,9 +6,9 @@ import torch.distributed
 from .parallel_state import get_tp_group
 
 
-def tensor_model_parallel_all_reduce(input_: torch.Tensor, op: torch.distributed.ReduceOp.SUM) -> torch.Tensor:
+def tensor_model_parallel_all_reduce(input_: torch.Tensor, **kwargs) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
-    return get_tp_group().all_reduce(input_, op=op)
+    return get_tp_group().all_reduce(input_, **kwargs)
 
 
 def tensor_model_parallel_all_gather(input_: torch.Tensor,

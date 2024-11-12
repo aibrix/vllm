@@ -533,9 +533,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
         app = build_app(args)
 
         model_config = await engine_client.get_model_config()
-        logger.info(">>>>>>>>>>>>")
-        logger.info(model_config)
-        logger.info(">>>>>>>>>>>>")
         init_app_state(engine_client, model_config, app.state, args)
 
         temp_socket.close()

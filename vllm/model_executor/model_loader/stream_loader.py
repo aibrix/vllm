@@ -24,8 +24,8 @@ class StreamConfig:
         parallel_config: "ParallelConfig",
     ) -> None:
         if parallel_config.tensor_parallel_size > 1:
-            raise ValueError(
-                "steam loader does not support tensor parallelism yet")
+            logger.info("stream loader will use %s parallel to load model",
+                        parallel_config.tensor_parallel_size)
 
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
         if model_config.quantization is not None:

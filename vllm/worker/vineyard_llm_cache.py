@@ -246,11 +246,12 @@ class VineyardLLMCache:
         # leading to faster overall performance.
         buffer = self.cuda_buffer.copy_(self.buffer)[:, :, :matched]
         copy_end.record()
-        torch.cuda.synchronize()
+        copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
         self.metrics.time_load.append(duration)
         self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
         
+        torch.cuda.synchronize()
         reshape_start = torch.cuda.Event(enable_timing=True)
         reshape_end = torch.cuda.Event(enable_timing=True)
         reshape_start.record()
@@ -268,7 +269,7 @@ class VineyardLLMCache:
                 1.0
             )
         reshape_end.record()
-        torch.cuda.synchronize()
+        reshape_end.synchronize()
         duration = reshape_start.elapsed_time(reshape_end) / 1000.0
         self.metrics.time_reshape.append(duration)
         self.metrics.normalized_time_reshape.append(0 if matched == 0 else duration/matched)
@@ -376,6 +377,7 @@ class VineyardLLMCache:
             tensor_model_parallel_broadcast(slot_mapping, src=0)
 
         # fetch from GPU kv cache
+        torch.cuda.synchronize()
         start_unload = torch.cuda.Event(enable_timing=True)
         end_unload = torch.cuda.Event(enable_timing=True)
         start_unload.record()

@@ -347,7 +347,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_execute_time = time.perf_counter() - start_time
         # TODO: make update_kv_caches async
         if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
-            start_time = time.perf_counter()
             self.model_runner.vineyard_llm_cache.update_kv_caches(
                 cache_hints, 
                 None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 

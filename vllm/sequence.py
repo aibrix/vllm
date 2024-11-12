@@ -942,6 +942,11 @@ class SequenceGroupMetadata(
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
 
+    @property
+    def is_sampling_enabled(self) -> bool:
+        return self.sampling_params.prompt_logprobs is not None \
+                        or self.do_sample
+
     def apply_delta(self,
                     sequence_group_metadata_delta: SequenceGroupMetadataDelta):
         for id, delta in sequence_group_metadata_delta.seq_data_delta.items():

@@ -509,6 +509,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
+        "stream": ["boto3>=1.35.5"],
         "tensorizer": ["tensorizer>=2.9.0"],
         "video": ["opencv-python"],  # Required for video processing
         "audio": ["librosa", "soundfile"]  # Required for audio processing

@@ -230,7 +230,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         assert self.do_metadata_broadcast
         assert not self.is_driver_worker
         broadcast_data = broadcast_tensor_dict(src=0)
-        assert broadcast_data
+        if not broadcast_data:
+            return None
+
         worker_input = WorkerInput.from_broadcasted_tensor_dict(broadcast_data)
         model_input = (
             self.model_runner.make_model_input_from_broadcasted_tensor_dict(
@@ -277,11 +279,19 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         Prepare the inputs to ModelRunner and workers.
         """
+        cache_hints = None
         if self.is_driver_worker:
+            if execute_model_req is None:
+                if self.do_metadata_broadcast:
+                    # This signals that there's no more requests to process for
+                    # now. All workers are running infinite loop with
+                    # broadcast_tensor_dict, and it stops the loop when the
+                    # driver broadcasts an empty input. Send an empty input to
+                    # notify all other workers to stop their execution loop.
+                    broadcast_tensor_dict({}, src=0)
+                return None
             return self._get_driver_input_and_broadcast(execute_model_req)
         else:
-            assert self.do_metadata_broadcast
-            assert not self.is_driver_worker
             return self._get_worker_input_from_broadcast()
 
     def execute_model(
@@ -291,35 +301,20 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         start_time = time.perf_counter()
+            
         cache_hints = None
-        
-        if self.do_metadata_broadcast:
-            if self.is_driver_worker:
-                    # This signals that there's no more requests to process for
-                    # now. All workers are running infinite loop with
-                    # broadcast_tensor_dict, and it stops the loop when the
-                    # driver broadcasts an empty input. Send an empty input to
-                    # notify all other workers to stop their execution loop.
-                    if execute_model_req is None:
-                        broadcast_tensor_dict({}, src=0)
-                        return None
-                    else:
-                        broadcast_tensor_dict({0: torch.empty(0)}, src=0)
-            else:
-                broadcast_data = broadcast_tensor_dict(src=0)
-                if not broadcast_data:
-                    return None
-                
-        
-        kv_caches = self.kv_cache[0]
-        if self.model_runner.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
-            self.count += 1
-            cache_hints = self.model_runner.vineyard_llm_cache.prefetch_kv_caches(
-                None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
-                kv_caches, 
-                getattr(self.model_runner, 'block_size', None))
+        if execute_model_req != None:
+            kv_caches = self.kv_cache[execute_model_req.virtual_engine]
+            if self.model_runner.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
+                self.count += 1
+                cache_hints = self.model_runner.vineyard_llm_cache.prefetch_kv_caches(
+                    None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
+                    kv_caches, 
+                    getattr(self.model_runner, 'block_size', None))
             
         inputs = self.prepare_input(execute_model_req)
+        if inputs is None:
+            return None
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
@@ -351,17 +346,19 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         )
 
         model_execute_time = time.perf_counter() - start_time
+        if cache_hints is not None: 
+            print(f"execution time {model_execute_time}")
         # TODO: make update_kv_caches async
         if self.model_runner.vineyard_llm_cache and self.kv_cache[worker_input.virtual_engine][0] is not None:
             import threading
-            # start_time = time.perf_counter()
+            start_time = time.perf_counter()
             self.model_runner.vineyard_llm_cache.update_kv_caches(
                 cache_hints, 
                 None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
                 self.kv_cache[worker_input.virtual_engine], 
                 getattr(self.model_runner, 'block_size', None))
-            # duration = time.perf_counter() - start_time
-            # print(f"update for seq id {execute_model_req.seq_group_metadata_list[0].request_id} thread {threading.get_ident()} duration {duration} count {self.count} from worker_base")
+            duration = time.perf_counter() - start_time
+            print(f"update for seq id {execute_model_req.seq_group_metadata_list[0].request_id} thread {threading.get_ident()} duration {duration} count {self.count} from worker_base")
 
         if not get_pp_group().is_last_rank:
             # output is IntermediateTensors

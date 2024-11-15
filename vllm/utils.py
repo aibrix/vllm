@@ -18,6 +18,7 @@ from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
                     Type, TypeVar, Union, overload)
+from queue import Queue, Empty
 from uuid import uuid4
 
 import numpy as np
@@ -1249,3 +1250,78 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+
+class ObjectPool:
+    def __init__(
+        self,
+        min_pool_size: int,
+        max_pool_size: int,
+        object_creator: Callable[[], T],
+    ):
+        """
+        Initialize ObjectPool
+
+        Args:
+            min_pool_size: The min number of objects to maintain
+                                 in the pool.
+            max_pool_size: The max number of objects that can be
+                                 in the pool.
+            object_creator: A function that returns a new object.
+        """
+        self.min_pool_size: int = min_pool_size
+        self.max_pool_size: int = max_pool_size
+        self.object_creator: Callable[[], T] = object_creator
+        self._pool: Queue = Queue(maxsize=max_pool_size)
+        self._lock: threading.Lock = threading.Lock()
+        self._size: int = min_pool_size
+
+        # Pre-fill the pool with min_pool_size objects
+        for _ in range(min_pool_size):
+            self._pool.put(object_creator())
+
+    def get(
+        self, block: bool = True, timeout: Optional[float] = None
+    ) -> Optional[T]:
+        """
+        Fetch an object from the pool, creating one if none are available
+        and the max pool size isn't reached.
+
+        Args:
+            block: If True, block until an object is available.
+            timeout: Time in seconds to wait for an available object.
+
+        Returns:
+            The object if available, otherwise None.
+        """
+        with self._lock:
+            try:
+                return self._pool.get(block=block, timeout=timeout)
+            except Empty:
+                # If the pool is empty but we haven't hit the max size,
+                # create a new object
+                if self._size < self.max_pool_size:
+                    self._size += 1
+                    return self.object_creator()
+                return None
+
+    def put(self, object: T) -> None:
+        """
+        Return an object to the pool. Only objects returned by get()
+        can be put back to the pool. Therefore, the pool should never
+        be full.
+
+        Args:
+            object: The object to return to the pool.
+        """
+        if object is not None:
+            with self._lock:
+                assert self._pool.qsize() < self._size
+                self._pool.put(object, block=False)
+
+    @property
+    def size(self) -> int:
+        """
+        Get the current size of the pool.
+        """
+        return self._pool.qsize()

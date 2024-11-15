@@ -281,8 +281,8 @@ class OpenAIServingChat(OpenAIServing):
     async def chat_completion_stream_generator(
         self,
         request: ChatCompletionRequest,
-        result_generator: AsyncIterator[RequestOutput],
         lora_request: LoRARequest,
+        result_generator: AsyncIterator[RequestOutput],
         request_id: str,
         conversation: List[ConversationMessage],
         tokenizer: AnyTokenizer,

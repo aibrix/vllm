@@ -1017,6 +1017,10 @@ class LLMEngine:
         request_id: If provided, then only this request is going to be processed
         """
 
+        # Initialize seq_group to a default value to avoid UnboundLocalError
+        # when we abort the request. See issue
+        # https://github.com/aibrix/aibrix/issues/392 for more details
+        seq_group = None
         now = time.time()
 
         if len(ctx.output_queue) == 0:
@@ -1210,7 +1214,7 @@ class LLMEngine:
             # Log stats.
             self.do_log_stats(scheduler_outputs, outputs, finished_before,
                               skip,
-                              custom_labels={"model_name": seq_group.lora_request.lora_name} if seq_group.lora_request else {})
+                              custom_labels={"model_name": seq_group.lora_request.lora_name} if seq_group and seq_group.lora_request else {})
 
             # Tracing
             self.do_tracing(scheduler_outputs)

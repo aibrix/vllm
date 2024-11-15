@@ -180,7 +180,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     is_driver_worker: bool
     model_runner: ModelRunnerBase
     observability_config: Optional[ObservabilityConfig] = None
-    count = 0
 
     @property
     @abstractmethod
@@ -305,7 +304,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         virtual_engine_id = 0 if execute_model_req is None else execute_model_req.virtual_engine
         kv_caches = self.kv_cache[virtual_engine_id]
         if self.model_runner.vineyard_llm_cache and len(kv_caches) > 0 and kv_caches[0] is not None:
-            self.count += 1
             cache_hints = self.model_runner.vineyard_llm_cache.prefetch_kv_caches(
                 None if execute_model_req is None else execute_model_req.seq_group_metadata_list, 
                 kv_caches, 

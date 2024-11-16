@@ -514,9 +514,22 @@ class VineyardLLMCache:
             ) = update_args
         if update_token_size <= 0:
             # restore the seq_group_metadata's and seq's metadata
-            if seq_group_metadata is not None
-              self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
+            self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
             return
+        
+        if get_tensor_model_parallel_rank() == 0:
+            block_table = seq_group_metadata.block_tables[seq_id]
+            slot_mapping = []
+            for i in range(update_context_len, update_context_len + update_token_size):
+                block_number = block_table[i // block_size]
+                block_offset = i % block_size
+                slot = block_number * block_size + block_offset
+                slot_mapping.append(slot)
+            slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
+            tensor_model_parallel_broadcast(slot_mapping, src=0)
+        else:
+            slot_mapping = torch.zeros((update_token_size,), dtype=torch.long, device='cuda')
+            tensor_model_parallel_broadcast(slot_mapping, src=0)
 
         if self.enable_async_update:
             buffer_tensors_tuple = self.tensor_pool.get(block=False)
@@ -534,19 +547,6 @@ class VineyardLLMCache:
 
         update_buffer, _ = buffer_tensors_tuple
 
-        if get_tensor_model_parallel_rank() == 0:
-            block_table = seq_group_metadata.block_tables[seq_id]
-            slot_mapping = []
-            for i in range(update_context_len, update_context_len + update_token_size):
-                block_number = block_table[i // block_size]
-                block_offset = i % block_size
-                slot = block_number * block_size + block_offset
-                slot_mapping.append(slot)
-            slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
-            tensor_model_parallel_broadcast(slot_mapping, src=0)
-        else:
-            slot_mapping = torch.zeros((update_token_size,), dtype=torch.long, device='cuda')
-            tensor_model_parallel_broadcast(slot_mapping, src=0)
 
         # fetch from GPU kv cache
         torch.cuda.synchronize()

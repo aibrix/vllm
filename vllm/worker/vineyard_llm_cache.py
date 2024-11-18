@@ -14,7 +14,7 @@ from vllm.config import ModelConfig, ParallelConfig
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              get_tensor_model_parallel_world_size)
 from vllm.distributed.communication_op import (tensor_model_parallel_all_reduce,
-                                               model_parallel_broadcast_object_list,
+                                               tensor_model_parallel_broadcast_object_list,
                                                tensor_model_parallel_broadcast,)
 from vllm.sequence import (SequenceData, SequenceGroupMetadata)
 from vllm.utils import init_logger, ObjectPool
@@ -283,10 +283,10 @@ class VineyardLLMCache:
                 query_prefix,
                 query_tokens,
             ]
-            model_parallel_broadcast_object_list(query_args, src=0)
+            tensor_model_parallel_broadcast_object_list(query_args, src=0)
         else:
             query_args = [None, None, None, None, None, None, None]
-            model_parallel_broadcast_object_list(query_args, src=0)
+            tensor_model_parallel_broadcast_object_list(query_args, src=0)
             (seq_id,
              context_len,
              token_chunk_size,
@@ -405,10 +405,10 @@ class VineyardLLMCache:
                     if seq_group_meta.is_prompt:
                         prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            model_parallel_broadcast_object_list(num_prefill_requests, src=0)
+            tensor_model_parallel_broadcast_object_list(num_prefill_requests, src=0)
         else:
             num_prefill_requests = [None]
-            model_parallel_broadcast_object_list(num_prefill_requests, src=0)
+            tensor_model_parallel_broadcast_object_list(num_prefill_requests, src=0)
             prefill_requests = [None] *  num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
         matched = {}
@@ -502,10 +502,10 @@ class VineyardLLMCache:
                 update_prefix,
                 update_tokens,
             ]
-            model_parallel_broadcast_object_list(update_args, src=0)
+            tensor_model_parallel_broadcast_object_list(update_args, src=0)
         else:
             update_args = [None, None, None, None, None]
-            model_parallel_broadcast_object_list(update_args, src=0)
+            tensor_model_parallel_broadcast_object_list(update_args, src=0)
             (seq_id,
              update_context_len,
              update_token_size,
@@ -612,10 +612,10 @@ class VineyardLLMCache:
                 if seq_group_meta.is_prompt:
                     prefill_requests.append(seq_group_meta)
             num_prefill_requests = [len(prefill_requests)]
-            model_parallel_broadcast_object_list(num_prefill_requests, src=0)
+            tensor_model_parallel_broadcast_object_list(num_prefill_requests, src=0)
         else:
             num_prefill_requests = [None]
-            model_parallel_broadcast_object_list(num_prefill_requests, src=0)
+            tensor_model_parallel_broadcast_object_list(num_prefill_requests, src=0)
             prefill_requests = [None] * num_prefill_requests[0]
         num_prefill_requests = num_prefill_requests[0]
 

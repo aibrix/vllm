@@ -29,7 +29,7 @@ def tensor_model_parallel_broadcast(input_: torch.Tensor,
     """Broadcast the input tensor across model parallel group."""
     return get_tp_group().broadcast(input_, src)
 
-def model_parallel_broadcast_object_list(input_: List[Any],
+def tensor_model_parallel_broadcast_object_list(input_: List[Any],
                                  src: int = 0) -> List[Any]:
     """Broadcast object list across model parallel group."""
     return get_tp_group().broadcast_object_list(input_, src)

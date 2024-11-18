@@ -278,7 +278,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         """
         Prepare the inputs to ModelRunner and workers.
         """
-        cache_hints = None
         if self.is_driver_worker:
             if execute_model_req is None:
                 if self.do_metadata_broadcast:

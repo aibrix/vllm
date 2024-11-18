@@ -742,27 +742,19 @@ class LLM:
                         pbar.update(1)
             if self.llm_engine.cache_service_metrics is not None:
                 logger.info(
-                    "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%, total tokens hit %d, number of measurement collected %d",
+                    "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%, total tokens hit %d",
                     0 if self.llm_engine.cache_service_metrics.total_tokens == 0 else self.llm_engine.cache_service_metrics.hit_tokens/self.llm_engine.cache_service_metrics.total_tokens * 100,
                     0 if self.llm_engine.cache_service_metrics.total_blocks == 0 else self.llm_engine.cache_service_metrics.hit_blocks/self.llm_engine.cache_service_metrics.total_blocks * 100, 
                     self.llm_engine.cache_service_metrics.hit_tokens, 
-                    self.llm_engine.cache_service_metrics.counter,  
                 )
                 logger.info(
-                    "Cache service time query avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time load avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time reshape avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time unload avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time update avg %.4f std %.4f median %.4f, normalized mean %.4f std %.4f median %.4f, time to first token avg %.4f std %.4f median %.4f, normalized time to first token %.4f std %.4f median %.4f",
+                    "Cache service time query avg %.4f std %.4f median %.4f, time load avg %.4f std %.4f median %.4f, time reshape avg %.4f std %.4f median %.4f, time unload avg %.4f std %.4f median %.4f, time update avg %.4f std %.4f median %.4f, time to first token avg %.4f std %.4f median %.4f",
                     np.mean(self.llm_engine.cache_service_metrics.time_query), np.std(self.llm_engine.cache_service_metrics.time_query), np.median(self.llm_engine.cache_service_metrics.time_query),
-                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_query), np.std(self.llm_engine.cache_service_metrics.normalized_time_query), np.median(self.llm_engine.cache_service_metrics.normalized_time_query),
                     np.mean(self.llm_engine.cache_service_metrics.time_load), np.std(self.llm_engine.cache_service_metrics.time_load), np.median(self.llm_engine.cache_service_metrics.time_load),
-                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_load), np.std(self.llm_engine.cache_service_metrics.normalized_time_load), np.median(self.llm_engine.cache_service_metrics.normalized_time_load),
                     np.mean(self.llm_engine.cache_service_metrics.time_reshape), np.std(self.llm_engine.cache_service_metrics.time_reshape), np.median(self.llm_engine.cache_service_metrics.time_reshape),
-                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_reshape), np.std(self.llm_engine.cache_service_metrics.normalized_time_reshape), np.median(self.llm_engine.cache_service_metrics.normalized_time_reshape),
                     np.mean(self.llm_engine.cache_service_metrics.time_unload), np.std(self.llm_engine.cache_service_metrics.time_unload), np.median(self.llm_engine.cache_service_metrics.time_unload), 
-                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_unload), np.std(self.llm_engine.cache_service_metrics.normalized_time_unload), np.median(self.llm_engine.cache_service_metrics.normalized_time_unload),
                     np.mean(self.llm_engine.cache_service_metrics.time_update), np.std(self.llm_engine.cache_service_metrics.time_update), np.median(self.llm_engine.cache_service_metrics.time_update),
-                    np.mean(self.llm_engine.cache_service_metrics.normalized_time_update), np.std(self.llm_engine.cache_service_metrics.normalized_time_update), np.median(self.llm_engine.cache_service_metrics.normalized_time_update),
                     np.mean(times_to_first_token), np.std(times_to_first_token), np.median(times_to_first_token),
-                    np.mean(normalized_times_to_first_token), np.std(normalized_times_to_first_token), np.median(normalized_times_to_first_token),
-                    
                 )
 
                 with self.llm_engine.cache_service_metrics.lock:

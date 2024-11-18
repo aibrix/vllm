@@ -4,6 +4,7 @@ import time
 import threading
 from functools import partial
 from queue import Queue, Full
+from collections import deque
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import torch
@@ -30,32 +31,66 @@ except ImportError:
 
 logger = init_logger(__name__)
 
-class CacheServiceMetrics:
-    hit_tokens: int = 0 # Total number of tokens hit. 
-    total_tokens: int = 0 # Total number of tokens requested. 
-    hit_blocks: int = 0 # Total number of blocks hit. 
-    total_blocks: int = 0  # Total number of blocks requested. 
-    counter: int = 0 # Total number of measurements. 
-    time_query: list = [] # Times used query cache from cache service. 
-    time_load: list = [] # Times used load fetched cache to device memory. 
-    time_reshape: list = [] # Times used reshaping tensors for flash attention KV format. 
-    time_unload: list = [] # Times used move computed KV from device memory. 
-    time_update: list = [] # Times used update computed KV to cache service. 
-    normalized_time_query: list = [] # Times used query cache from cache service normalized by number of tokens. 
-    normalized_time_load: list = [] # Times used load fetched cache to device memory normalized by number of tokens. 
-    normalized_time_reshape: list = [] # Times used reshaping tensors for flash attention KV format normalized by number of tokens. 
-    normalized_time_unload: list = [] # Times used move computed KV from device memory normalized by number of tokens. 
-    normalized_time_update: list = [] # Times used update computed KV to cache service normalized by number of tokens. 
+class CacheServiceMetrics: 
 
-    err_query: int = 0 # Number of query errors.
-    err_async_update_task_queue_full: int = 0 # Number of Full exceptions when enqueuing async update tasks
+    def __init__(self, max_size=100):
+        # Instance variables
+        self.hit_tokens: int = 0  # Total number of tokens hit.
+        self.total_tokens: int = 0  # Total number of tokens requested.
+        self.hit_blocks: int = 0  # Total number of blocks hit.
+        self.total_blocks: int = 0  # Total number of blocks requested.
 
-    lock: threading.Lock = threading.Lock()
-    # The following metrics need to be protected by `lock`
-    time_async_update_queue: list = [] # Queuing delays of async update tasks
-    time_async_update_exec: list = [] # Execution times of async update tasks
-    counter_async_update_updated: list = [] # Number of udpated tokens
-    err_update: int = 0 # Number of update errors.
+        self.time_query = deque(maxlen=max_size)  # Times used query cache from cache service.
+        self.time_load = deque(maxlen=max_size)  # Times used load fetched cache to device memory.
+        self.time_reshape = deque(maxlen=max_size)  # Times used reshaping tensors for flash attention KV format.
+        self.time_unload = deque(maxlen=max_size)  # Times used move computed KV from device memory.
+        self.time_update = deque(maxlen=max_size)  # Times used update computed KV to cache service.
+        self.err_async_update_task_queue_full: int = 0  # Number of exceptions for async update tasks.
+
+        self.lock: threading.Lock = threading.Lock()
+        # The following metrics need to be protected by `lock`
+        self.time_async_update_queue = deque(maxlen=max_size)  # Queuing delays of async update tasks.
+        self.time_async_update_exec = deque(maxlen=max_size)  # Execution times of async update tasks.
+        self.counter_async_update_updated = deque(maxlen=max_size)  # Number of updated tokens.
+        
+    def __getstate__(self):
+        # Create a state dictionary excluding the lock
+        state = self.__dict__.copy()
+        del state['lock']
+        return state
+
+    def __setstate__(self, state):
+        # Restore the instance attributes
+        self.__dict__.update(state)
+        # Reinitialize the lock
+        self.lock = threading.Lock()
+
+    def add_time_query(self, value):
+        self.time_query.append(value)
+
+    def add_time_load(self, value):
+        self.time_load.append(value)
+
+    def add_time_reshape(self, value):
+        self.time_reshape.append(value)
+
+    def add_time_unload(self, value):
+        self.time_unload.append(value)
+
+    def add_time_update(self, value):
+        self.time_update.append(value)
+
+    def update_async_metrics(self, queue_duration, exec_duration, updated):
+        with self.lock:
+            self.time_async_update_queue.append(queue_duration)
+            self.time_async_update_exec.append(exec_duration)
+            self.counter_async_update_updated.append(updated)
+
+    def get_tokens_hit_rate(self):
+        return 0 if self.total_tokens == 0 else self.hit_tokens / float(self.total_tokens)
+
+    def get_blocks_hit_rate(self):
+        return 0 if self.total_blocks == 0 else self.hit_blocks / float(self.total_blocks)
 
 
 class VineyardLLMCache:
@@ -313,8 +348,7 @@ class VineyardLLMCache:
         except Exception:
             self.metrics.err_query += 1
         duration = time.perf_counter() - start_time
-        self.metrics.time_query.append(duration)
-        self.metrics.normalized_time_query.append(duration/(len(query_tokens) + len(query_prefix)))
+        self.metrics.add_time_query(duration)
         # If sampling is required, we need to leave one token unmatched
         # to trigger the following sampling step in engine worker's workflow.
         if seq_group_metadata is not None and seq_group_metadata.is_sampling_enabled:
@@ -347,7 +381,6 @@ class VineyardLLMCache:
         self.metrics.total_tokens += query_token_size
         self.metrics.hit_blocks += (matched // block_size)
         self.metrics.total_blocks += ((-query_token_size) // (-block_size))
-        self.metrics.counter += 1
 
         # save to GPU kv cache
         torch.cuda.synchronize()
@@ -363,8 +396,7 @@ class VineyardLLMCache:
         copy_end.record()
         copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
-        self.metrics.time_load.append(duration)
-        self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
+        self.metrics.add_time_unload(duration)
         
         torch.cuda.synchronize()
         reshape_start = torch.cuda.Event(enable_timing=True)
@@ -386,8 +418,7 @@ class VineyardLLMCache:
         reshape_end.record()
         reshape_end.synchronize()
         duration = reshape_start.elapsed_time(reshape_end) / 1000.0
-        self.metrics.time_reshape.append(duration)
-        self.metrics.normalized_time_reshape.append(0 if matched == 0 else duration/matched)
+        self.metrics.add_time_reshape(duration)
 
         # update the seq_group_metadata's and seq's metadata
         self._update_seq_group_metadata(seq_group_metadata, matched)
@@ -464,10 +495,7 @@ class VineyardLLMCache:
                     f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}, "
                     f"queue_duration={queue_duration:.4f}, exec_duration={exec_duration:.4f}"
                 )
-                with self.metrics.lock:
-                    self.metrics.time_async_update_queue.append(queue_duration)
-                    self.metrics.time_async_update_exec.append(exec_duration)
-                    self.metrics.counter_async_update_updated.append(updated)
+                self.metrics.update_async_metrics(queue_duration, exec_duration, updated)
             else:
                 logger.debug(
                     f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
@@ -569,8 +597,7 @@ class VineyardLLMCache:
         end_unload.record()
         end_unload.synchronize()
         duration = start_unload.elapsed_time(end_unload) / 1000.0
-        self.metrics.time_unload.append(duration)   
-        self.metrics.normalized_time_unload.append(0 if update_token_size == 0 else duration/update_token_size)
+        self.metrics.add_time_unload(duration)   
 
         start_time = time.perf_counter()
 
@@ -598,8 +625,7 @@ class VineyardLLMCache:
             update_task()
 
         duration = time.perf_counter() - start_time
-        self.metrics.time_update.append(duration)   
-        self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
+        self.metrics.add_time_update(duration)   
 
         # restore the seq_group_metadata's and seq's metadata
         self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])

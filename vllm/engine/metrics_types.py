@@ -53,7 +53,21 @@ class Stats:
     n_requests: List[int]
     finished_reason_requests: List[str]
 
+    # Cache Service 
+    cache_service_hit_tokens: int
+    cache_service_total_tokens: int
+    cache_service_hit_blocks: int
+    cache_service_total_blocks: int 
+    cache_service_tokens_hit_rate: float 
+    cache_service_blocks_hit_rate: float 
+    cache_service_time_query: List[int]
+    cache_service_time_load: List[int]
+    cache_service_time_reshape: List[int]
+    cache_service_time_unload: List[int]
+    cache_service_time_update: List[int]
+    
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+    
 
 
 class SupportsMetricsInfo(Protocol):
@@ -71,7 +85,7 @@ class StatLoggerBase(ABC):
         self.num_generation_tokens: List[int] = []
         self.last_local_log = time.time()
         self.local_interval = local_interval
-        self.external_cache_service_metrics = CacheServiceMetrics
+        # self.external_cache_service_metrics = CacheServiceMetrics
         self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
         
     @abstractmethod

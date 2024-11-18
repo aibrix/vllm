@@ -297,7 +297,7 @@ class LLMEngine:
         )
         self.log_stats = log_stats
         self.step_return_finished_only = step_return_finished_only
-        self.cache_service_metrics = CacheServiceMetrics
+        self.cache_service_metrics = CacheServiceMetrics(max_size=100)
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -1815,7 +1815,16 @@ class LLMEngine:
         best_of_requests: List[int] = []
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
-
+        
+        # Cache Service Metrics
+        cache_service_tokens_hit_rate: float 
+        cache_service_blocks_hit_rate: float 
+        cache_service_time_query: List[int] = []
+        cache_service_time_load: List[int] = []
+        cache_service_time_reshape: List[int] = []
+        cache_service_time_unload: List[int] = []
+        cache_service_time_update: List[int] = []
+        
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
@@ -1903,6 +1912,30 @@ class LLMEngine:
             spec_decode_metrics = model_output[0].spec_decode_worker_metrics
         else:
             spec_decode_metrics = None
+            
+        if self.cache_service_metrics is not None:
+            cache_service_hit_tokens = self.cache_service_metrics.hit_tokens
+            cache_service_total_tokens = self.cache_service_metrics.total_tokens
+            cache_service_hit_blocks = self.cache_service_metrics.hit_blocks
+            cache_service_total_blocks = self.cache_service_metrics.total_blocks
+            cache_service_tokens_hit_rate = self.cache_service_metrics.get_tokens_hit_rate()
+            cache_service_blocks_hit_rate = self.cache_service_metrics.get_blocks_hit_rate()
+            
+            cache_service_time_query.extend(list(self.cache_service_metrics.time_query))
+            cache_service_time_load.extend(list(self.cache_service_metrics.time_load))
+            cache_service_time_reshape.extend(list(self.cache_service_metrics.time_reshape))
+            cache_service_time_unload.extend(list(self.cache_service_metrics.time_unload))
+            cache_service_time_update.extend(list(self.cache_service_metrics.time_update))
+            self.cache_service_metrics.hit_tokens = 0
+            self.cache_service_metrics.total_tokens = 0
+            self.cache_service_metrics.hit_blocks = 0
+            self.cache_service_metrics.total_blocks = 0
+            self.cache_service_metrics.time_query.clear()
+            self.cache_service_metrics.time_load.clear()
+            self.cache_service_metrics.time_reshape.clear()
+            self.cache_service_metrics.time_unload.clear()
+            self.cache_service_metrics.time_update.clear()
+            
 
         return Stats(
             now=now,
@@ -1935,6 +1968,19 @@ class LLMEngine:
             best_of_requests=best_of_requests,
             n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,
+            
+            # Cache Service
+            cache_service_hit_tokens = cache_service_hit_tokens,
+            cache_service_total_tokens = cache_service_total_tokens,
+            cache_service_hit_blocks = cache_service_hit_blocks,
+            cache_service_total_blocks = cache_service_total_blocks,
+            cache_service_tokens_hit_rate = cache_service_tokens_hit_rate,
+            cache_service_blocks_hit_rate = cache_service_blocks_hit_rate,
+            cache_service_time_query = cache_service_time_query,
+            cache_service_time_load = cache_service_time_load,
+            cache_service_time_reshape = cache_service_time_reshape,
+            cache_service_time_unload = cache_service_time_unload,
+            cache_service_time_update = cache_service_time_update,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

@@ -46,6 +46,8 @@ class CacheServiceMetrics:
     normalized_time_reshape: list = [] # Times used reshaping tensors for flash attention KV format normalized by number of tokens. 
     normalized_time_unload: list = [] # Times used move computed KV from device memory normalized by number of tokens. 
     normalized_time_update: list = [] # Times used update computed KV to cache service normalized by number of tokens. 
+
+    err_query: int = 0 # Number of query errors.
     err_async_update_task_queue_full: int = 0 # Number of Full exceptions when enqueuing async update tasks
 
     lock: threading.Lock = threading.Lock()
@@ -53,6 +55,7 @@ class CacheServiceMetrics:
     time_async_update_queue: list = [] # Queuing delays of async update tasks
     time_async_update_exec: list = [] # Execution times of async update tasks
     counter_async_update_updated: list = [] # Number of udpated tokens
+    err_update: int = 0 # Number of update errors.
 
 
 class VineyardLLMCache:
@@ -192,7 +195,7 @@ class VineyardLLMCache:
         head_size = model_config.get_head_size()
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
-        token_nbytes = num_layers * num_kv_heads * head_size * 2
+        token_nbytes = num_layers * num_kv_heads * head_size * 4  # sizeof(float16) * 2 (kv)
 
         # we will use one temp buffer to hold the kv tensors fetched from v6d cache
         # , i.e., `fetch_buffer`
@@ -300,11 +303,15 @@ class VineyardLLMCache:
             return seq_id, 0
 
         start_time = time.perf_counter()
-        matched = self.cache.query(
-            prefix=query_prefix,
-            tokens=query_tokens,
-            kv_cache_list=self.fetch_tensors[:query_token_size],
-        )
+        matched = 0
+        try:
+            matched = self.cache.query(
+                prefix=query_prefix,
+                tokens=query_tokens,
+                kv_cache_list=self.fetch_tensors[:query_token_size],
+            )
+        except Exception:
+            self.metrics.err_query += 1
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
         self.metrics.normalized_time_query.append(duration/(len(query_tokens) + len(query_prefix)))
@@ -466,7 +473,8 @@ class VineyardLLMCache:
                     f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
                 )
         except Exception:
-            pass
+            with self.metrics.lock:
+                self.metrics.err_update += 1
         finally:
             if self.enable_async_update:
                 self.tensor_pool.put(buffer_tensors_tuple)

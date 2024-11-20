@@ -764,12 +764,14 @@ class LLM:
                     np.mean(normalized_times_to_first_token), np.std(normalized_times_to_first_token), np.median(normalized_times_to_first_token),
                     
                 )
-                logger.info(
-                    "Cache service errors: err_async_update_task_queue_full %d",
-                    self.llm_engine.cache_service_metrics.err_async_update_task_queue_full,  
-                )
 
                 with self.llm_engine.cache_service_metrics.lock:
+                    logger.info(
+                        "Cache service errors: err_query %d, err_update %d, err_async_update_task_queue_full %d",
+                        self.llm_engine.cache_service_metrics.err_query,
+                        self.llm_engine.cache_service_metrics.err_update,
+                        self.llm_engine.cache_service_metrics.err_async_update_task_queue_full,  
+                    )
                     logger.info(
                         "Cache service async update: time queueing avg %.4f std %.4f median %.4f, time execution avg %.4f std %.4f median %.4f, counter updated avg %.2f std %.2f median %.2f",
                         np.mean(self.llm_engine.cache_service_metrics.time_async_update_queue), np.std(self.llm_engine.cache_service_metrics.time_async_update_queue), np.median(self.llm_engine.cache_service_metrics.time_async_update_queue),

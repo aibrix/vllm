@@ -1564,6 +1564,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # set to None. Thus, if we encounter None for input_tokens, we just
         # skip sampling and return an empty outputs.
         if model_input.input_tokens is None:
+            if not self.is_driver_worker:
+                return []
+
+            # Invoke the async callback if any.
+            if model_input.async_callback is not None:
+                model_input.async_callback()
+
             outputs=[
                 CompletionSequenceGroupOutput(
                     samples=[],

@@ -45,6 +45,8 @@ class CacheServiceMetrics:
         self.time_reshape = deque(maxlen=max_size)  # Times used reshaping tensors for flash attention KV format.
         self.time_unload = deque(maxlen=max_size)  # Times used move computed KV from device memory.
         self.time_update = deque(maxlen=max_size)  # Times used update computed KV to cache service.
+        
+        self.err_query: int = 0 # Number of query errors.
         self.err_async_update_task_queue_full: int = 0  # Number of exceptions for async update tasks.
 
         self.lock: threading.Lock = threading.Lock()
@@ -52,6 +54,7 @@ class CacheServiceMetrics:
         self.time_async_update_queue = deque(maxlen=max_size)  # Queuing delays of async update tasks.
         self.time_async_update_exec = deque(maxlen=max_size)  # Execution times of async update tasks.
         self.counter_async_update_updated = deque(maxlen=max_size)  # Number of updated tokens.
+        self.err_update: int = 0 # Number of update errors.
         
     def __getstate__(self):
         # Create a state dictionary excluding the lock

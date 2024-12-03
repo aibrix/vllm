@@ -85,7 +85,6 @@ class StatLoggerBase(ABC):
         self.num_generation_tokens: List[int] = []
         self.last_local_log = time.time()
         self.local_interval = local_interval
-        # self.external_cache_service_metrics = CacheServiceMetrics
         self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
         
     @abstractmethod

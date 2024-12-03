@@ -66,8 +66,7 @@ class Stats:
     cache_service_time_unload: List[int]
     cache_service_time_update: List[int]
     
-    spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
-    
+    spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None 
 
 
 class SupportsMetricsInfo(Protocol):

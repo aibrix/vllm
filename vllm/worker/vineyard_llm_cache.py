@@ -107,6 +107,7 @@ class VineyardLLMCache:
         kv_cache_dtype: str = None,
         torch_dtype: torch.dtype = torch.bfloat16,
         metrics: CacheServiceMetrics = None,
+        metrics_enabled: bool = False,
         enable_async_update: bool = False,
         min_inflight_tasks: int = 1,
         max_inflight_tasks: int = 1,
@@ -163,7 +164,8 @@ class VineyardLLMCache:
             self._background_loop.start()
 
         self.metrics = metrics
-        logger.info(f"VineyardLLMCache init {metrics}")
+        self.metrics_enabled = metrics_enabled
+        logger.info(f"VineyardLLMCache init {metrics} metrics_enabled {metrics_enabled}")
         logger.info(self)
 
     def _pinned_tensor_creator(
@@ -255,6 +257,10 @@ class VineyardLLMCache:
             kwargs["min_inflight_tasks"] = min(envs.VINEYARD_CACHE_MIN_INFLIGHT_TASKS, max_inflight_tasks)
             kwargs["max_inflight_tasks"] = max_inflight_tasks
             logger.info(f"VineyardLLMCache async update: {kwargs}")
+        
+        metrics_enabled = False
+        if envs.VINEYARD_CACHE_METRICS_ENABLED:
+            metrics_enabled = True
 
         # convert cache capacity to number of tokens
         cache_capacity = (
@@ -271,6 +277,7 @@ class VineyardLLMCache:
             kv_cache_dtype=kv_cache_dtype,
             torch_dtype=torch_dtype,
             metrics = metrics,
+            metrics_enabled = metrics_enabled,
             **kwargs,
         )
 
@@ -339,9 +346,10 @@ class VineyardLLMCache:
 
         if query_token_size <= 0:
             return seq_id, 0
-        self.metrics.total_tokens += query_token_size
-        self.metrics.total_blocks += ((-query_token_size) // (-block_size))
-        start_time = time.perf_counter()
+        if self.metrics_enabled:
+            self.metrics.total_tokens += query_token_size
+            self.metrics.total_blocks += ((-query_token_size) // (-block_size))
+            start_time = time.perf_counter()
         matched = 0
         try:
             matched = self.cache.query(
@@ -350,9 +358,11 @@ class VineyardLLMCache:
                 kv_cache_list=self.fetch_tensors[:query_token_size],
             )
         except Exception:
-            self.metrics.err_query += 1
-        duration = time.perf_counter() - start_time
-        self.metrics.add_time_query(duration)
+            if self.metrics_enabled:
+                self.metrics.err_query += 1
+        if self.metrics_enabled:
+            duration = time.perf_counter() - start_time
+            self.metrics.add_time_query(duration)
         # If sampling is required, we need to leave one token unmatched
         # to trigger the following sampling step in engine worker's workflow.
         if seq_group_metadata is not None and seq_group_metadata.is_sampling_enabled:
@@ -380,29 +390,31 @@ class VineyardLLMCache:
         else:
             slot_mapping = torch.zeros((matched,), dtype=torch.long, device='cuda')
             tensor_model_parallel_broadcast(slot_mapping, src=0)
-        self.metrics.hit_tokens += matched
-        self.metrics.hit_blocks += (matched // block_size)
+        if self.metrics_enabled:
+            self.metrics.hit_tokens += matched
+            self.metrics.hit_blocks += (matched // block_size)
 
-        # save to GPU kv cache
-        torch.cuda.synchronize()
-        copy_start = torch.cuda.Event(enable_timing=True)
-        copy_end = torch.cuda.Event(enable_timing=True)
-        copy_start.record()
+            # save to GPU kv cache
+            torch.cuda.synchronize()
+            copy_start = torch.cuda.Event(enable_timing=True)
+            copy_end = torch.cuda.Event(enable_timing=True)
+            copy_start.record()
         # Copying the entire buffer to the GPU in a single operation and then
         # slicing it into smaller, non-contiguou chunks on the GPU is more
         # efficient than performing multiple smaller copy operations. This
         # approach reduces the number of transfers between CPU and GPU,
         # leading to faster overall performance.
         buffer = self.cuda_buffer.copy_(self.fetch_buffer)[:, :, :matched]
-        copy_end.record()
-        copy_end.synchronize()
-        duration = copy_start.elapsed_time(copy_end) / 1000.0
-        self.metrics.add_time_unload(duration)
-        
-        torch.cuda.synchronize()
-        reshape_start = torch.cuda.Event(enable_timing=True)
-        reshape_end = torch.cuda.Event(enable_timing=True)
-        reshape_start.record()
+        if self.metrics_enabled:
+            copy_end.record()
+            copy_end.synchronize()
+            duration = copy_start.elapsed_time(copy_end) / 1000.0
+            self.metrics.add_time_unload(duration)
+
+            torch.cuda.synchronize()
+            reshape_start = torch.cuda.Event(enable_timing=True)
+            reshape_end = torch.cuda.Event(enable_timing=True)
+            reshape_start.record()
         for j in range(self.layer):
             # use `reshape_and_cache_flash` rather than `copy_` as
             # the target kv cache slots is not contingous.
@@ -416,10 +428,11 @@ class VineyardLLMCache:
                 1.0,
                 1.0
             )
-        reshape_end.record()
-        reshape_end.synchronize()
-        duration = reshape_start.elapsed_time(reshape_end) / 1000.0
-        self.metrics.add_time_reshape(duration)
+        if self.metrics_enabled:
+            reshape_end.record()
+            reshape_end.synchronize()
+            duration = reshape_start.elapsed_time(reshape_end) / 1000.0
+            self.metrics.add_time_reshape(duration)
 
         # update the seq_group_metadata's and seq's metadata
         self._update_seq_group_metadata(seq_group_metadata, matched)
@@ -496,14 +509,16 @@ class VineyardLLMCache:
                     f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}, "
                     f"queue_duration={queue_duration:.4f}, exec_duration={exec_duration:.4f}"
                 )
-                self.metrics.update_async_metrics(queue_duration, exec_duration, updated)
+                if self.metrics_enabled:
+                    self.metrics.update_async_metrics(queue_duration, exec_duration, updated)
             else:
                 logger.debug(
                     f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
                 )
         except Exception:
-            with self.metrics.lock:
-                self.metrics.err_update += 1
+            if self.metrics_enabled:
+                with self.metrics.lock:
+                    self.metrics.err_update += 1
         finally:
             if self.enable_async_update:
                 self.tensor_pool.put(buffer_tensors_tuple)
@@ -586,21 +601,23 @@ class VineyardLLMCache:
 
 
         # fetch from GPU kv cache
-        torch.cuda.synchronize()
-        start_unload = torch.cuda.Event(enable_timing=True)
-        end_unload = torch.cuda.Event(enable_timing=True)
-        start_unload.record()
+        if self.metrics_enabled:
+            torch.cuda.synchronize()
+            start_unload = torch.cuda.Event(enable_timing=True)
+            end_unload = torch.cuda.Event(enable_timing=True)
+            start_unload.record()
         # using a cuda staging buffer to avoid the inefficiency of non-contiguous HBM->DRAM memcpy
         for j in range(self.layer):
             self.cuda_buffer[:, j, :update_token_size].copy_(
                 kv_caches[j][:, slot_mapping // block_size, slot_mapping % block_size])
         update_buffer.copy_(self.cuda_buffer)
-        end_unload.record()
-        end_unload.synchronize()
-        duration = start_unload.elapsed_time(end_unload) / 1000.0
-        self.metrics.add_time_unload(duration)   
+        if self.metrics_enabled:
+            end_unload.record()
+            end_unload.synchronize()
+            duration = start_unload.elapsed_time(end_unload) / 1000.0
+            self.metrics.add_time_unload(duration)   
 
-        start_time = time.perf_counter()
+            start_time = time.perf_counter()
 
         update_task = partial(self._update_kv_cache,
             prefix=update_prefix,
@@ -620,13 +637,15 @@ class VineyardLLMCache:
                 )
             except Full:
                 logger.warning(f"update_seq_kv_caches: queue is full, skip this update")
-                self.metrics.err_async_update_task_queue_full += 1
+                if self.metrics_enabled:
+                    self.metrics.err_async_update_task_queue_full += 1
                 self.tensor_pool.put(buffer_tensors_tuple)
         else:
             update_task()
-
-        duration = time.perf_counter() - start_time
-        self.metrics.add_time_update(duration)   
+            
+        if self.metrics_enabled:
+            duration = time.perf_counter() - start_time
+            self.metrics.add_time_update(duration)   
 
         # restore the seq_group_metadata's and seq's metadata
         self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])

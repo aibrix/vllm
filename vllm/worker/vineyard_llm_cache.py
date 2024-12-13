@@ -498,19 +498,24 @@ class VineyardLLMCache:
             scheduled_time: The timestamp that the task is scheduled.
         '''
         try:
-            start_time = time.perf_counter()
-            queue_duration = start_time - scheduled_time
+            if self.metrics_enabled:
+                start_time = time.perf_counter()
+                queue_duration = start_time - scheduled_time
             update_token_size = len(tokens)
             kv_cache_list = buffer_tensors_tuple[1][:update_token_size]
             updated = self.cache.update(prefix, tokens, kv_cache_list)
-            exec_duration = time.perf_counter() - start_time
+            if self.metrics_enabled:
+                exec_duration = time.perf_counter() - start_time
             if self.enable_async_update:
-                logger.debug(
-                    f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}, "
-                    f"queue_duration={queue_duration:.4f}, exec_duration={exec_duration:.4f}"
-                )
                 if self.metrics_enabled:
+                    logger.debug(
+                        f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}, "
+                        f"queue_duration={queue_duration:.4f}, exec_duration={exec_duration:.4f}"
+                    )
                     self.metrics.update_async_metrics(queue_duration, exec_duration, updated)
+                else:
+                    logger.debug(
+                        f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}")
             else:
                 logger.debug(
                     f"update kv cache: #prefix={len(prefix)}, #tokens={len(tokens)}, updated={updated}"
@@ -617,7 +622,7 @@ class VineyardLLMCache:
             duration = start_unload.elapsed_time(end_unload) / 1000.0
             self.metrics.add_time_unload(duration)   
 
-            start_time = time.perf_counter()
+        start_time = time.perf_counter()
 
         update_task = partial(self._update_kv_cache,
             prefix=update_prefix,

@@ -1926,10 +1926,6 @@ class LLMEngine:
             cache_service_time_reshape.extend(list(self.cache_service_metrics.time_reshape))
             cache_service_time_unload.extend(list(self.cache_service_metrics.time_unload))
             cache_service_time_update.extend(list(self.cache_service_metrics.time_update))
-            self.cache_service_metrics.hit_tokens = 0
-            self.cache_service_metrics.total_tokens = 0
-            self.cache_service_metrics.hit_blocks = 0
-            self.cache_service_metrics.total_blocks = 0
             self.cache_service_metrics.time_query.clear()
             self.cache_service_metrics.time_load.clear()
             self.cache_service_metrics.time_reshape.clear()

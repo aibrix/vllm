@@ -89,6 +89,9 @@ kvCacheRegion::~kvCacheRegion() {
   // no need to clear other counters. 
 }
 
+void * kvCacheRegion::getStartPtr(void) {
+  return reinterpret_cast<void*>(this->dptr); 
+} 
 
 uint64_t kvCacheRegion::getAllocPhyPages(void) {
   return this->total_pages;
@@ -108,13 +111,12 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
   int64_t toallocPages = -1; 
 
   // Align the new offset to page_size
-  uint64_t alignedSize = roundup(this->offset + size, this->page_size); 
+  uint64_t alignedSize = roundup(size, this->page_size); 
 
   this->total_pages = alignedSize/this->page_size;
 
   // Updating the offset as we are using more blocks here. 
-  this->offset += size; 
-  this->alignedSize = alignedSize; 
+  this->alignedSize = alignedSize;
   
   // Check how many pages should we allocated this time
   char * alignedAddr = this->dptr + alignedSize; 
@@ -132,9 +134,8 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
     if (toallocPages > 0 && allocatePhyPages(this->nextUnmapedAddr, allocSize) == 0) {
       //fprintf(stderr, "blocks %ld this->block_size %ld size %lx allocSize %lx toallocPages %ld this->nextUnmapedAddr %p this->page_size %ld\n", blocks, this->block_size, size, allocSize, toallocPages, this->nextUnmapedAddr, this->page_size);
       
-      // Touch this page in order to initiate page allocation
+      // Touch newly-allocates pages in order to initiate physical page allocation
       // This is important to avoid the memory allocation overhead on the critical path. 
-      //if(toallocPages == 1) {
       for(int i = 0; i < toallocPages; i++) {
         int64_t h_data = 0;
         int64_t offset = this->page_size * i;
@@ -199,7 +200,7 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
   uint64_t value_cache_block_per_layer = key_cache_block_per_layer;
   uint64_t cache_block_size = (key_cache_block_per_layer + value_cache_block_per_layer) * layers_num; 
 
-  //fprintf(stderr, "kvCacheAllocator initialization: key_cache_block_per_layer-%d, cache_block_size-%d\n", key_cache_block_per_layer, cache_block_size); 
+  fprintf(stderr, "kvCacheAllocator initialization: key_cache_block_per_layer-%d, cache_block_size-%lx\n", key_cache_block_per_layer, cache_block_size); 
   // Getting the cuda device and force the initialization
   CUdevice dev; // device
   CHECK_RT(cudaFree(0));  // Force and check the initialization of the runtime
@@ -312,9 +313,9 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
 
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
-  //fprintf(stderr, "NPPPPPP release region %d\n", region_id);
   region->freeAllPhyMemory(); 
-
+  fprintf(stderr, "Release region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
+  
   // Cache the given region, as it can be used for the future ideally. 
   // In order to reduce the overhead of memory management, we did not 
   // reclaim physical blocks until necessary.
@@ -439,7 +440,8 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
     uint64_t blocks = row[1]; 
 
     pages += _allocCacheBlocksForRequest(region_id, blocks, stream);
-    //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
+    //if (region_id == 11)
+    fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
   }
   //cudaDeviceSynchronize(); 
 
@@ -487,7 +489,7 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     this->free_caches.clear(); 
     this->req_cache_blocks.clear(); 
 
-    // Copying the work
+    // Copying the work to the shared area
     for(auto cache_id: free_caches) {
       //fprintf(stderr, "releasing cache_id %d\n", cache_id); 
       this->free_caches.push_back(cache_id); 
@@ -502,11 +504,11 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     pthread_mutex_unlock(&this->mutex_manager);
 }
 
-void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
+void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
   //Py_BEGIN_ALLOW_THREADS
   //fprintf(stderr, "NNNNNNN is_prefill_phase is %d\n", is_prefill_phase); 
 
-  if(is_prefill_phase) {
+  if(immediate_allocate) {
     pthread_mutex_lock(&this->mutex_manager);
     
     // If the manager has not finished, waiting on the condition 
@@ -565,4 +567,47 @@ void kvCacheAllocator::collectPhyPages(int64_t pages) {
   return; 
 }
 
+
+// Swap out the caches listed in src_to_dests (from Device to Host)
+void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> src_to_dests) {
+  
+  for(auto item: src_to_dests) {
+    int64_t region_id = item[0]; 
+    int64_t dest_ptr = item[1]; 
+    int64_t size = item[2]; 
+
+    kvCacheRegion * region = this->active_regions_map[region_id];
+    void * src_ptr = region->getStartPtr(); 
+
+    cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
+                    size, cudaMemcpyDeviceToHost);
+
+    // After reading, now releasing the region's memory in order to free memory for other requests
+    region->freeAllPhyMemory(); 
+    fprintf(stderr, "Swapped out region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
+ 
+  }
+}
+
+// Swap in the caches listed in src_to_dests (from Host to Device)
+void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> src_to_dests) {
+    
+  for(auto item: src_to_dests) {
+    int64_t src_ptr = item[0]; 
+    int64_t region_id = item[1]; 
+    int64_t blocks = item[2]; 
+
+    // Allocate physical memory at first
+    kvCacheRegion * region = this->active_regions_map[region_id];
+    region->allocCacheBlocks(blocks, &this->used_pages, nullptr);
+
+    int64_t size = blocks * this->block_size;
+    void * dest_ptr = region->getStartPtr(); 
+    printf("SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
+
+    cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
+                    size, cudaMemcpyHostToDevice);
+  }
+
+}
 

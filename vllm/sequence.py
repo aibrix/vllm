@@ -435,7 +435,6 @@ class Sequence:
         # Adding one more token for the predicted mode (used in dattn)
         return (self.get_len() + self.block_size + 14) // self.block_size
 
-
     @property
     def prompt(self) -> Optional[str]:
         if self._prompt is not None:

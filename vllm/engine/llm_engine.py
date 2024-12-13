@@ -224,8 +224,6 @@ class LLMEngine:
 
         # support for dattn
         use_dattn: bool = False,
-        # The frequency to invoke virtual memory management
-        dattn_vmm_frequency: int = 10,  
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -281,7 +279,6 @@ class LLMEngine:
         load_general_plugins()
 
         self.use_dattn = use_dattn
-        self.dattn_vmm_frequency = dattn_vmm_frequency
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -486,6 +483,9 @@ class LLMEngine:
         """
         num_gpu_blocks, num_cpu_blocks = (
             self.model_executor.determine_num_available_blocks())
+
+        # DEBUG: in order to trigger the swap faster
+        num_gpu_blocks = 200 
         print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
@@ -1244,6 +1244,7 @@ class LLMEngine:
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
 
+            #print(f"to_swap_out:{scheduler_outputs.blocks_to_swap_out}")
             execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
@@ -1263,11 +1264,8 @@ class LLMEngine:
             if self.use_dattn:
                 #print(f"step_index:{self.step_index}, scheduler_outputs.num_prefill_groups:{scheduler_outputs.num_prefill_groups}, size:{len(scheduler_outputs.allocated_blocks)}")
                 # Perform the memory allocations based on the prefined frequency or scheduler_outputs.num_prefill_groups > 0 (is_prefill_phase  == True) 
-                if (self.step_index % self.dattn_vmm_frequency == 0) or scheduler_outputs.num_prefill_groups > 0:
-                    #print(f"step_index:{self.step_index} before updating") 
-                    self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.num_prefill_groups > 0,  scheduler_outputs.free_kv_caches, scheduler_outputs.allocated_blocks)
-                elif self.step_index % self.dattn_vmm_frequency != 0 and (scheduler_outputs.free_kv_caches or scheduler_outputs.allocated_blocks):
-                    self.model_executor.append_cache_blocks(virtual_engine, scheduler_outputs.free_kv_caches, scheduler_outputs.allocated_blocks) 
+                if scheduler_outputs.to_free_kv_caches or scheduler_outputs.to_allocate_blocks:
+                    self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.immediate_allocate,  scheduler_outputs.to_free_kv_caches, scheduler_outputs.to_allocate_blocks)
                 
             if self.profile == True:
                 T3 = time.time()

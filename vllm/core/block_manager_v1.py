@@ -234,7 +234,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        watermark: float = 0.01,
+        watermark: float = 0.03,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
     ) -> None:
@@ -277,6 +277,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # Note that each SequenceGroup has a unique
         # request ID
         self.cross_block_tables: Dict[str, BlockTable] = {}
+        self.num_swap_out = 0
+        self.num_free = 0
 
     def _get_seq_num_required_blocks(self, seq: Optional[Sequence]) -> int:
         return 0 if seq is None else seq.n_blocks
@@ -529,18 +531,31 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
 
+
+        #import pdb
+        #pdb.set_trace()
+
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
         if seq_group.is_encoder_decoder():
             num_swapped_seqs += 1
+        
+
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
+        
+        #if self.num_free == 0 and num_free_blocks < 30:
+        #    return AllocStatus.LATER
+
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append_slot().
         num_required_blocks = len(blocks) + num_swapped_seqs
+
         if self.gpu_allocator.get_num_total_blocks() < num_required_blocks:
             return AllocStatus.NEVER
         elif num_free_blocks - num_required_blocks >= self.watermark_blocks:
+        #elif num_free_blocks > num_required_blocks:
+            print(f"seq-{seq_group.request_id}, blocks:{len(blocks)}, num_free_blocks:{num_free_blocks}, num_swapped_seqs:{num_swapped_seqs}, num_required_blocks:{num_required_blocks}, self.watermark_blocks:{self.watermark_blocks}")
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
@@ -570,6 +585,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         request_id = seq_group.request_id
 
+        print(f"swap_in seq-{request_id}")
+        
         # CPU block -> GPU block.
         # dict is efficient in lookup `if cpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -596,6 +613,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         request_id = seq_group.request_id
 
+        self.num_swap_out += 1
         # GPU block -> CPU block.
         # dict is efficient in lookup `if gpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -611,6 +629,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                        self.gpu_allocator,
                                        self.cpu_allocator,
                                        mapping)
+        print(f"swap_out seq-{request_id} with {len(mapping)} blocks")
 
         return [(cpu_block.block_number, gpu_block.block_number)
                 for cpu_block, gpu_block in mapping.items()]
@@ -634,6 +653,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if seq.seq_id not in self.block_tables:
             # Already freed or haven't been scheduled yet.
             return
+
+        print(f"Free seq-{seq.seq_id}")
+        if self.num_swap_out > 0:
+            self.num_free += 1
+            
         block_table = self.block_tables[seq.seq_id]
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]

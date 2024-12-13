@@ -107,7 +107,6 @@ class EngineArgs:
     block_size: int = 16
 
     # new add for dattn
-    block_bytes_size: int = 2 * _MB # 2MB
     use_dattn: bool = False
 
     enable_prefix_caching: bool = False
@@ -873,10 +872,10 @@ class EngineArgs:
             self.enable_prefix_caching = False
 
         if self.use_dattn:
-            logger.info(f"DATTN: use {self.block_bytes_size} as a page, block size: {self.block_size}")
+            logger.info(f"DATTN: use block size: {self.block_size}, preemption_mode:{self.preemption_mode}")
             # TODO: support swap preemption mode for dattn
-            self.preemption_mode = "recompute"
-            logger.warning("Preemption only support recompute for dattn now.")
+            #self.preemption_mode = "recompute"
+            #logger.warning("Preemption only support recompute for dattn now.")
         else:
             logger.info(f"use normal block size: {self.block_size}")
 
@@ -891,7 +890,6 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
             use_dattn=self.use_dattn,  
-            block_bytes_size=self.block_bytes_size,
         )
         
         parallel_config = ParallelConfig(

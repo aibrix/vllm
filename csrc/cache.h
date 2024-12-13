@@ -6,7 +6,7 @@
 #include <vector>
 
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
-                 const torch::Tensor& block_mapping);
+                  const torch::Tensor& block_mapping);
 
 // Note: the key_caches and value_caches vectors are constant but
 // not the Tensors they contain. The vectors need to be const refs

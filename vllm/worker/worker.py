@@ -321,23 +321,33 @@ class Worker(LocalOrDistributedWorkerBase):
         num_seq_groups = len(execute_model_req.seq_group_metadata_list)
         # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
         # they contain parameters to launch cudamemcpyasync.
-        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
-                                         device="cpu",
-                                         dtype=torch.int64).view(-1, 2)
-        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
-                                          device="cpu",
-                                          dtype=torch.int64).view(-1, 2)
-        # `blocks_to_copy` is a gpu tensor. The src and tgt of
-        # blocks to copy are in the same device, and `blocks_to_copy`
-        # can be used directly within cuda kernels.
-        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                      device=self.device,
-                                      dtype=torch.int64).view(-1, 2)
-
         if self.use_dattn:
+            blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64)
+            blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
+                                          dtype=torch.int64)
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64)
+        
             allocated_blocks = execute_model_req.allocated_blocks
             free_kv_caches = execute_model_req.free_kv_caches
         else:
+            blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64).view(-1, 2)
+            blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
+            # `blocks_to_copy` is a gpu tensor. The src and tgt of
+            # blocks to copy are in the same device, and `blocks_to_copy`
+            # can be used directly within cuda kernels.
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
+
             allocated_blocks = None
             free_kv_caches = None
 
@@ -353,12 +363,8 @@ class Worker(LocalOrDistributedWorkerBase):
         )
 
     @torch.inference_mode()
-    def update_cache_blocks(self, virtual_engine: int, is_prefill_phase: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
-       self.cache_engine[virtual_engine].update_cache_blocks(is_prefill_phase, free_kv_caches, to_allocate_blocks) 
-
-    @torch.inference_mode()
-    def append_cache_blocks(self, virtual_engine: int, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
-       self.cache_engine[virtual_engine].append_cache_blocks(free_kv_caches, to_allocate_blocks) 
+    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
+       self.cache_engine[virtual_engine].update_cache_blocks(immediate_allocate, free_kv_caches, to_allocate_blocks) 
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:

@@ -81,11 +81,8 @@ class kvCacheAllocator:
         self._allocator.releaseRegions(free_caches)
         return 
 
-    #def alloc_cache_blocks(self, req_cache_blocks:List[List[int]]): 
-    #   return self._allocator.allocCacheBlocks(req_cache_blocks)  
-
-    def update_cache_blocks(self, is_prefill_phase: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
-       return self._allocator.updateCacheBlocks(is_prefill_phase, free_caches, req_cache_blocks)
+    def update_cache_blocks(self, immediate_allocate: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
+       return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks)
      
     # If the memory is not sufficient, then the python code (as the major control part)
     # can instruct the native library to release some memory. If pages is not specified, 
@@ -97,12 +94,12 @@ class kvCacheAllocator:
 
     # Get the memory usage for a specific request (when req_id is 0) or the whole allocator 
     def get_kvcache_memory_usage(self, req_id: int = 0):
-
         pages = self._allocator.getAllocPhyPages(req_id)
-
         return pages * self.page_size
 
+    
+    def swap_in_cache(self, src_to_dests: torch.Tensor) -> None:
+        self._allocator.swapInCache(src_to_dests)
 
-# other utils
-#def wrap_cache_ptr_to_tensor(ptr:CacheDevicePtr, dtype_str:str, shape:Tuple[int, ...]):
-#    return torch.ops._vmm_C.wrap_cache_ptr_to_tensor(ptr._ptr, dtype_str, shape)
+    def swap_out_cache(self, src_to_dests: List[List[int]]) -> None:
+        self._allocator.swapOutCache(src_to_dests)

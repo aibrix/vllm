@@ -53,7 +53,8 @@ checkDrvError(CUresult res, const char *tok, const char *file, unsigned line) {
 // record the reserved virtual address size and allocated physical memory size.
 // TODO: we may avoid expose this class externally in the future. 
 class kvCacheRegion : public torch::CustomClassHolder{
-private:
+//private:
+public:
   char * dptr;
 
   // the number of bytes for the request's virtual address space (region)
@@ -88,10 +89,9 @@ public:
 
   ~kvCacheRegion();
 
-  // get CUdeviceptr dptr
-  CUdeviceptr getStartDptr();
-
   // get the number of physical pages
+  void * getStartPtr(void); 
+  
   uint64_t getAllocPhyPages(void); 
   uint64_t getUsedPhysicalPages(void);
   int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream);
@@ -179,7 +179,10 @@ public:
 
   int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
 
-  void updateCacheBlocks(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches);
+  void updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches);
+
+  void swapOutCache(std::vector<std::vector<int64_t>> src_to_dsts); 
+  void swapInCache(std::vector<std::vector<int64_t>> src_to_dsts); 
 
 
   // Allow the python code to know the physical memory used for the whole 

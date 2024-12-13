@@ -590,7 +590,6 @@ class CacheConfig:
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
-        block_bytes_size: int = 2 * _MB,
         use_dattn: bool = False,
         cpu_offload_gb: float = 0,
     ) -> None:
@@ -610,7 +609,7 @@ class CacheConfig:
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
 
-        self.block_bytes_size = block_bytes_size
+        # Initialization for dattn
         self.use_dattn = use_dattn
 
     def metrics_info(self):

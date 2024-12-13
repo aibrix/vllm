@@ -112,6 +112,7 @@ class ScheduledSequenceGroup:
     token_chunk_size: int
 
 
+
 @dataclass
 class SchedulerOutputs:
     """The scheduling decision made from a scheduler."""
@@ -134,9 +135,11 @@ class SchedulerOutputs:
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
-    # new add for dattention
-    allocated_blocks: Dict[int, int] = field(default_factory=dict)
-    free_kv_caches: List[int] = field(default_factory=list)
+
+    # dattn support
+    to_allocate_blocks: Dict[int, int] = field(default_factory=dict)
+    to_free_kv_caches: List[int] = field(default_factory=list)
+    immediate_allocate: bool = False
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -374,6 +377,7 @@ class Scheduler:
         # preemption mode, RECOMPUTE or SWAP
         self.user_specified_preemption_mode = scheduler_config.preemption_mode
 
+        print(f"self.user_specified_preemption_mode:{self.user_specified_preemption_mode}")
         # The following field is test-only. It is used to inject artificial
         # preemption.
         self.enable_artificial_preemption = ENABLE_ARTIFICIAL_PREEMPT
@@ -943,7 +947,6 @@ class Scheduler:
             running_scheduled = self._schedule_running(budget,
                                                        curr_loras,
                                                        enable_chunking=False)
-
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
@@ -1135,8 +1138,9 @@ class Scheduler:
         now = time.time()
 
         if self.use_dattn:
-            scheduler_outputs.allocated_blocks, \
-                scheduler_outputs.free_kv_caches = self.block_manager.step()
+            # Collect the information related to cache update for dattn
+            scheduler_outputs.to_allocate_blocks, scheduler_outputs.to_free_kv_caches, \
+            scheduler_outputs.immediate_allocate = self.block_manager.step()
             
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1402,6 +1406,7 @@ class Scheduler:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
+            print(f"_preempt_by_swap, request:{seq_group.request_id}, blocks_to_swap_out:{len(blocks_to_swap_out)}")
         else:
             raise AssertionError("Invalid preemption mode.")
         return preemption_mode

@@ -15,10 +15,14 @@ from vllm.logger import init_logger
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available, get_dtype_size
 
 from vllm import _dattn_ops as dattn
+import subprocess
+from enum import Enum
+import re
+import mmap
+import ctypes
 import sys
 
 logger = init_logger(__name__)
-
 
 class CacheEngineDAttn:
     """Manages the KV cache.
@@ -36,119 +40,184 @@ class CacheEngineDAttn:
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
     ) -> None:
-        self.cache_config = cache_config
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        
-        if self.device_config.device_type != "cuda":
+        if device_config.device_type != "cuda":
             raise RuntimeError("DATTN only support cuda device.")
 
-        self.head_size = model_config.get_head_size()
         self.num_layers = model_config.get_num_layers(parallel_config)
-        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-
-        self.block_size = cache_config.block_size
-        self.block_bytes_size = self.cache_config.block_bytes_size
-        self.num_gpu_blocks = cache_config.num_gpu_blocks
-        #self.num_cpu_blocks = cache_config.num_cpu_blocks
-
-        print(f"self.block_bytes_size-{self.block_bytes_size}")
-        if cache_config.cache_dtype == "auto":
-            self.dtype = model_config.dtype
-        else:
-            self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
-
-        self.dtype_size = get_dtype_size(self.dtype)
-        self.max_batch_size = self.scheduler_config.max_num_seqs
-        self.max_seq_len = self.scheduler_config.max_model_len
         
-        # If max_seq_len is not divisible by block_size,
+        head_size = model_config.get_head_size()
+        num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.block_size = cache_config.block_size
+
+        if cache_config.cache_dtype == "auto":
+            dtype = model_config.dtype
+        else:
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        dtype_size = get_dtype_size(dtype)
+        self.block_bytes_size = (head_size * num_kv_heads * dtype_size * self.block_size) * self.num_layers  * 2 
+
+        max_batch_size = scheduler_config.max_num_seqs
+        max_seq_len = scheduler_config.max_model_len
+        
+        # If max_seq_len is not divisible by self.block_size,
         # round up to the nearest value that is.
-        if self.max_seq_len % self.block_size != 0:
-            logger.warning("Note: self.max_seq_len mod self.block_size != 0")
+        if max_seq_len % self.block_size != 0:
+            logger.warning("Note: max_seq_len mod self.block_size != 0")
             exit(0)
 
-        self.token_size = self.num_kv_heads * self.head_size
-        self.sequence_buffer_size = self.max_seq_len * self.token_size
-        self.sequence_buffer_bytes_size = self.sequence_buffer_size * self.dtype_size
-        self.cache_space_size = self.max_batch_size * self.sequence_buffer_size
-        self.cache_space_bytes_size = self.cache_space_size * self.dtype_size
-    
-        assert (self.cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"
+        token_size = num_kv_heads * head_size
+        sequence_buffer_size = max_seq_len * token_size
+        sequence_buffer_bytes_size = sequence_buffer_size * dtype_size
+        cache_space_size = max_batch_size * sequence_buffer_bytes_size
+        cache_space_bytes_size = cache_space_size * 2
+
+        cache_space_per_req = sequence_buffer_bytes_size * self.num_layers * 2
+        assert (cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"
         
-        self.cache_space_page_num = self.cache_space_bytes_size // self.block_bytes_size
+        cache_space_page_num = cache_space_bytes_size // self.block_bytes_size
 
         logger.info("CacheEngineDAttn basic info: { block_size: %d, dtype_size: %d, head_size: %d, "
-                    "num_kv_heads: %d, max_seq_len: %d, max_batch_size: %d, num_layers: %d,"
+                    "num_kv_heads: %d, max_seq_len: %d, max_batch_size: %d, self.num_layers: %d,"
                     "token_size: %d, sequence_buffer_size: %d, cache_space_size: %d, "
-                    "cache_space_bytes_size: %d, cache_space_page_num: %d }",
-                    self.block_size, self.dtype_size, self.head_size,
-                    self.num_kv_heads, self.max_seq_len, self.max_batch_size, self.num_layers, 
-                    self.token_size, self.sequence_buffer_size, self.cache_space_size,
-                    self.cache_space_bytes_size, self.cache_space_page_num)
+                    "cache_space_bytes_size: %d, cache_space_page_num: %d, cache_space_per_req: %d, cache_block_size: %x}",
+                    self.block_size, dtype_size, head_size,
+                    num_kv_heads, max_seq_len, max_batch_size, self.num_layers, 
+                    token_size, sequence_buffer_size, cache_space_size,
+                    cache_space_bytes_size, cache_space_page_num, cache_space_per_req, self.block_bytes_size)
 
-        self.device_cache_allocator = dattn.kvCacheAllocator(self.max_seq_len, self.num_layers, self.num_kv_heads,
-                                                             self.head_size, self.block_size, self.dtype_size)
+        self.device_cache_allocator = dattn.kvCacheAllocator(max_seq_len, self.num_layers, num_kv_heads,
+                                                             head_size, self.block_size, dtype_size)
 
-        # record the number of allocated blocks in a cache space for each request 
-        self.allocated_blocks = [0 for _ in range(self.max_batch_size)] 
-
-        # record the number of blocks to be allocated and to be released, especially within the updating frequency (4 steps)
-        self.to_alloc_blocks = {}
-        self.to_free_caches = set()
-
-        # DEBUG
-        self.steps = 0
+        # Let's use 1/20 of max_batch_size for cpu caches
+        # NOTE: make sure that is same as BlockSpaceManagerDAttn::num_cpu_caches
+        cpu_cache_num = int(max_batch_size/20) 
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             model_config.get_num_attention_heads(parallel_config),
-            self.head_size,
-            self.num_kv_heads,
+            head_size,
+            num_kv_heads,
             model_config.get_sliding_window(),
             model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
         )
 
-        self.kv_cache_ptrs = self._reserve_gpu_kv_cache()
-        self.gpu_cache = self._create_fake_kv_cache()
+        # A dummy mmap to hold cpu cache's addresses
+        self.mmap = []
 
+        self.kv_cache_ptrs = self._reserve_gpu_kv_cache(max_batch_size)
+        self.gpu_cache = self._create_fake_kv_cache(self.num_layers)
+        self.MADV_COLD = self._find_macro_value("MADV_COLD", "/usr/include/asm-generic/mman-common.h") 
+
+        self.cpu_cache = [None] * cpu_cache_num
+
+        self._reserve_cpu_kv_cache(cpu_cache_num, cache_space_per_req) 
+
+    def _find_macro_value(self, macro_name, header_file):
+        try:
+            # Run grep to find the macro definition in the specified header file
+            result = subprocess.run(
+                ['grep', f'#define {macro_name}', header_file],
+                text=True,
+                capture_output=True,
+                check=True
+            )
+            # Extract the macro value using regex
+            match = re.search(rf'#define {macro_name}\s+(\d+)', result.stdout)
+            if match:
+                return int(match.group(1))
+            else:
+                print(f"{macro_name} not found in {header_file}.")
+                return None
+        except subprocess.CalledProcessError:
+            print(f"Failed to find {macro_name} in {header_file}.")
+            return None
+
+    def get_n_blocks(num_tokens: int) -> int:
+        return (num_tokens + self.block_size - 1) % self.block_size
+    
     """
     In dAttention's design, we are required to pass the layer index so
     that CUDA kernel could use it to get the kv_cache. For other mechanisms, like
     PagedAttention or vAttention, they are passing different kv_vache for different layers.
     """
-    def _create_fake_kv_cache(self) -> List[torch.Tensor]: 
+    def _create_fake_kv_cache(self, num_layers: int) -> List[torch.Tensor]: 
         fake_kv_caches = []
 
-        for i in range(self.num_layers):
+        for i in range(num_layers):
             fake_kv_caches.append(torch.tensor(i))
 
         return fake_kv_caches
     
-    def _reserve_gpu_kv_cache(self) -> List[int]:
+    def _reserve_gpu_kv_cache(self, max_batch_size:int) -> List[int]:
         kv_cache_ptrs = []
 
-        for i in range(self.max_batch_size):
-            kv_cache_ptrs.append(self.device_cache_allocator.reserve_cache_region(i))
-            #print(f"i:{i}, virtual address:{hex(kv_cache_ptrs[i])}")
+        for i in range(max_batch_size):
+            # Invoke gpu region one by one, which returns the cuda address
+            kv_cache_ptr = self.device_cache_allocator.reserve_cache_region(i)
+            kv_cache_ptrs.append(kv_cache_ptr)
 
-        #print(f"0: virtual address:{hex(kv_cache_ptrs[0])}")
-        # Allocate one block for region-0, as it will be used in _warm_up_model()?
         return kv_cache_ptrs
 
+    def _reserve_cpu_kv_cache(self, cache_num: int, cache_space_per_req: int) -> List[int]:
+
+        for i in range(cache_num):
+            # Using mmap to reserve space for cpu cache. Multiple*2 in order to hold K/V cache
+            mm = mmap.mmap(-1, cache_space_per_req)
+            self.mmap.append(mm)
+            address = ctypes.addressof(ctypes.c_char.from_buffer(mm))
+            
+            # record the address for ith cache
+            self.cpu_cache[i] = address
+            print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}")
+
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
-        raise NotImplementedError("swap_in is not implemented for DATTN now.")
+        to_swap_in_caches = []
+
+        for pair in src_to_dst:
+            item = pair.flatten()
+
+            cpu_cache_id = item[0]
+            gpu_cache_id = item[1]
+            blocks = item[2]
+
+            gpu_cache_address = self.kv_cache_ptrs[gpu_cache_id]
+            cpu_cache_address = self.cpu_cache[cpu_cache_id]
+
+            size = blocks * self.block_bytes_size
+            print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, size:{hex(size)}")
+            to_swap_in_caches.append([cpu_cache_address, gpu_cache_id, blocks])
+
+        #src_to_dests = torch.tensor(to_swap_in_caches, dtype=torch.int64)
+        self.device_cache_allocator.swap_in_cache(to_swap_in_caches)
 
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
-        raise NotImplementedError("swap_out is not implemented for DATTN now.")
+        
+        #print(f"CacheEngineDAttn swap_out with src_to_dst:{src_to_dst}")
+        to_swap_out_caches = []
+
+        for pair in src_to_dst:
+            item = pair.flatten()
+
+            gpu_cache_id = item[0]
+            cpu_cache_id = item[1]
+            blocks = item[2]
+
+            gpu_cache_address = self.kv_cache_ptrs[gpu_cache_id]
+            cpu_cache_address = self.cpu_cache[cpu_cache_id]
+            size = blocks * self.block_bytes_size 
+            
+            print(f"swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}")
+            to_swap_out_caches.append([gpu_cache_id, cpu_cache_address, size])
+
+        #src_to_dests = torch.tensor(to_swap_out_caches, dtype=torch.int64)
+        self.device_cache_allocator.swap_out_cache(to_swap_out_caches)
 
     # TODO: we need to implement the copy_blocks 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
-        self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
+        self.device_cache_allocator.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(
@@ -164,7 +233,7 @@ class CacheEngineDAttn:
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_attention_layers * (key_cache_block + value_cache_block)
-        #print(f"CacheEngineDAttn:head_size:{head_size}, num_heads:{num_heads}, num_attention_layers:{num_attention_layers}, block_size: {cache_config.block_size}, key_cache_block:{key_cache_block},total:{total/1024}KB")
+        #print(f"CacheEngineDAttn:head_size:{head_size}, num_heads:{num_heads}, num_attention_layers:{num_attention_layers}, self.block_size: {cache_config.block_size}, key_cache_block:{key_cache_block},total:{total/1024}KB")
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
@@ -173,79 +242,12 @@ class CacheEngineDAttn:
         #print(f"CacheEngineDAttn:cache_config.block_bytes_size:{dtype_size * total}")
         return dtype_size * total
 
-    """
-        This function tried to allocate the physical pages for all requests 
-        Initially, vmm patch will allocate physical pages for each request. 
-        That is, each request will invoke from python to C++ library function directly. 
+    def update_cache_blocks(self, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]):
+        to_alloc_list = []
+        for cache_id, blocks in to_allocate_blocks.items():
+            to_alloc_list.append([cache_id, blocks])
 
-        However, it is not a wise approach, as that can increase the overhead by 100X based on our experiments. 
-        Instead, we should invoke c++ library function just once by passing an array with [req_id, new_blocks]
-
-        Note that self.allocated_blocks[cache_id] will track the number of allocated blocks
-        in this function. Let's utilize the same mechanism at the first step. 
-        TODO: we may change this later. To my understanding, it is better to track the number of blocks at sequence 
-    """
-    def alloc_seqs(self, to_allocate: Dict[int, int]):
-        to_alloc_blocks = []
-
-        """Allocate cache handles for the given number of blocks."""
-        for cache_id, num_blocks in to_allocate.items():
-            allocated_blocks = self.allocated_blocks[cache_id]
-            #print(f"CacheEngineDAttn: cache_id-{cache_id}, num_blocks:{num_blocks}, allocated_blocks:{allocated_blocks}", file=sys.stderr)
-            num_blocks -= allocated_blocks
-            if num_blocks > 0:
-                to_alloc_blocks.append([cache_id, num_blocks])
-                self.allocated_blocks[cache_id] += num_blocks
-
-        # Allocate physical blocks for all requests. 
-        self.device_cache_allocator.alloc_cache_blocks(to_alloc_blocks) 
-
-
-    def free_seqs(self, free_kv_caches: List[int]):
-        """Free cache handles for the given buffer ids."""
-        #for cache_id in free_kv_caches:
-        #    print(f"free_seqs with cache_id:{cache_id}")
-        self.device_cache_allocator.release_cache_regions(free_kv_caches)
-
-    def append_cache_blocks(self, free_kv_caches: List[int], to_allocate: Dict[int, int]):
-        self.to_alloc_blocks.update(to_allocate)
-
-        for cache_id in free_kv_caches:
-            self.to_free_caches.add(cache_id)
-        
-
-    def update_cache_blocks(self, is_prefill_phase: bool, free_kv_caches: List[int], to_allocate: Dict[int, int]):
-        to_alloc_blocks = []
-        to_free_caches = []
-
-        # append cache blocks 
-        self.append_cache_blocks(free_kv_caches, to_allocate)
-
-        # Handle to_free_caches now. 
-        for cache_id in self.to_free_caches:
-            #print(f"tofree cache_id:{cache_id}")
-            to_free_caches.append(cache_id)
-        
-        """Find all blocks that needs to be allocated. """
-        for cache_id, num_blocks in self.to_alloc_blocks.items():
-            allocated_blocks = self.allocated_blocks[cache_id]
-            num_blocks -= allocated_blocks
-            # Note that it is possible that an item appears in self.to_alloc_blocks, 
-            # but later it is determined to be free. For this case, there is no need for 
-            # further allocation.  
-            if num_blocks > 0 and cache_id not in self.to_free_caches:
-                #print(f"Allocate cache_id:{cache_id} with blocks :{num_blocks}")
-                to_alloc_blocks.append([cache_id, num_blocks])
-                self.allocated_blocks[cache_id] += num_blocks
-
-        self.to_alloc_blocks.clear()
-        self.to_free_caches.clear()
-
-        #print(f"CACHE_ENGINE: update_cache_blocks!!!", file=sys.stderr)
-        if len(to_free_caches) > 0 or len(to_alloc_blocks) > 0: 
-            self.steps+=1
-            self.device_cache_allocator.update_cache_blocks(is_prefill_phase, to_free_caches, to_alloc_blocks)
-            #print(f"CACHE_ENGINE-{self.steps}: update_cache_blocks len(to_free_caches):{len(to_free_caches)}, len(to_alloc_blocks):{len(to_alloc_blocks)}!!!", file=sys.stderr)
+        self.device_cache_allocator.update_cache_blocks(immediate_allocate, free_kv_caches, to_alloc_list)
         
 
 def _get_dtype_size(dtype: torch.dtype) -> int:

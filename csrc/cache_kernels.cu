@@ -21,6 +21,7 @@
 typedef __hip_bfloat16 __nv_bfloat16;
 #endif
 
+
 void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();

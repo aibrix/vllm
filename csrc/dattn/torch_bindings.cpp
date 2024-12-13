@@ -17,6 +17,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
     .def("releaseRegions", &kvCacheAllocator::releaseRegions)
     //.def("allocCacheBlocks", &kvCacheAllocator::allocCacheBlocks)
     .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks)
+    .def("swapInCache", &kvCacheAllocator::swapInCache)
+    .def("swapOutCache", &kvCacheAllocator::swapOutCache)
     .def("getAllocPhyPages", &kvCacheAllocator::getAllocPhyPages)
     .def("collectPhyPages", &kvCacheAllocator::collectPhyPages);
     //.def("freeCacheBlock", &kvCacheAllocator::freeCacheBlock)

@@ -65,6 +65,8 @@ class SchedulingBudget:
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
                 and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
 
+        #print(f"can_schedule: self.num_batched_tokens-{self.num_batched_tokens}, num_new_tokens:{num_new_tokens}, self.token_budget:{self.token_budget},self.max_num_seqs:{self.max_num_seqs},self.num_curr_seqs:{self.num_curr_seqs}, num_new_seqs:{num_new_seqs} ")
+
     def remaining_token_budget(self):
         return self.token_budget - self.num_batched_tokens
 
@@ -815,7 +817,7 @@ class Scheduler:
         Returns:
             SchedulerPrefillOutputs.
         """
-        #print(f"inside _schedule_prefills {self.prefillcount}", file=sys.stderr)
+        print(f"inside _schedule_prefills now", file=sys.stderr)
         #self.prefillcount +=1
 
         ignored_seq_groups: List[SequenceGroup] = []
@@ -849,8 +851,10 @@ class Scheduler:
                 waiting_queue.popleft()
                 continue
 
+
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(seq_group)
+            #print(f"_schedule_prefills, can_allocate:{can_allocate}") 
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
@@ -951,6 +955,7 @@ class Scheduler:
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
+                print(f"len(running_scheduled.preempted):{len(running_scheduled.preempted)}, len(running_scheduled.swapped_out):{len(running_scheduled.swapped_out)}")
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
         assert (budget.num_batched_tokens <=

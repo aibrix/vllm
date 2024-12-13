@@ -182,7 +182,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         need_blocks = self._get_seq_num_required_blocks(seq)
         cache_id = self._allocate_gpu_cache(need_blocks = need_blocks, allocate_now = True)
         
-        #print(f"cache_id: {cache_id}, need_blocks:{need_blocks}, to_allocate_num:{to_allocate_num}, allocated_block_num:{allocated_block_num}") 
+        print(f"allocate cache_id: {cache_id}, need_blocks:{need_blocks}") 
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
         
@@ -383,12 +383,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # Get blocks of this cache
         free_blocks = self.allocated_gpu_blocks[cache_id]
         print(f"FREE cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}")
-        if immediate_free == True:
-            self.num_free_gpu_blocks += free_blocks
-            self.allocated_gpu_blocks[cache_id] = 0
-        else:
-            self.to_free_gpu_caches[cache_id] = free_blocks
-            self.cached_free_gpu_blocks += free_blocks
+       
+        self.to_free_gpu_caches[cache_id] = free_blocks
+        self.cached_free_gpu_blocks += free_blocks
 
     """
     Free a sequence. We will append the seq to to_free_gpu_caches. 
@@ -447,9 +444,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         
         if (self.step_index & self.vmm_frequency) != 0 and immediate_allocate != True:
             # No need to invoke virtual memory management
+            print(f"step-{self.step_index} no need to do memory management") 
             return to_allocate_blocks, to_free_gpu_caches, immediate_allocate
 
-        #print(f"step-{self.step_index} of updating, with immediate_allocate == {immediate_allocate}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks}")
+        print(f"step-{self.step_index} of updating, with immediate_allocate == {immediate_allocate}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks}")
         to_allocate_blocks = self.to_allocate_blocks.copy()
 
         # Update the immediate_allocate so that we could perform some

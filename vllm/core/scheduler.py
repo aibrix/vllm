@@ -817,7 +817,7 @@ class Scheduler:
         Returns:
             SchedulerPrefillOutputs.
         """
-        print(f"inside _schedule_prefills now", file=sys.stderr)
+        #print(f"inside _schedule_prefills now", file=sys.stderr)
         #self.prefillcount +=1
 
         ignored_seq_groups: List[SequenceGroup] = []
@@ -955,7 +955,7 @@ class Scheduler:
             # group. because it means there's no slot for new running requests.
             if len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
-                print(f"len(running_scheduled.preempted):{len(running_scheduled.preempted)}, len(running_scheduled.swapped_out):{len(running_scheduled.swapped_out)}")
+                #print(f"len(running_scheduled.preempted):{len(running_scheduled.preempted)}, len(running_scheduled.swapped_out):{len(running_scheduled.swapped_out)}")
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
         assert (budget.num_batched_tokens <=

@@ -331,9 +331,6 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                       device=self.device,
                                       dtype=torch.int64)
-        
-            allocated_blocks = execute_model_req.allocated_blocks
-            free_kv_caches = execute_model_req.free_kv_caches
         else:
             blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
                                          device="cpu",
@@ -348,17 +345,12 @@ class Worker(LocalOrDistributedWorkerBase):
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
 
-            allocated_blocks = None
-            free_kv_caches = None
-
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
-            allocated_blocks=allocated_blocks,
-            free_kv_caches=free_kv_caches,
             num_steps=num_steps,
         )
 
@@ -368,6 +360,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
+        #print(f"NOOOOOW, execute_worker before swapin and swapout")
         virtual_engine = worker_input.virtual_engine
         # Issue cache operations.
         if (worker_input.blocks_to_swap_in is not None

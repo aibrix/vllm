@@ -330,9 +330,14 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-        #print(f"execute worker now", file=sys.stderr)
+        
         self.execute_worker(worker_input)
+        #print(f"after execute worker now num_steps:{num_steps}", file=sys.stderr)
 
+        # Now let's update cache blocks. Note that this has to be done after execute_worker
+        if execute_model_req.to_free_kv_caches or execute_model_req.to_allocate_blocks:
+            self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_free_kv_caches, execute_model_req.to_allocate_blocks)
+        
         # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups == 0:
             return []

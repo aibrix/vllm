@@ -478,14 +478,17 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         if len(to_free_gpu_caches) > 0:
             print(f"self.num_free_gpu_blocks: {self.num_free_gpu_blocks}") 
+        
+        to_free_blocks = 0
         # Check whether there is a need to free kv caches
         for cache_id, num_blocks in self.to_free_gpu_caches.items():
             to_free_gpu_caches.append(cache_id)
             self.gpu_allocator.free(cache_id)
             self.num_free_gpu_blocks += num_blocks
+            to_free_blocks += num_blocks 
 
-        if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-            print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}")
+        #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
+        print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}")
         
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()

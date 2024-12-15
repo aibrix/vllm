@@ -1291,8 +1291,9 @@ class ExecuteModelRequest(
     # Async callback
     async_callback: Optional[Callable] = None
     # new add for dattn
-    allocated_blocks: Dict[int, int]= msgspec.field(default_factory=dict),
-    free_kv_caches: List[int] = msgspec.field(default_factory=list)
+    immediate_alloc: bool = False
+    to_allocate_blocks: Dict[int, int]= msgspec.field(default_factory=dict),
+    to_free_kv_caches: List[int] = msgspec.field(default_factory=list)
 
     @property
     def is_first_multi_step(self) -> bool:

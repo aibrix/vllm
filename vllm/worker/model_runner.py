@@ -1676,7 +1676,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             self.steps += 1
             T1 = time.time()
 
-        #print(f"execute_model now!!!", file=sys.stderr)
+        #print(f"NOOOOOW,  execute_model now!!!", file=sys.stderr)
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None

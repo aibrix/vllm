@@ -1255,21 +1255,26 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                # dattn's support
+                immediate_alloc=scheduler_outputs.immediate_allocate, 
+                to_allocate_blocks=scheduler_outputs.to_allocate_blocks,
+                to_free_kv_caches=scheduler_outputs.to_free_kv_caches,
+                )
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
-            if self.use_dattn:
-                #print(f"step_index:{self.step_index}, scheduler_outputs.num_prefill_groups:{scheduler_outputs.num_prefill_groups}, size:{len(scheduler_outputs.allocated_blocks)}")
+            #if self.use_dattn:
+            #    print(f"NOOOOOW, bfore update update_cache_blocks!!!")
                 # Perform the memory allocations based on the prefined frequency or scheduler_outputs.num_prefill_groups > 0 (is_prefill_phase  == True) 
-                if scheduler_outputs.to_free_kv_caches or scheduler_outputs.to_allocate_blocks:
-                    self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.immediate_allocate,  scheduler_outputs.to_free_kv_caches, scheduler_outputs.to_allocate_blocks)
+            #    if scheduler_outputs.to_free_kv_caches or scheduler_outputs.to_allocate_blocks:
+            #        self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.immediate_allocate,  scheduler_outputs.to_free_kv_caches, scheduler_outputs.to_allocate_blocks)
                 
             if self.profile == True:
                 T3 = time.time()
-        
+
             outputs = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
 

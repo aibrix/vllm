@@ -314,7 +314,7 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
   region->freeAllPhyMemory(); 
-  fprintf(stderr, "Release region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
+  //fprintf(stderr, "Release region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
   
   // Cache the given region, as it can be used for the future ideally. 
   // In order to reduce the overhead of memory management, we did not 
@@ -441,7 +441,7 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
 
     pages += _allocCacheBlocksForRequest(region_id, blocks, stream);
     //if (region_id == 11)
-    fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
+    //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
   }
   //cudaDeviceSynchronize(); 
 
@@ -584,7 +584,7 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> src_to_des
 
     // After reading, now releasing the region's memory in order to free memory for other requests
     region->freeAllPhyMemory(); 
-    fprintf(stderr, "Swapped out region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
+    //fprintf(stderr, "Swapped out region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
  
   }
 }
@@ -605,7 +605,7 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> src_to_dest
 
     int64_t size = blocks * this->block_size;
     void * dest_ptr = region->getStartPtr(); 
-    printf("SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
+    //printf("SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
 
     cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
                     size, cudaMemcpyHostToDevice);

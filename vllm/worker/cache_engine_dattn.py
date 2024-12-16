@@ -171,7 +171,7 @@ class CacheEngineDAttn:
             
             # record the address for ith cache
             self.cpu_cache[i] = address
-            print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}")
+            #print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}")
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         to_swap_in_caches = []
@@ -187,7 +187,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
 
             size = blocks * self.block_bytes_size
-            print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, size:{hex(size)}")
+            #print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, size:{hex(size)}")
             to_swap_in_caches.append([cpu_cache_address, gpu_cache_id, blocks])
 
         #src_to_dests = torch.tensor(to_swap_in_caches, dtype=torch.int64)
@@ -209,7 +209,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
             size = blocks * self.block_bytes_size 
             
-            print(f"swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}")
+            #print(f"swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}")
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_address, size])
 
         #src_to_dests = torch.tensor(to_swap_out_caches, dtype=torch.int64)

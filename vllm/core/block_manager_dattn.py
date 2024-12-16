@@ -59,7 +59,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        watermark: float = 0.01,
+        watermark: float = 0.03,
         sliding_window: Optional[int] = None, # Not supported
         enable_caching: bool = False, # Not supported
         vmm_frequency: int = 16, 
@@ -192,7 +192,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         
         cache_id = self._allocate_gpu_cache(need_blocks = need_blocks, allocate_now = True)
         
-        print(f"step_index-{self.step_index}, allocate cache_id: {cache_id}, need_blocks:{need_blocks}, tokens:{seq.get_len()}") 
+        #print(f"step_index-{self.step_index}, allocate cache_id: {cache_id}, need_blocks:{need_blocks}, tokens:{seq.get_len()}") 
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
         
@@ -290,8 +290,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         logical_blocks_num = self._predict_n_blocks(seq.get_len())
         allocated_block_num = self.allocated_gpu_blocks[cache_id]
 
-        if (self.step_index & self.vmm_frequency_mask) == 0:
-            print(f"seq_id:{seq.seq_id}, cache_id:{cache_id}, tokens:{seq.get_len()}, logical_blocks_num:{logical_blocks_num}, allocated_block_num:{allocated_block_num}, free_blocks:{self.num_free_gpu_blocks}")
+        #if (self.step_index & self.vmm_frequency_mask) == 0:
+        #    print(f"seq_id:{seq.seq_id}, cache_id:{cache_id}, tokens:{seq.get_len()}, logical_blocks_num:{logical_blocks_num}, allocated_block_num:{allocated_block_num}, free_blocks:{self.num_free_gpu_blocks}")
 
         # If we need to allocate a new physical block
         if allocated_block_num < logical_blocks_num:
@@ -353,7 +353,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             seq.cache_id = gpu_cache_id
             seq.data.cache_id = gpu_cache_id
             # NOTE: we may not need the allocation, if gpu_cache_id 
-            print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}")
+            #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}")
             to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
             
 
@@ -385,11 +385,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # After the swapped out, num_free_cpu_blocks should be decremented 
             self.num_free_cpu_blocks -= num_gpu_blocks
             
-            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, blocks:{num_gpu_blocks} at step-{self.step_index}")
+            #print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, blocks:{num_gpu_blocks} at step-{self.step_index}")
             
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, num_gpu_blocks]) 
 
-        print(f"to_swap_out_caches:{to_swap_out_caches}")
+        #print(f"to_swap_out_caches:{to_swap_out_caches}")
         return to_swap_out_caches
 
     # When immediate_free is False, we will add the cache
@@ -401,7 +401,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Get blocks of this cache
         free_blocks = self.allocated_gpu_blocks[cache_id]
-        print(f"FREE cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}")
+        #print(f"FREE cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}")
        
         self.allocated_gpu_blocks[cache_id] = 0
 
@@ -491,7 +491,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             to_free_blocks += num_blocks 
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}")
+        #print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}")
         
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()

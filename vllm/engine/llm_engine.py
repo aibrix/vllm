@@ -1181,7 +1181,7 @@ class LLMEngine:
                 "as performance will be severely degraded otherwise.")
 
         # Update the step index
-        print(f"in the beginning of step-{self.step_index}", file=sys.stderr)
+        #print(f"in the beginning of step-{self.step_index}", file=sys.stderr)
 
         if self.profile == True:
             T1 = time.time()

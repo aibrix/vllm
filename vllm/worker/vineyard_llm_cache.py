@@ -33,27 +33,27 @@ logger = init_logger(__name__)
 
 class CacheServiceMetrics: 
 
-    def __init__(self, max_size=100):
+    def __init__(self):
         # Instance variables
         self.hit_tokens: int = 0  # Total number of tokens hit.
         self.total_tokens: int = 0  # Total number of tokens requested.
         self.hit_blocks: int = 0  # Total number of blocks hit.
         self.total_blocks: int = 0  # Total number of blocks requested.
 
-        self.time_query = deque(maxlen=max_size)  # Times used query cache from cache service.
-        self.time_load = deque(maxlen=max_size)  # Times used load fetched cache to device memory.
-        self.time_reshape = deque(maxlen=max_size)  # Times used reshaping tensors for flash attention KV format.
-        self.time_unload = deque(maxlen=max_size)  # Times used move computed KV from device memory.
-        self.time_update = deque(maxlen=max_size)  # Times used update computed KV to cache service.
+        self.time_query: List[float] = []  # Times used query cache from cache service.
+        self.time_load: List[float] = []  # Times used load fetched cache to device memory.
+        self.time_reshape: List[float] = []  # Times used reshaping tensors for flash attention KV format.
+        self.time_unload: List[float] = []  # Times used move computed KV from device memory.
+        self.time_update: List[float] = []  # Times used update computed KV to cache service.
         
         self.err_query: int = 0 # Number of query errors.
         self.err_async_update_task_queue_full: int = 0  # Number of exceptions for async update tasks.
 
         self.lock: threading.Lock = threading.Lock()
         # The following metrics need to be protected by `lock`
-        self.time_async_update_queue = deque(maxlen=max_size)  # Queuing delays of async update tasks.
-        self.time_async_update_exec = deque(maxlen=max_size)  # Execution times of async update tasks.
-        self.counter_async_update_updated = deque(maxlen=max_size)  # Number of updated tokens.
+        self.time_async_update_queue: List[float] = []  # Queuing delays of async update tasks.
+        self.time_async_update_exec: List[float] = []  # Execution times of async update tasks.
+        self.counter_async_update_updated:  List = []  # Number of updated tokens.
         self.err_update: int = 0 # Number of update errors.
         
     def __getstate__(self):

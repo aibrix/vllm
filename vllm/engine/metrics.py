@@ -229,17 +229,17 @@ class Metrics:
         
         
         
-        self.histogram_cache_service_time_query = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_query",
-            documentation="Histogram of cache service time query.",
+        self.histogram_cache_service_time_query_seconds = self._histogram_cls(
+            name="vllm:histogram_cache_service_time_query_seconds",
+            documentation="Histogram of cache service time query in seconds.",
             labelnames=labelnames,
             buckets=[
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5
             ])
         
-        self.histogram_cache_service_time_load = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_load",
+        self.histogram_cache_service_time_load_seconds = self._histogram_cls(
+            name="vllm:histogram_cache_service_time_load_seconds",
             documentation="Histogram of cache service time load.",
             labelnames=labelnames,
             buckets=[
@@ -247,8 +247,8 @@ class Metrics:
                 1.0, 2.5
             ])
         
-        self.histogram_cache_service_time_reshape = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_reshape",
+        self.histogram_cache_service_time_reshape_seconds = self._histogram_cls(
+            name="vllm:histogram_cache_service_time_reshape_seconds",
             documentation="Histogram of cache service time update.",
             labelnames=labelnames,
             buckets=[
@@ -256,8 +256,8 @@ class Metrics:
                 1.0, 2.5
             ])
         
-        self.histogram_cache_service_time_unload = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_unload",
+        self.histogram_cache_service_time_unload_seconds = self._histogram_cls(
+            name="vllm:histogram_cache_service_time_unload_seconds",
             documentation="Histogram of cache service time unload.",
             labelnames=labelnames,
             buckets=[
@@ -265,8 +265,8 @@ class Metrics:
                 1.0, 2.5
             ])
         
-        self.histogram_cache_service_time_update = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_update",
+        self.histogram_cache_service_time_update_seconds = self._histogram_cls(
+            name="vllm:histogram_cache_service_time_update_seconds",
             documentation="Histogram of cache service time update.",
             labelnames=labelnames,
             buckets=[
@@ -577,15 +577,15 @@ class PrometheusStatLogger(StatLoggerBase):
                         stats.cache_service_tokens_hit_rate)
         self._log_gauge(self.metrics.gauge_cache_service_blocks_hit_rate,
                         stats.cache_service_blocks_hit_rate)
-        self._log_histogram(self.metrics.histogram_cache_service_time_query,
+        self._log_histogram(self.metrics.histogram_cache_service_time_query_seconds,
                             stats.cache_service_time_query)
-        self._log_histogram(self.metrics.histogram_cache_service_time_load,
+        self._log_histogram(self.metrics.histogram_cache_service_time_load_seconds,
                             stats.cache_service_time_load)
-        self._log_histogram(self.metrics.histogram_cache_service_time_reshape,
+        self._log_histogram(self.metrics.histogram_cache_service_time_reshape_seconds,
                             stats.cache_service_time_reshape)
-        self._log_histogram(self.metrics.histogram_cache_service_time_unload,
+        self._log_histogram(self.metrics.histogram_cache_service_time_unload_seconds,
                             stats.cache_service_time_unload)
-        self._log_histogram(self.metrics.histogram_cache_service_time_update,
+        self._log_histogram(self.metrics.histogram_cache_service_time_update_seconds,
                             stats.cache_service_time_update)
 
     def _log_prometheus_interval(self, prompt_throughput: float,

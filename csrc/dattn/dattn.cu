@@ -599,7 +599,9 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> src_to_dest
 
     // Allocate physical memory at first
     kvCacheRegion * region = this->active_regions_map[region_id];
-    region->allocCacheBlocks(blocks, &this->used_pages, nullptr);
+
+    // This is to accomodate the periodic memory management (such as 16 steps)
+    region->allocCacheBlocks(blocks+1, &this->used_pages, nullptr);
 
     int64_t size = blocks * this->block_size;
     void * dest_ptr = region->getStartPtr(); 

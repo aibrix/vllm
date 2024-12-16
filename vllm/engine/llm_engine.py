@@ -1180,9 +1180,8 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
-        #print(f"step-{self.step_index}", file=sys.stderr)
         # Update the step index
-        self.step_index += 1
+        print(f"in the beginning of step-{self.step_index}", file=sys.stderr)
 
         if self.profile == True:
             T1 = time.time()
@@ -1368,6 +1367,7 @@ class LLMEngine:
                 self.other_time = 0
                 self.total_time = 0 
 
+        self.step_index += 1
         return ctx.request_outputs
 
     def _has_remaining_steps(

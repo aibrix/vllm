@@ -40,8 +40,8 @@ class CacheAllocator:
 
     def free(self, cache_id: int):
         # FIXME
-        #self.kv_caches.appendleft(cache_id)
-        self.kv_caches.append(cache_id)
+        self.kv_caches.appendleft(cache_id)
+        #self.kv_caches.append(cache_id)
 
     def get_free_caches(self):
         return len(self.kv_caches)
@@ -338,20 +338,23 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             cpu_cache = self.swapped_caches[seq.seq_id] 
+            need_blocks = cpu_cache.blocks
             cpu_cache_id = cpu_cache.cache_id
 
             # Free cpu cache id and update the counter
+            
             self.cpu_allocator.free(cpu_cache_id)
-            self.num_free_cpu_blocks += cpu_cache.blocks  
+            self.num_free_cpu_blocks += need_blocks  
             
             # Allocate a gpu cache id, based on the need_blocks. 
-            gpu_cache_id = self._allocate_gpu_cache(need_blocks = cpu_cache.blocks, allocate_now = False)
+            # Note that we specifically request one more block in order to accomodate vmm_frequency's memory management
+            gpu_cache_id = self._allocate_gpu_cache(need_blocks=need_blocks+1, allocate_now = False)
 
             seq.cache_id = gpu_cache_id
             seq.data.cache_id = gpu_cache_id
             # NOTE: we may not need the allocation, if gpu_cache_id 
-            print(f"SWAPIN seq_id:{seq.seq_id}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}")
-            to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, cpu_cache.blocks])
+            print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}")
+            to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
             
 
         return to_swap_in_caches
@@ -382,7 +385,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # After the swapped out, num_free_cpu_blocks should be decremented 
             self.num_free_cpu_blocks -= num_gpu_blocks
             
-            print(f"SWAPOUT {seq.seq_id}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, blocks:{num_gpu_blocks} at step-{self.step_index}")
+            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, blocks:{num_gpu_blocks} at step-{self.step_index}")
             
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, num_gpu_blocks]) 
 

@@ -192,37 +192,37 @@ class Metrics:
         )
         
         self.gauge_cache_service_tokens_hit_rate = self._gauge_cls(
-            name="vllm:gauge_cache_service_tokens_hit_rate",
+            name="vllm:cache_service_tokens_hit_rate",
             documentation="External cache service tokens hit rate.",
             labelnames=labelnames,
             multiprocess_mode="all")
         
         self.gauge_cache_service_blocks_hit_rate = self._gauge_cls(
-            name="vllm:gauge_cache_service_blocks_hit_rate",
+            name="vllm:cache_service_blocks_hit_rate",
             documentation="External cache service blocks hit rate.",
             labelnames=labelnames,
             multiprocess_mode="all")
         
         self.gauge_cache_service_hit_tokens = self._gauge_cls(
-            name="vllm:gauge_cache_service_hit_tokens",
+            name="vllm:cache_service_hit_tokens",
             documentation="External cache service hit tokens.",
             labelnames=labelnames,
             multiprocess_mode="all")
         
         self.gauge_cache_service_total_tokens = self._gauge_cls(
-            name="vllm:gauge_cache_service_total_tokens",
+            name="vllm:cache_service_total_tokens",
             documentation="External cache service total tokens.",
             labelnames=labelnames,
             multiprocess_mode="all")
         
         self.gauge_cache_service_hit_blocks = self._gauge_cls(
-            name="vllm:gauge_cache_service_hit_blocks",
+            name="vllm:cache_service_hit_blocks",
             documentation="External cache service hit blocks.",
             labelnames=labelnames,
             multiprocess_mode="all")
         
         self.gauge_cache_service_total_blocks = self._gauge_cls(
-            name="vllm:gauge_cache_service_total_blocks",
+            name="vllm:cache_service_total_blocks",
             documentation="External cache service total blocks.",
             labelnames=labelnames,
             multiprocess_mode="all")
@@ -230,7 +230,7 @@ class Metrics:
         
         
         self.histogram_cache_service_time_query_seconds = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_query_seconds",
+            name="vllm:cache_service_time_query_seconds",
             documentation="Histogram of cache service time query in seconds.",
             labelnames=labelnames,
             buckets=[
@@ -239,7 +239,7 @@ class Metrics:
             ])
         
         self.histogram_cache_service_time_load_seconds = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_load_seconds",
+            name="vllm:cache_service_time_load_seconds",
             documentation="Histogram of cache service time load.",
             labelnames=labelnames,
             buckets=[
@@ -248,7 +248,7 @@ class Metrics:
             ])
         
         self.histogram_cache_service_time_reshape_seconds = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_reshape_seconds",
+            name="vllm:cache_service_time_reshape_seconds",
             documentation="Histogram of cache service time update.",
             labelnames=labelnames,
             buckets=[
@@ -257,7 +257,7 @@ class Metrics:
             ])
         
         self.histogram_cache_service_time_unload_seconds = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_unload_seconds",
+            name="vllm:cache_service_time_unload_seconds",
             documentation="Histogram of cache service time unload.",
             labelnames=labelnames,
             buckets=[
@@ -266,7 +266,7 @@ class Metrics:
             ])
         
         self.histogram_cache_service_time_update_seconds = self._histogram_cls(
-            name="vllm:histogram_cache_service_time_update_seconds",
+            name="vllm:cache_service_time_update_seconds",
             documentation="Histogram of cache service time update.",
             labelnames=labelnames,
             buckets=[

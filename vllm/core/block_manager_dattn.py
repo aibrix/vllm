@@ -124,6 +124,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         else:
             return (tokens + self.vmm_frequency + self.block_size - 1) // self.block_size
 
+    def _get_n_blocks(self, tokens: int) -> int:
+        return (tokens + self.block_size - 1) // self.block_size 
+
     def _check_availability(self, need_blocks) -> AllocStatus:
         num_free_gpu_blocks = self.num_free_gpu_blocks + self.cached_free_gpu_blocks
 
@@ -213,6 +216,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # Remove this item from the to_free_gpu_caches
             del self.to_free_gpu_caches[cache_id]
 
+            print(f"Finding one existing cacheid-{cache_id}, with blocks:{allocated_block_num}")
             # After the loop, allocated_block_num will be the number of blocks for the best cache id 
             # We will assign all blocks for the request now.
             # FIXME: we may use a smaller number if allocated_block_num is too big
@@ -254,16 +258,21 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         if self.step_index & self.vmm_frequency_mask:
             return True
 
+        # Some requests may not need to be evicted if its cache is bigger enough
+        cache_blocks, real_blocks = self._get_physical_blocks(seq_group)
+        if real_blocks < cache_blocks:
+            return True
+
         # Simple heuristic: If there is at least one free block
         # for each sequence, we can append.
         free_blocks = self.num_free_gpu_blocks + self.cached_free_gpu_blocks 
         #if num_seqs >= self.num_free_gpu_blocks + self.cached_free_gpu_blocks:
         #    print(f"STOP now!!!!!!Cannot append slots, num_seqs:{num_seqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks} at step-{self.step_index}") 
-        num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
-        return num_seqs < self.num_free_gpu_blocks + self.cached_free_gpu_blocks
-        #if free_blocks < self.active_reqs + 1:
-        #    print(f"STOP now!!!!!!Cannot append slots, self.active_reqs:{self.active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks} at step-{self.step_index}") 
-        #return free_blocks >= self.active_reqs + self.watermark_blocks
+        #num_seqs = seq_group.num_seqs(status=SequenceStatus.RUNNING)
+        #return num_seqs < self.num_free_gpu_blocks + self.cached_free_gpu_blocks
+        if free_blocks < self.active_reqs:
+            print(f"STOP now!!!!!!Cannot append slots, self.active_reqs:{self.active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks} at step-{self.step_index}") 
+        return free_blocks >= self.active_reqs
         
     # FIXME: there is no handling on num_lookahead_slots, which should be handled.  
     def append_slots(
@@ -314,15 +323,17 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
     def _get_physical_blocks(
             self, seq_group: SequenceGroup):
         
-        blocks = 0
+        cache_blocks = 0
+        real_blocks = 0
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 continue
 
             cache_id = seq.cache_id
-            blocks += self.allocated_gpu_blocks[cache_id]
+            cache_blocks += self.allocated_gpu_blocks[cache_id]
+            real_blocks += self._get_n_blocks(seq.get_len())
         
-        return blocks
+        return cache_blocks, real_blocks
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         raise NotImplementedError("Forking is not supported in BlockSpaceManagerDAttn now.")
@@ -369,19 +380,18 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             seq.cache_id = gpu_cache_id
             seq.data.cache_id = gpu_cache_id
             # NOTE: we may not need the allocation, if gpu_cache_id 
-            print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks} at step:{self.step_index}, active requests:{self.active_reqs}")
+            print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks} at step:{self.step_index}, active requests:{self.active_reqs}")
             to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
             
             # Delete this entry
             del self.swapped_caches[seq.seq_id]
 
-
-            
-
+        print(f"in the end of swapin checking")
         return to_swap_in_caches
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        return self._get_physical_blocks(seq_group) <= self.num_free_cpu_blocks
+        cache_blocks, real_blocks = self._get_physical_blocks(seq_group)
+        return real_blocks <= self.num_free_cpu_blocks
 
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
     
@@ -393,24 +403,27 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
             # Find the cache id and gpu_blocks        
             gpu_cache_id = seq.cache_id
-            num_gpu_blocks = self.allocated_gpu_blocks[gpu_cache_id] 
+
+            # Since we may have more blocks for this cache, we only record the 
+            # real_gpu_blocks here in order to improve the performance
+            real_gpu_blocks = self._get_n_blocks(seq.get_len())
 
             # Free the cache related to gpu_cache_id
-            self._free_cache(cache_id =gpu_cache_id, immediate_free = True)
+            self._free_cache(cache_id=gpu_cache_id, immediate_free = True)
 
             # Allocate the cpu cache id
             cpu_cache_id = self.cpu_allocator.allocate()
-            cpu_cache = SwappedCPUCache(cpu_cache_id, num_gpu_blocks) 
+            cpu_cache = SwappedCPUCache(cpu_cache_id, real_gpu_blocks) 
             self.swapped_caches[seq.seq_id] = cpu_cache
 
             # After the swapped out, num_free_cpu_blocks should be decremented 
-            self.num_free_cpu_blocks -= num_gpu_blocks
+            self.num_free_cpu_blocks -= real_gpu_blocks
             
-            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, blocks:{num_gpu_blocks} at step-{self.step_index}, requests:{self.active_reqs}")
+            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, blocks:{real_gpu_blocks} at step-{self.step_index}, requests:{self.active_reqs}")
             
             if self.step_index & self.vmm_frequency_mask != 0:
                 print(f"WRONG!!! swap_out should only occur at scheduling time!")
-            to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, num_gpu_blocks]) 
+            to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, real_gpu_blocks]) 
 
         #print(f"to_swap_out_caches:{to_swap_out_caches}")
         return to_swap_out_caches

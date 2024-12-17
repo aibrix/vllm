@@ -209,7 +209,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
             size = blocks * self.block_bytes_size 
             
-            #print(f"swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}")
+            print(f"swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}")
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_address, size])
 
         #src_to_dests = torch.tensor(to_swap_out_caches, dtype=torch.int64)

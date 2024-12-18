@@ -129,10 +129,10 @@ class CacheEngineDAttn:
             if match:
                 return int(match.group(1))
             else:
-                print(f"{macro_name} not found in {header_file}.")
+                print(f"{macro_name} not found in {header_file}.", file=sys.stderr)
                 return None
         except subprocess.CalledProcessError:
-            print(f"Failed to find {macro_name} in {header_file}.")
+            print(f"Failed to find {macro_name} in {header_file}.", file=sys.stderr)
             return None
 
     def get_n_blocks(num_tokens: int) -> int:
@@ -171,7 +171,7 @@ class CacheEngineDAttn:
             
             # record the address for ith cache
             self.cpu_cache[i] = address
-            #print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}")
+            #print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}", file=sys.stderr)
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         to_swap_in_caches = []
@@ -187,7 +187,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
 
             size = blocks * self.block_bytes_size
-            #print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, size:{hex(size)}")
+            print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
             to_swap_in_caches.append([cpu_cache_address, gpu_cache_id, blocks])
 
         #src_to_dests = torch.tensor(to_swap_in_caches, dtype=torch.int64)
@@ -195,7 +195,7 @@ class CacheEngineDAttn:
 
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
         
-        #print(f"CacheEngineDAttn swap_out with src_to_dst:{src_to_dst}")
+        #print(f"CacheEngineDAttn swap_out with src_to_dst:{src_to_dst}", file=sys.stderr)
         to_swap_out_caches = []
 
         for pair in src_to_dst:
@@ -209,7 +209,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
             size = blocks * self.block_bytes_size 
             
-            print(f"swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}")
+            print(f"Engine swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_address, size])
 
         #src_to_dests = torch.tensor(to_swap_out_caches, dtype=torch.int64)
@@ -233,13 +233,13 @@ class CacheEngineDAttn:
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_attention_layers * (key_cache_block + value_cache_block)
-        #print(f"CacheEngineDAttn:head_size:{head_size}, num_heads:{num_heads}, num_attention_layers:{num_attention_layers}, self.block_size: {cache_config.block_size}, key_cache_block:{key_cache_block},total:{total/1024}KB")
+        #print(f"CacheEngineDAttn:head_size:{head_size}, num_heads:{num_heads}, num_attention_layers:{num_attention_layers}, self.block_size: {cache_config.block_size}, key_cache_block:{key_cache_block},total:{total/1024}KB", file=sys.stderr)
         if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
         dtype_size = get_dtype_size(dtype)
-        #print(f"CacheEngineDAttn:cache_config.block_bytes_size:{dtype_size * total}")
+        #print(f"CacheEngineDAttn:cache_config.block_bytes_size:{dtype_size * total}", file=sys.stderr)
         return dtype_size * total
 
     def update_cache_blocks(self, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]):

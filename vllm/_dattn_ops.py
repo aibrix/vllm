@@ -8,7 +8,7 @@
 import torch
 from vllm.logger import init_logger
 from typing import List, Optional, Tuple, Type
-
+import sys
 
 logger = init_logger(__name__)
 
@@ -82,22 +82,8 @@ class kvCacheAllocator:
         return 
 
     def update_cache_blocks(self, immediate_allocate: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
-       return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks)
+        return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks)
      
-    # If the memory is not sufficient, then the python code (as the major control part)
-    # can instruct the native library to release some memory. If pages is not specified, 
-    # then the library will collect as much as possible (based on the predefined watermark)
-    # Otherwise, it will at least collect the specified ``pages'' here
-    def collect_cached_pages(self, pages: int = 0):
-        self._allocator.collectPhyPages(pages)
-        return 
-
-    # Get the memory usage for a specific request (when req_id is 0) or the whole allocator 
-    def get_kvcache_memory_usage(self, req_id: int = 0):
-        pages = self._allocator.getAllocPhyPages(req_id)
-        return pages * self.page_size
-
-    
     def swap_in_cache(self, src_to_dests: torch.Tensor) -> None:
         self._allocator.swapInCache(src_to_dests)
 

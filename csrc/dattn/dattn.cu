@@ -77,9 +77,9 @@ kvCacheRegion::kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t
   this->dptr = reinterpret_cast<char*>(ptr);  
   this->nextUnmapedAddr = reinterpret_cast<char*>(ptr); 
 
-  this->offset = 0; 
   this->total_pages = 0;
   this->used_pages = 0; 
+  this->alignedSize = 0;
 }
 
 // Decontructor: release all physical pages of this region
@@ -93,14 +93,6 @@ void * kvCacheRegion::getStartPtr(void) {
   return reinterpret_cast<void*>(this->dptr); 
 } 
 
-uint64_t kvCacheRegion::getAllocPhyPages(void) {
-  return this->total_pages;
-} 
-
-uint64_t kvCacheRegion::getUsedPhysicalPages(void) {
-  return this->used_pages; 
-}
-
 /*
   kvCacheRegion function: allocate cached blocks  
     if the return value > 0, then it is succesful. 
@@ -112,6 +104,11 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
 
   // Align the new offset to page_size
   uint64_t alignedSize = roundup(size, this->page_size); 
+
+  // No need to allocate if the cache is already larger than what we need
+  if(alignedSize < this->alignedSize) {
+    return 0; 
+  }
 
   this->total_pages = alignedSize/this->page_size;
 
@@ -132,7 +129,6 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
 
     // Allocate physical pages, which will exit if can't allocate successfully
     if (toallocPages > 0 && allocatePhyPages(this->nextUnmapedAddr, allocSize) == 0) {
-      //fprintf(stderr, "blocks %ld this->block_size %ld size %lx allocSize %lx toallocPages %ld this->nextUnmapedAddr %p this->page_size %ld\n", blocks, this->block_size, size, allocSize, toallocPages, this->nextUnmapedAddr, this->page_size);
       
       // Touch newly-allocates pages in order to initiate physical page allocation
       // This is important to avoid the memory allocation overhead on the critical path. 
@@ -147,6 +143,7 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
       }
 
       this->nextUnmapedAddr = alignedAddr;
+      //fprintf(stderr, "%p : blocks %ld blocksize %lx this->alignedSize %lx this->nextUnmapedAddr %p alignedAddr %p\n", this->dptr, blocks, this->block_size, this->alignedSize, this->nextUnmapedAddr, alignedAddr);
       // Update the used pages correspondingly. The statement works even when this->offset is not aligned to page_size
       *used_pages += toallocPages; 
     }
@@ -156,40 +153,11 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
 }
 
 void kvCacheRegion::freeAllPhyMemory(void) {
+  //fprintf(stderr, "freeAllPhyMemory dtpr %p alignedSize %lx\n", this->dptr, this->alignedSize);
+  assert (this->alignedSize > 0);
   freePhysicalMemory(this->dptr, this->alignedSize);
-  this->offset = 0;
   this->nextUnmapedAddr = this->dptr; 
-}
-
-// freeUnusedPages from a region, and return freed pages
-int kvCacheRegion::freeUnusedPages(void) {
-  int freedPages = 0;
-
-  // Free pages only when total_pages is larger than used_pages
-  if(this->total_pages > this->used_pages) {
-    assert(this->nextUnmapedAddr > (this->dptr + offset));
-
-    // Get the offset of next page, since we can't collect a page if its partialy used
-    uint64_t alignedSize = roundup(offset, this->page_size);
-    
-    // startAddr points to the beginning of the next page
-    char * startAddr = this->dptr + alignedSize; 
-
-    uint64_t size = this->nextUnmapedAddr - startAddr; 
-    assert((size % this->page_size) == 0); 
-
-    freedPages = size/this->page_size; 
-    // free all unused pages of this region. 
-    // If a page is partially used, then it cannot be freed 
-    if(size > 0) {
-      freePhysicalMemory(startAddr, size);
-      this->total_pages -= freedPages;
-      this->nextUnmapedAddr = startAddr;  
-      // No need to change offset here. 
-    } 
-  }
-
-  return freedPages; 
+  this->alignedSize = 0; 
 }
 
 /*
@@ -270,19 +238,12 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   CUdeviceptr ptr;
   kvCacheRegion * region = nullptr;
 
-  // Check whether there are some cached regions 
-  if(this->cached_regions.size()) {
-    // Pop the latest region from cached vector, which is more efficient and therefore it is the default method
-    region = _getLastCachedRegion();  
-  }
-  else {
-    // The expensive way to get a new region. Only invoked when no cached regions
-    // Allocate the virtual address for this region
-    CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
+  // The expensive way to get a new region. Only invoked when no cached regions
+  // Allocate the virtual address for this region
+  CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
 
-    // Create a new region from the scratch
-    region = new kvCacheRegion(this->region_size, this->block_size, this->page_size, ptr);
-  }
+  // Create a new region from the scratch
+  region = new kvCacheRegion(this->region_size, this->block_size, this->page_size, ptr);
 
   // Allocate one block the first region
   if(region_id == 0) {
@@ -313,79 +274,8 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
 
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
-  region->freeAllPhyMemory(); 
-  //fprintf(stderr, "Release region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
-  
-  // Cache the given region, as it can be used for the future ideally. 
-  // In order to reduce the overhead of memory management, we did not 
-  // reclaim physical blocks until necessary.
-  //_cacheReleasedRegion(region); 
-}
-
-// Cache the released region. Don't release the virtual address and physical cache blocks
-void kvCacheAllocator::_cacheReleasedRegion(kvCacheRegion * region) {
-  this->cached_regions.push_back(region);
-}
-
-// Get the lastly-released region. If the region has some physical blocks, 
-// they will be re-utilized as well.
-// Note that using cached regions is way more efficient than allocating a new region
-kvCacheRegion * kvCacheAllocator::_getLastCachedRegion(void) {
-  assert(!this->cached_regions.empty());
-
-  kvCacheRegion * region = this->cached_regions.back(); 
-  this->cached_regions.pop_back(); 
-
-  return region; 
-} 
-
-// This function is invoked when the number of physical pages is above 
-// the preset threshold. It performs the garbage collecton of physical pages
-void kvCacheAllocator::_gcPhyPages(int64_t toCollectPages) {
-
-  assert(toCollectPages > 0); 
-
-  // first, collect the pages in cached regions. 
-  kvCacheRegion * region; 
-
-  // First, collect pages from cached_regions as it won't affect active requests. 
-  while(!this->cached_regions.empty() && toCollectPages > 0) {
-    // Release Least-Recently-Used regions at first
-    region = this->cached_regions.front();
-    this->cached_regions.pop_front();
-
-    int pages = region->getAllocPhyPages();
-    if(pages > 0) {
-      this->total_pages -= pages; 
-      toCollectPages -= pages; 
-    }
-
-    // deconstruct this region, which will collect all physical pages inside
-    delete region;
-  }
-
-  // Check active regions if necessary
-  while(toCollectPages > 0) {
-    // Collect pages from active regions
-    for(auto it = this->active_regions_map.begin(); it != this->active_regions_map.end(); it++) {
-      // it->second points to the region
-      region = it->second; 
-
-      int pages = region->freeUnusedPages(); 
-      if(pages > 0) {
-        // Update the total_pages for the allocator
-        this->total_pages -= pages; 
-
-        toCollectPages -= pages; 
-      }
-
-      // Exit the loop if we collect enough pages
-      if(toCollectPages <= 0) {
-        break; 
-      }
-    }
-  }
-  
+  region->freeAllPhyMemory();
+  fprintf(stderr, "release region %ld\n", region_id); 
 }
 
 // alloc function, allocate physical memory, map to the reserved virtual address
@@ -415,18 +305,6 @@ int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t
 
   pages = region->allocCacheBlocks(blocks, &this->used_pages, stream);
 
-  if(pages > 0) { 
-    this->total_pages += pages;
-
-    // check whether we need to purge physical memory
-    if(this->total_pages >= this->watermark_pages && this->total_pages > this->used_pages) {
-      int toCollectPages = std::min(this->total_pages - this->used_pages, this->total_pages - this->watermark_pages); 
-
-      // Garbage collection for physical pages. 
-      _gcPhyPages(toCollectPages);
-    } 
-  }
-
   return pages;
 }
 
@@ -440,7 +318,7 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
     uint64_t blocks = row[1]; 
 
     pages += _allocCacheBlocksForRequest(region_id, blocks, stream);
-    //if (region_id == 11)
+    //if (region_id == 7)
     //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
   }
   //cudaDeviceSynchronize(); 
@@ -482,7 +360,7 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     
     // If the manager has not finished, waiting on the condition 
     while(this->manager_running) {
-      fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
+      //fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
 
@@ -506,7 +384,7 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
 
 void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
   //Py_BEGIN_ALLOW_THREADS
-  //fprintf(stderr, "NNNNNNN is_prefill_phase is %d\n", is_prefill_phase); 
+  //fprintf(stderr, "NNNNNNN immediate_allocate is %d\n", immediate_allocate); 
 
   if(immediate_allocate) {
     pthread_mutex_lock(&this->mutex_manager);
@@ -529,44 +407,10 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<in
 // Release regions specified in the vector
 void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
   for(auto region : regions) {
+    //fprintf(stderr, "release region-%d\n", region); 
     _releaseRegion(region);
   }
 }
-
-
-int64_t kvCacheAllocator::getAllocPhyPages(int64_t region_id) {
-  int64_t pages = 0; 
-
-  if(region_id == 0) {
-    pages = this->total_pages; 
-  }
-  else {
-    // Find the region corresponding to the given region_id, which should reserveRegion before
-    // If the region_id doesn't exist at all, it is the bug that should be fixed.  
-    if(this->active_regions_map.count(region_id) == 0) {
-      fprintf(stderr, "ERROR: region_id does not exist at getAllocPhyPages.!");
-      exit(-1); 
-    }
-
-    std::lock_guard<std::mutex> lock(this->mutex);
-
-    kvCacheRegion * region = this->active_regions_map[region_id]; 
-    pages = region->getAllocPhyPages(); 
-  }
-
-  return pages;
-}
-
-void kvCacheAllocator::collectPhyPages(int64_t pages) {
-  if(pages == 0) {
-    // Collect pages defined by watermark
-    pages = std::min(this->total_pages - this->used_pages, this->total_pages - this->watermark_pages); 
-  }
-  
-  _gcPhyPages(pages);
-  return; 
-}
-
 
 // Swap out the caches listed in src_to_dests (from Device to Host)
 void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> src_to_dests) {
@@ -582,9 +426,10 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> src_to_des
     cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
                     size, cudaMemcpyDeviceToHost);
 
-    // After reading, now releasing the region's memory in order to free memory for other requests
-    region->freeAllPhyMemory(); 
-    //fprintf(stderr, "Swapped out region %d, dptr %p, aligned_size %lx\n", region_id, region->dptr, region->alignedSize);
+    // NOTE: no need to release the region, as the region will be reclaimed by 
+    // updateCacheBlocks
+    //region->freeAllPhyMemory(); 
+    //fprintf(stderr, "Swapped out region %d\n", region_id);
  
   }
 }
@@ -600,12 +445,12 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> src_to_dest
     // Allocate physical memory at first
     kvCacheRegion * region = this->active_regions_map[region_id];
 
-    // This is to accomodate the periodic memory management (such as 16 steps)
-    region->allocCacheBlocks(blocks+1, &this->used_pages, nullptr);
+    int64_t size = blocks  * this->block_size; 
 
-    int64_t size = blocks * this->block_size;
+    region->allocCacheBlocks(blocks+1, &this->used_pages, nullptr);
+    
     void * dest_ptr = region->getStartPtr(); 
-    //printf("SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
+    fprintf(stderr, "SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
 
     cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
                     size, cudaMemcpyHostToDevice);

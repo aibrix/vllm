@@ -53,8 +53,7 @@ checkDrvError(CUresult res, const char *tok, const char *file, unsigned line) {
 // record the reserved virtual address size and allocated physical memory size.
 // TODO: we may avoid expose this class externally in the future. 
 class kvCacheRegion : public torch::CustomClassHolder{
-//private:
-public:
+private:
   char * dptr;
 
   // the number of bytes for the request's virtual address space (region)
@@ -79,10 +78,6 @@ public:
   // Typically, (nextUnmapedAddr - dptr)/page_size == total_pagees 
   char * nextUnmapedAddr; 
 
-
-  // The difference between the used address (the end of invoking allocBlocks) and the starting pointer of the region
-  uint64_t offset; 
-
 public:
 
   kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t page_size, CUdeviceptr ptr);
@@ -92,10 +87,7 @@ public:
   // get the number of physical pages
   void * getStartPtr(void); 
   
-  uint64_t getAllocPhyPages(void); 
-  uint64_t getUsedPhysicalPages(void);
   int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream);
-  int freeUnusedPages(void);
   void freeAllPhyMemory(void);
 };
 
@@ -131,13 +123,9 @@ private:
   cudaStream_t stream;
   // the hashtable to record the relationship between regions and ptrs
   unordered_map<uint64_t, kvCacheRegion*> active_regions_map;
-  std::deque<kvCacheRegion *> cached_regions; 
 
   // Internal functions
-  void _cacheReleasedRegion(kvCacheRegion * region);
   static void *memoryManagerThread(void * arg); 
-  kvCacheRegion * _getLastCachedRegion(void); 
-  void _gcPhyPages(int64_t toCollectPages);
   void _initializeAllocHandles(void);
   // Release the virtual address space for a region that is related to one request
   void _releaseRegion(int64_t region_id);
@@ -184,10 +172,5 @@ public:
   void swapOutCache(std::vector<std::vector<int64_t>> src_to_dsts); 
   void swapInCache(std::vector<std::vector<int64_t>> src_to_dsts); 
 
-
-  // Allow the python code to know the physical memory used for the whole 
-  // kv cache or the memory for the specified request (when region_id is not 0). 
-  int64_t getAllocPhyPages(int64_t region_id = 0); 
-  void collectPhyPages(int64_t pages = 0); 
 };
 

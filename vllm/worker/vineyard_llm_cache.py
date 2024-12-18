@@ -346,9 +346,10 @@ class VineyardLLMCache:
 
         if query_token_size <= 0:
             return seq_id, 0
+        
+        self.metrics.total_tokens += query_token_size
+        self.metrics.total_blocks += ((-query_token_size) // (-block_size))
         if self.metrics_enabled:
-            self.metrics.total_tokens += query_token_size
-            self.metrics.total_blocks += ((-query_token_size) // (-block_size))
             start_time = time.perf_counter()
         matched = 0
         try:
@@ -390,10 +391,9 @@ class VineyardLLMCache:
         else:
             slot_mapping = torch.zeros((matched,), dtype=torch.long, device='cuda')
             tensor_model_parallel_broadcast(slot_mapping, src=0)
+        self.metrics.hit_tokens += matched
+        self.metrics.hit_blocks += (matched // block_size)
         if self.metrics_enabled:
-            self.metrics.hit_tokens += matched
-            self.metrics.hit_blocks += (matched // block_size)
-
             # save to GPU kv cache
             torch.cuda.synchronize()
             copy_start = torch.cuda.Event(enable_timing=True)

@@ -1819,11 +1819,6 @@ class LLMEngine:
         # Cache Service Metrics
         cache_service_tokens_hit_rate: float 
         cache_service_blocks_hit_rate: float 
-        cache_service_time_query: List[float] = []
-        cache_service_time_load: List[float] = []
-        cache_service_time_reshape: List[float] = []
-        cache_service_time_unload: List[float] = []
-        cache_service_time_update: List[float] = []
         
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
@@ -1921,16 +1916,16 @@ class LLMEngine:
             cache_service_tokens_hit_rate = self.cache_service_metrics.get_tokens_hit_rate()
             cache_service_blocks_hit_rate = self.cache_service_metrics.get_blocks_hit_rate()
             
-            cache_service_time_query.extend(self.cache_service_metrics.time_query)
-            cache_service_time_load.extend(self.cache_service_metrics.time_load)
-            cache_service_time_reshape.extend(self.cache_service_metrics.time_reshape)
-            cache_service_time_unload.extend(self.cache_service_metrics.time_unload)
-            cache_service_time_update.extend(self.cache_service_metrics.time_update)
-            self.cache_service_metrics.time_query.clear()
-            self.cache_service_metrics.time_load.clear()
-            self.cache_service_metrics.time_reshape.clear()
-            self.cache_service_metrics.time_unload.clear()
-            self.cache_service_metrics.time_update.clear()
+            cache_service_time_query = self.cache_service_metrics.time_query
+            cache_service_time_load = self.cache_service_metrics.time_load
+            cache_service_time_reshape = self.cache_service_metrics.time_reshape
+            cache_service_time_unload = self.cache_service_metrics.time_unload
+            cache_service_time_update = self.cache_service_metrics.time_update
+            self.cache_service_metrics.time_query = []
+            self.cache_service_metrics.time_load = []
+            self.cache_service_metrics.time_reshape = []
+            self.cache_service_metrics.time_unload = []
+            self.cache_service_metrics.time_update = []
             
 
         return Stats(

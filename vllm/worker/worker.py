@@ -355,25 +355,38 @@ class Worker(LocalOrDistributedWorkerBase):
         )
 
     @torch.inference_mode()
-    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
-       self.cache_engine[virtual_engine].update_cache_blocks(immediate_allocate, free_kv_caches, to_allocate_blocks) 
+    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], to_swap_out: List[List[int]], to_swap_in: List[List[int]]) -> None:
+       self.cache_engine[virtual_engine].update_cache_blocks(immediate_allocate, free_kv_caches, to_allocate_blocks, to_swap_out, to_swap_in) 
 
+    @torch.inference_mode()
+    def execute_worker_dattn(self, worker_input: WorkerInput) -> Tuple[List[List[int]], List[List[int]]]:
+        #print(f"NOOOOOW, execute_worker before swapin and swapout")
+        virtual_engine = worker_input.virtual_engine
+        to_swap_out = None
+        to_swap_in  = None
+        if worker_input.blocks_to_swap_out is not None:
+            to_swap_out = self.cache_engine[virtual_engine].swap_out(
+                           worker_input.blocks_to_swap_out)
+        if worker_input.blocks_to_swap_in is not None:
+            to_swap_in = self.cache_engine[virtual_engine].swap_in(
+                         worker_input.blocks_to_swap_in)
+
+        return to_swap_out, to_swap_in
+ 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         #print(f"NOOOOOW, execute_worker before swapin and swapout")
         virtual_engine = worker_input.virtual_engine
+
         # Issue cache operations.
-        # NOTE: for dAttention, the same cache can be swapped out first,
-        # and then be swapped in a new cache at the same time, then let's 
-        # do the swapout before swapin.  
-        if (worker_input.blocks_to_swap_out is not None
-                and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_swap_in is not None
                 and worker_input.blocks_to_swap_in.numel() > 0):
             self.cache_engine[virtual_engine].swap_in(
                 worker_input.blocks_to_swap_in)
+        if (worker_input.blocks_to_swap_out is not None
+                and worker_input.blocks_to_swap_out.numel() > 0):
+            self.cache_engine[virtual_engine].swap_out(
+                worker_input.blocks_to_swap_out)
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)

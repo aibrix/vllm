@@ -81,11 +81,11 @@ class kvCacheAllocator:
         self._allocator.releaseRegions(free_caches)
         return 
 
-    def update_cache_blocks(self, immediate_allocate: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
-        return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks)
+    def update_cache_blocks(self, 
+                            immediate_allocate: bool, 
+                            free_caches: List[int], 
+                            req_cache_blocks:List[List[int]], 
+                            to_swap_out: List[List[int]], 
+                            to_swap_in: List[List[int]]):
+        return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks, to_swap_out, to_swap_in)
      
-    def swap_in_cache(self, src_to_dests: torch.Tensor) -> None:
-        self._allocator.swapInCache(src_to_dests)
-
-    def swap_out_cache(self, src_to_dests: List[List[int]]) -> None:
-        self._allocator.swapOutCache(src_to_dests)

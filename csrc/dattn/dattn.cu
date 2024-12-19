@@ -89,8 +89,8 @@ kvCacheRegion::~kvCacheRegion() {
   // no need to clear other counters. 
 }
 
-void * kvCacheRegion::getStartPtr(void) {
-  return reinterpret_cast<void*>(this->dptr); 
+CUdeviceptr kvCacheRegion::getStartPtr(void) {
+  return reinterpret_cast<CUdeviceptr>(this->dptr); 
 } 
 
 /*
@@ -136,10 +136,11 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
         int64_t h_data = 0;
         int64_t offset = this->page_size * i;
         // Using different APIs for asynchronous memory allocations. 
-        if(stream == nullptr) 
+        if(stream == nullptr) { 
           cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t));
-        else
-          cudaMemcpyAsync(reinterpret_cast<void *>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        } else {
+          cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t), stream);
+        }
       }
 
       this->nextUnmapedAddr = alignedAddr;
@@ -340,6 +341,8 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     }
   
     // Perform memory management asynchronously
+    instance->swapOutCache(instance->swap_out_caches, instance->stream);
+    instance->swapInCache(instance->swap_in_caches, instance->stream);
     instance->releaseRegions(instance->free_caches);
     instance->allocCacheBlocks(instance->req_cache_blocks, instance->stream);
 
@@ -355,7 +358,8 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
    This function mainly sets the work to be done, and then notify the manager thread to 
    perform memory management asynchronously. 
  */
-void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
+void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks, 
+        std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in) {
     pthread_mutex_lock(&this->mutex_manager);
     
     // If the manager has not finished, waiting on the condition 
@@ -365,7 +369,9 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     }
 
     this->free_caches.clear(); 
-    this->req_cache_blocks.clear(); 
+    this->req_cache_blocks.clear();
+    this->swap_out_caches.clear();  
+    this->swap_in_caches.clear();  
 
     // Copying the work to the shared area
     for(auto cache_id: free_caches) {
@@ -376,13 +382,24 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     for(auto cache_block: req_cache_blocks) {
       this->req_cache_blocks.push_back(cache_block); 
     }
+
+    for(auto cacheInfo: to_swap_out) {
+      this->swap_out_caches.push_back(cacheInfo); 
+    }
+
+    for(auto cacheInfo: to_swap_in) {
+      this->swap_in_caches.push_back(cacheInfo); 
+    }    
     
     this->manager_running = true; 
     pthread_cond_signal(&this->cond_manager); 
     pthread_mutex_unlock(&this->mutex_manager);
 }
 
-void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
+void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, 
+                                         std::vector<std::vector<int64_t>> req_cache_blocks,
+                                         std::vector<std::vector<int64_t>> to_swap_out,
+                                         std::vector<std::vector<int64_t>> to_swap_in) {
   //Py_BEGIN_ALLOW_THREADS
   //fprintf(stderr, "NNNNNNN immediate_allocate is %d\n", immediate_allocate); 
 
@@ -393,13 +410,15 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<in
     while(this->manager_running) {
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
+    this->swapOutCache(to_swap_out, nullptr);
+    this->swapInCache(to_swap_in, nullptr);
     this->releaseRegions(free_caches);
     this->allocCacheBlocks(req_cache_blocks, nullptr);
 
     pthread_mutex_unlock(&this->mutex_manager); 
   }
   else {
-    doAsyncKVCacheManage(free_caches, req_cache_blocks);
+    doAsyncKVCacheManage(free_caches, req_cache_blocks, to_swap_out, to_swap_in);
   }
   //Py_END_ALLOW_THREADS
 }
@@ -413,31 +432,29 @@ void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
 }
 
 // Swap out the caches listed in src_to_dests (from Device to Host)
-void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> src_to_dests) {
+void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
   
-  for(auto item: src_to_dests) {
+  for(auto item: swap_caches) {
     int64_t region_id = item[0]; 
     int64_t dest_ptr = item[1]; 
     int64_t size = item[2]; 
 
     kvCacheRegion * region = this->active_regions_map[region_id];
-    void * src_ptr = region->getStartPtr(); 
+    CUdeviceptr src_ptr = region->getStartPtr(); 
 
-    cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
-                    size, cudaMemcpyDeviceToHost);
-
-    // NOTE: no need to release the region, as the region will be reclaimed by 
-    // updateCacheBlocks
-    //region->freeAllPhyMemory(); 
-    //fprintf(stderr, "Swapped out region %d\n", region_id);
- 
+    if(stream == nullptr) {
+      cuMemcpyDtoH(reinterpret_cast<void*>(dest_ptr), src_ptr, size); 
+    } else {
+      cuMemcpyDtoHAsync(reinterpret_cast<void*>(dest_ptr), src_ptr, size, stream); 
+    }
+    
   }
 }
 
-// Swap in the caches listed in src_to_dests (from Host to Device)
-void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> src_to_dests) {
+// Swap in the caches listed in swap_caches (from Host to Device)
+void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
     
-  for(auto item: src_to_dests) {
+  for(auto item: swap_caches) {
     int64_t src_ptr = item[0]; 
     int64_t region_id = item[1]; 
     int64_t blocks = item[2]; 
@@ -447,13 +464,17 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> src_to_dest
 
     int64_t size = blocks  * this->block_size; 
 
-    region->allocCacheBlocks(blocks+1, &this->used_pages, nullptr);
+    region->allocCacheBlocks(blocks+1, &this->used_pages, stream);
     
-    void * dest_ptr = region->getStartPtr(); 
+    CUdeviceptr dest_ptr = region->getStartPtr(); 
     fprintf(stderr, "SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
 
-    cudaMemcpy(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<const void*>(src_ptr),
-                    size, cudaMemcpyHostToDevice);
+    if(stream == nullptr) {
+      cuMemcpyHtoD(dest_ptr, reinterpret_cast<const void*>(src_ptr), size);
+    }
+    else {
+      cuMemcpyHtoDAsync(dest_ptr, reinterpret_cast<const void*>(src_ptr), size, stream);
+    }
   }
 
 }

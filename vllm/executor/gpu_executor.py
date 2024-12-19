@@ -173,7 +173,11 @@ class GPUExecutor(ExecutorBase):
     def stop_profile(self) -> None:
         self.driver_worker.stop_profile()
 
-    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
+    def update_cache_blocks(self, 
+                            virtual_engine: int, 
+                            immediate_allocate: bool, 
+                            free_caches: List[int], 
+                            req_cache_blocks:List[List[int]]):
         self.driver_worker.update_cache_blocks(virtual_engine, immediate_allocate, free_caches, req_cache_blocks)
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):

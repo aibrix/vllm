@@ -190,8 +190,9 @@ class CacheEngineDAttn:
             print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
             to_swap_in_caches.append([cpu_cache_address, gpu_cache_id, blocks])
 
+        return to_swap_in_caches
         #src_to_dests = torch.tensor(to_swap_in_caches, dtype=torch.int64)
-        self.device_cache_allocator.swap_in_cache(to_swap_in_caches)
+        #self.device_cache_allocator.swap_in_cache(to_swap_in_caches)
 
     def swap_out(self, src_to_dst: torch.Tensor) -> None:
         
@@ -212,8 +213,9 @@ class CacheEngineDAttn:
             print(f"Engine swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_address, size])
 
+        return to_swap_out_caches
         #src_to_dests = torch.tensor(to_swap_out_caches, dtype=torch.int64)
-        self.device_cache_allocator.swap_out_cache(to_swap_out_caches)
+        #self.device_cache_allocator.swap_out_cache(to_swap_out_caches)
 
     # TODO: we need to implement the copy_blocks 
     def copy(self, src_to_dsts: torch.Tensor) -> None:
@@ -242,12 +244,13 @@ class CacheEngineDAttn:
         #print(f"CacheEngineDAttn:cache_config.block_bytes_size:{dtype_size * total}", file=sys.stderr)
         return dtype_size * total
 
-    def update_cache_blocks(self, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]):
+    def update_cache_blocks(self, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], 
+                            to_swap_out: List[List[int]], to_swap_in: List[List[int]]):
         to_alloc_list = []
         for cache_id, blocks in to_allocate_blocks.items():
             to_alloc_list.append([cache_id, blocks])
 
-        self.device_cache_allocator.update_cache_blocks(immediate_allocate, free_kv_caches, to_alloc_list)
+        self.device_cache_allocator.update_cache_blocks(immediate_allocate, free_kv_caches, to_alloc_list, to_swap_out, to_swap_in)
         
 
 def _get_dtype_size(dtype: torch.dtype) -> int:

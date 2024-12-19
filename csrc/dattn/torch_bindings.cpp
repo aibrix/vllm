@@ -15,9 +15,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
     .def(torch::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>())
     .def("reserveRegion", &kvCacheAllocator::reserveRegion)
     .def("releaseRegions", &kvCacheAllocator::releaseRegions)
-    .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks)
-    .def("swapInCache", &kvCacheAllocator::swapInCache)
-    .def("swapOutCache", &kvCacheAllocator::swapOutCache);
+    .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

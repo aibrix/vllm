@@ -237,7 +237,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     @abstractmethod
-    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
+    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], to_swap_out: List[List[int]], to_swap_in: List[List[int]]) -> None:
         """
         Process an execution request.
         """
@@ -330,13 +330,21 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-        
-        self.execute_worker(worker_input)
+        if self.use_dattn:
+            to_swap_out_caches, to_swap_in_caches = self.execute_worker_dattn(worker_input)
+            
+            # If any of these not zero
+            if (execute_model_req.to_free_kv_caches or execute_model_req.to_allocate_blocks 
+               or to_swap_out_caches or to_swap_in_caches): 
+                # Perform the update cache blocks in a function. 
+                self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_free_kv_caches, execute_model_req.to_allocate_blocks, to_swap_out_caches, to_swap_in_caches)
+        else:
+            self.execute_worker(worker_input)
         #print(f"after execute worker now num_steps:{num_steps}", file=sys.stderr)
 
         # Now let's update cache blocks. Note that this has to be done after execute_worker
-        if execute_model_req.to_free_kv_caches or execute_model_req.to_allocate_blocks:
-            self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_free_kv_caches, execute_model_req.to_allocate_blocks)
+        # When swapping out, we may evict some GPU caches that can be done after the successful swapping out. 
+     
         
         # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups == 0:

@@ -1264,12 +1264,6 @@ class LLMEngine:
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
-
-            #if self.use_dattn:
-            #    print(f"NOOOOOW, bfore update update_cache_blocks!!!")
-                # Perform the memory allocations based on the prefined frequency or scheduler_outputs.num_prefill_groups > 0 (is_prefill_phase  == True) 
-            #    if scheduler_outputs.to_free_kv_caches or scheduler_outputs.to_allocate_blocks:
-            #        self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.immediate_allocate,  scheduler_outputs.to_free_kv_caches, scheduler_outputs.to_allocate_blocks)
                 
             if self.profile == True:
                 T3 = time.time()

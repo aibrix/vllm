@@ -85,7 +85,7 @@ public:
   ~kvCacheRegion();
 
   // get the number of physical pages
-  void * getStartPtr(void); 
+  CUdeviceptr getStartPtr(void); 
   
   int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream);
   void freeAllPhyMemory(void);
@@ -135,11 +135,14 @@ private:
   bool manager_running;
 
   pthread_t thread_id;
-  void doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks); 
+  void doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks,
+          std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>>  to_swap_in); 
   pthread_mutex_t mutex_manager;
   pthread_cond_t  cond_manager; 
   std::vector<int64_t> free_caches;
   std::vector<std::vector<int64_t>> req_cache_blocks; 
+  std::vector<std::vector<int64_t>> swap_out_caches; 
+  std::vector<std::vector<int64_t>> swap_in_caches; 
 
 public:
 
@@ -167,10 +170,11 @@ public:
 
   int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
 
-  void updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches);
+  void updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches, 
+                      std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in);
 
-  void swapOutCache(std::vector<std::vector<int64_t>> src_to_dsts); 
-  void swapInCache(std::vector<std::vector<int64_t>> src_to_dsts); 
+  void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
+  void swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
 
 };
 

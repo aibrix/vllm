@@ -636,11 +636,11 @@ class PrometheusStatLogger(StatLoggerBase):
                             stats.cache_service_time_unload)
         self._log_histogram(self.metrics.histogram_cache_service_time_update_seconds,
                             stats.cache_service_time_update)
-        self._log_histogram(self.metrics.histogram_cache_service_time_async_update_queue,
+        self._log_histogram(self.metrics.histogram_cache_service_time_async_update_queue_seconds,
                             stats.cache_service_time_async_update_queue)
-        self._log_histogram(self.metrics.histogram_cache_service_time_async_update_exec,
+        self._log_histogram(self.metrics.histogram_cache_service_time_async_update_exec_seconds,
                             stats.cache_service_time_async_update_exec)
-        self._log_histogram(self.metrics.histogram_cache_service_counter_async_update_updated,
+        self._log_histogram(self.metrics.histogram_cache_service_counter_async_update_updated_seconds,
                             stats.cache_service_counter_async_update_updated)
 
     def _log_prometheus_interval(self, prompt_throughput: float,

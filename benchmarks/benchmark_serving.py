@@ -128,6 +128,30 @@ def sample_sharegpt_requests(
 
     return filtered_dataset
 
+def sample_text2sql_requests(
+    dataset_path: str,
+    num_requests: int,
+    tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int] = None,
+) -> List[Tuple[str, int, int, None]]:
+    # Sample the requests.
+    sampled_requests: List[Tuple[str, int, int]] = []
+    # Load the dataset.
+    with open(dataset_path, encoding='utf-8') as f:
+        for line in f:
+            try:
+                data = json.loads(line)
+                messages = data["messages"]
+                prompt_formatted = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+                prompt_len = len(tokenizer(prompt_formatted).input_ids)
+                sampled_requests.append(
+                    (prompt_formatted, prompt_len, fixed_output_len))
+            except json.JSONDecodeError:
+                print("failed to decode JSON from line.")
+            except Exception as e:
+                print(f"An error occurred: {e}")
+
+    return sampled_requests
 
 def sample_sonnet_requests(
     dataset_path: str,
@@ -815,6 +839,14 @@ def main(args: argparse.Namespace):
             fixed_output_len=args.sharegpt_output_len,
         )
 
+    elif args.dataset_name == "text2sql":
+        input_requests = sample_text2sql_requests(
+            dataset_path=args.dataset_path,
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            fixed_output_len=100,
+        )
+
     elif args.dataset_name == "sonnet":
         # Do not format the prompt, pass to message directly
         if args.backend == "openai-chat":
@@ -974,7 +1006,7 @@ if __name__ == "__main__":
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "sonnet", "random", "hf"],
+        choices=["sharegpt", "sonnet", "random", "hf", "text2sql"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument("--dataset-path",

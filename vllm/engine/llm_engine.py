@@ -1819,6 +1819,9 @@ class LLMEngine:
         # Cache Service Metrics
         cache_service_tokens_hit_rate: float 
         cache_service_blocks_hit_rate: float 
+        cache_service_time_async_update_queue: List[int] = []
+        cache_service_time_async_update_exec: List[int] = []
+        cache_service_counter_async_update_updated: List[int] = []
         
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
@@ -1915,17 +1918,23 @@ class LLMEngine:
             cache_service_total_blocks = self.cache_service_metrics.total_blocks
             cache_service_tokens_hit_rate = self.cache_service_metrics.get_tokens_hit_rate()
             cache_service_blocks_hit_rate = self.cache_service_metrics.get_blocks_hit_rate()
+            cache_service_err_query = self.cache_service_metrics.err_query
+            cache_service_err_async_update_task_queue_full = self.cache_service_metrics.err_async_update_task_queue_full
+            cache_service_err_update = self.cache_service_metrics.err_update
             
             cache_service_time_query = self.cache_service_metrics.time_query
             cache_service_time_load = self.cache_service_metrics.time_load
             cache_service_time_reshape = self.cache_service_metrics.time_reshape
             cache_service_time_unload = self.cache_service_metrics.time_unload
             cache_service_time_update = self.cache_service_metrics.time_update
+            cache_service_time_async_update_queue, cache_service_time_async_update_exec, cache_service_counter_async_update_updated = self.cache_service_metrics.get_async_metrics()
+            
             self.cache_service_metrics.time_query = []
             self.cache_service_metrics.time_load = []
             self.cache_service_metrics.time_reshape = []
             self.cache_service_metrics.time_unload = []
             self.cache_service_metrics.time_update = []
+            self.cache_service_metrics.reset_async_metrics()
             
 
         return Stats(
@@ -1967,11 +1976,17 @@ class LLMEngine:
             cache_service_total_blocks = cache_service_total_blocks,
             cache_service_tokens_hit_rate = cache_service_tokens_hit_rate,
             cache_service_blocks_hit_rate = cache_service_blocks_hit_rate,
+            cache_service_err_query = cache_service_err_query,
+            cache_service_err_async_update_task_queue_full = cache_service_err_async_update_task_queue_full,
+            cache_service_err_update = cache_service_err_update,
             cache_service_time_query = cache_service_time_query,
             cache_service_time_load = cache_service_time_load,
             cache_service_time_reshape = cache_service_time_reshape,
             cache_service_time_unload = cache_service_time_unload,
             cache_service_time_update = cache_service_time_update,
+            cache_service_time_async_update_queue = cache_service_time_async_update_queue,
+            cache_service_time_async_update_exec = cache_service_time_async_update_exec,
+            cache_service_counter_async_update_updated = cache_service_counter_async_update_updated,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

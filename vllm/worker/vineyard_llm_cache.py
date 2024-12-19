@@ -82,6 +82,12 @@ class CacheServiceMetrics:
 
     def add_time_update(self, value):
         self.time_update.append(value)
+    
+    def get_tokens_hit_rate(self):
+        return 0 if self.total_tokens == 0 else self.hit_tokens / float(self.total_tokens)
+
+    def get_blocks_hit_rate(self):
+        return 0 if self.total_blocks == 0 else self.hit_blocks / float(self.total_blocks)
 
     def update_async_metrics(self, queue_duration, exec_duration, updated):
         with self.lock:
@@ -89,12 +95,15 @@ class CacheServiceMetrics:
             self.time_async_update_exec.append(exec_duration)
             self.counter_async_update_updated.append(updated)
 
-    def get_tokens_hit_rate(self):
-        return 0 if self.total_tokens == 0 else self.hit_tokens / float(self.total_tokens)
-
-    def get_blocks_hit_rate(self):
-        return 0 if self.total_blocks == 0 else self.hit_blocks / float(self.total_blocks)
-
+    def get_async_metrics(self):
+        with self.lock:
+            return self.time_async_update_queue, self.time_async_update_exec, self.counter_async_update_updated
+    
+    def reset_async_metrics(self):
+        with self.lock:
+            self.time_async_update_queue = []
+            self.time_async_update_exec = [] 
+            self.counter_async_update_updated = []
 
 class VineyardLLMCache:
     def __init__(

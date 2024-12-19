@@ -60,11 +60,18 @@ class Stats:
     cache_service_total_blocks: int 
     cache_service_tokens_hit_rate: float 
     cache_service_blocks_hit_rate: float 
-    cache_service_time_query: List[int]
-    cache_service_time_load: List[int]
-    cache_service_time_reshape: List[int]
-    cache_service_time_unload: List[int]
-    cache_service_time_update: List[int]
+    cache_service_err_query: int
+    cache_service_err_async_update_task_queue_full: int
+    cache_service_err_update: int
+    cache_service_time_query: List[float]
+    cache_service_time_load: List[float]
+    cache_service_time_reshape: List[float]
+    cache_service_time_unload: List[float]
+    cache_service_time_update: List[float]
+    cache_service_time_async_update_queue: List[float]
+    cache_service_time_async_update_exec: List[float]
+    cache_service_counter_async_update_updated: List[float]
+    
     
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None 
 

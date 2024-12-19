@@ -74,9 +74,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.vmm_frequency = vmm_frequency
         self.vmm_frequency_mask = vmm_frequency - 1 
         
-        # Useful when admitting new requests or swapping in some requests. 
-        # Then we prefer those requests that just exit.  
-        self.cached_free_gpu_blocks: int = 0
 
         # Tracking the number of gpu_blocks (including self.cached_free_gpu_blocks) 
         self.num_free_gpu_blocks = num_gpu_blocks
@@ -103,6 +100,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # Temporary buffer for each step. self.step() will collect these information and freed all 
         # caches of to_free_gpu_caches
         self.to_allocate_blocks: Dict[int, int] = {} 
+
+        # Useful when admitting new requests or swapping in some requests. 
+        # Then we prefer those requests that just exit.
+        # Making cached_free_gpu_blocks a part of num_free_gpu_blocks
+        self.cached_free_gpu_blocks: int = 0
 
         # to_free_gpu_caches keeps the requests that are freed in the current step
         self.to_free_gpu_caches: Dict[int, int] = {}
@@ -132,14 +134,12 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         return (tokens + self.block_size - 1) // self.block_size 
 
     def _check_availability(self, need_blocks) -> AllocStatus:
-        num_free_gpu_blocks = self.num_free_gpu_blocks + self.cached_free_gpu_blocks
-
         # Ensure that one request should not use more than 90% or 99% of memory
         # This can avoid frequent cache eviction 
         if (self.num_total_gpu_blocks - need_blocks < self.watermark_blocks):
             return AllocStatus.NEVER
         
-        if num_free_gpu_blocks - need_blocks >= self.watermark_blocks:
+        if self.num_free_gpu_blocks - need_blocks >= self.watermark_blocks:
             # Make sure that we are not holding more than schedule_config.max_num_seqs
             if self.gpu_allocator.get_free_caches() > 0 or len(self.to_free_gpu_caches) > 0:
                 return AllocStatus.OK
@@ -226,6 +226,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # We will assign all blocks for the request now.
             # FIXME: we may use a smaller number if allocated_block_num is too big
             self.cached_free_gpu_blocks -= allocated_block_num
+            self.num_free_gpu_blocks -= allocated_block_num 
 
             if allocated_block_num < need_blocks:
                 to_allocate_num = need_blocks - allocated_block_num
@@ -266,19 +267,16 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         if real_blocks < cache_blocks:
             return True
 
+        to_allocate_reqs = self.total_active_reqs - self.allocated_active_reqs 
         # Simple heuristic: at least one free block for each request.
         # Since we will perform the actual allocation in the next epoch (16 steps), where 
         # each request can allocate one block successfully, then there
         # is no need to preempt. Note that self.cache_free_gpu_blocks 
         # should be included as they will be allocated first in the next epoch 
-        free_blocks = self.num_free_gpu_blocks + self.cached_free_gpu_blocks
-
-        to_allocate_reqs = self.total_active_reqs - self.allocated_active_reqs 
-        # In fact, self.num_free_gpu_blocks         
         #if free_blocks < to_allocate_reqs:
         #    print(f"STOP now!!!!!!Cannot append slots for seq-{seq_group.request_id}, self.total_active_reqs:{self.total_active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr) 
         
-        return free_blocks >= to_allocate_reqs
+        return self.num_free_gpu_blocks >= to_allocate_reqs
         
     # FIXME: there is no handling on num_lookahead_slots, which should be handled.  
     def append_slots(
@@ -311,10 +309,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # Currently this code only supports adding one physical block in the decoding phase
             assert allocated_block_num == logical_blocks_num - 1
 
-            free_blocks = self.num_free_gpu_blocks 
-            self.num_free_gpu_blocks -= logical_blocks_num - allocated_block_num 
+            self.num_free_gpu_blocks -= 1
+          
             if self.num_free_gpu_blocks < 0:
-                print(f"ERROR: self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, cache_id:{cache_id}, free_blocks:{free_blocks}, logical_blocks_num:{logical_blocks_num}, allocated_block:{allocated_block_num}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks}", file=sys.stderr)
+                print(f"ERROR: append_slots for cache_id:{cache_id}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, cache_id:{cache_id}, logical_blocks_num:{logical_blocks_num}, allocated_block:{allocated_block_num}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks}", file=sys.stderr)
 
             self.allocated_gpu_blocks[cache_id] = logical_blocks_num
 
@@ -464,6 +462,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         self.to_free_gpu_caches[cache_id] = free_blocks
         self.cached_free_gpu_blocks += free_blocks
+        self.num_free_gpu_blocks += free_blocks
 
     """
     Free a sequence. We will append the seq to to_free_gpu_caches. 
@@ -537,7 +536,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
             to_free_gpu_caches.append(cache_id)
             self.gpu_allocator.free(cache_id)
-            self.num_free_gpu_blocks += num_blocks
             to_free_blocks += num_blocks 
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         

@@ -485,7 +485,7 @@ class LLMEngine:
             self.model_executor.determine_num_available_blocks())
 
         # DEBUG: in order to trigger the swap faster
-        num_gpu_blocks = 200 
+        num_gpu_blocks = 150 
         print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
@@ -1332,6 +1332,7 @@ class LLMEngine:
             T6 = time.time()
 
         if not self.has_unfinished_requests():
+            print(f"before last step 4, len(ctx.output_queue):{len(ctx.output_queue)}")
             # Drain async postprocessor (if exists)
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)

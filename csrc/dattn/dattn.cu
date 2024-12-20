@@ -276,7 +276,7 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
   region->freeAllPhyMemory();
-  fprintf(stderr, "release region %ld\n", region_id); 
+  //fprintf(stderr, "release region %ld\n", region_id); 
 }
 
 // alloc function, allocate physical memory, map to the reserved virtual address

@@ -319,7 +319,13 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+
+        # The following are added for dAttention support
         self.use_dattn = cache_config.use_dattn
+        # Note make sure that vmm_frequency is the same as that in block_manager_dattn.py
+        self.vmm_frequency = cache_config.vmm_frequency
+        self.vmm_frequency_mask = cache_config.vmm_frequency - 1
+        self.step_index = 0
 
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
@@ -355,7 +361,8 @@ class Scheduler:
                 num_cpu_blocks=num_cpu_blocks,
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching,
-                num_caches=self.scheduler_config.max_num_seqs)
+                num_caches=self.scheduler_config.max_num_seqs, 
+                vmm_frequency = self.vmm_frequency)
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -365,6 +372,14 @@ class Scheduler:
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
+
+        # Two queues used for asynchronous swapping of dAttention
+        # Sequence groups in swapping_in
+        self.swapping_in: Deque[SequenceGroup] = deque()
+
+        # Sequence groups in swapping_out 
+        self.swapping_out: Deque[SequenceGroup] = deque()
+
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
@@ -496,8 +511,12 @@ class Scheduler:
             self.block_manager.free_cross(seq_group)
 
     def has_unfinished_seqs(self) -> bool:
-        return len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0
+        ret = len(self.waiting) != 0 or len(self.running) != 0 or len(
+            self.swapped) != 0 
+
+        if ret == False:
+            print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)}")
+        return ret
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
@@ -628,7 +647,11 @@ class Scheduler:
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
-                        swapped_out.append(victim_seq_group)
+                        if self.use_dattn == True:
+                            #print(f"NOOOOOOOO_schedule_running, adding seq_group to swapping_out, not swapped_out", file=sys.stderr)
+                            self.swapping_out.append(victim_seq_group)
+                        else:
+                            swapped_out.append(victim_seq_group)
 
                 if not cont_loop:
                     break
@@ -660,6 +683,8 @@ class Scheduler:
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
+        #if len(self.running) == 0 and len(decode_seq_groups) == 0 and len(prefill_seq_groups) == 0:
+        print(f"NOOOOOOOO, len(self.running):{len(self.running)}, len(decode_seq_groups):{len(decode_seq_groups)}, len(prefill_seq_groups):{len(prefill_seq_groups)} at step-{self.step_index}", file=sys.stderr)
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
@@ -770,6 +795,122 @@ class Scheduler:
             blocks_to_copy=blocks_to_copy,
             num_lookahead_slots=self._get_num_lookahead_slots(
                 is_prefill=False),
+            infeasible_seq_groups=infeasible_seq_groups,
+        )
+
+    # A new scheduling for dattn, where the swapped-in requests cannot be 
+    # inserted into the running queue directly, as the memory is not yet prepared
+    # Instead, the next epoch can be 
+    def _schedule_swapped_async(
+        self,
+        budget: SchedulingBudget,
+        curr_loras: Optional[Set[int]],
+        enable_chunking: bool = False,
+    ) -> SchedulerSwappedInOutputs:
+        """Schedule sequence groups that are swapped out. """
+        # Blocks that need to be swapped or copied before model execution.
+        blocks_to_swap_in: List[Tuple[int, int]] = []
+        blocks_to_copy: List[Tuple[int, int]] = []
+        decode_seq_groups: List[ScheduledSequenceGroup] = []
+        prefill_seq_groups: List[ScheduledSequenceGroup] = []
+        infeasible_seq_groups: List[SequenceGroup] = []
+        
+        # TODO: make sure that the time has passed a period (e.g. 16 steps)
+        #if (self.step_index & self.vmm_frequency_mask) and len(self.running) != 0:
+        if self.step_index & self.vmm_frequency_mask:
+ 
+            return SchedulerSwappedInOutputs(
+                decode_seq_groups=decode_seq_groups,
+                prefill_seq_groups=prefill_seq_groups,
+                blocks_to_swap_in=blocks_to_swap_in,
+                blocks_to_copy=blocks_to_copy,
+                num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=False),
+                infeasible_seq_groups=infeasible_seq_groups,
+            )
+
+        #if len(self.running) == 0:
+        #    print(f"NNNNNNNNN Adding more requests from swapped queue!", file=sys.stderr)
+
+        # For all requests in the swapping_in queue, adding to the RUNNING queue. 
+        for seq_group in self.swapping_in:
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
+                seq.status = SequenceStatus.RUNNING
+
+            is_prefill = seq_group.is_prefill()
+            if is_prefill:
+                prefill_seq_groups.append(
+                    ScheduledSequenceGroup(seq_group,
+                                           token_chunk_size=num_new_tokens))
+            else:
+                decode_seq_groups.append(
+                    ScheduledSequenceGroup(seq_group, token_chunk_size=1))
+
+            self.swapping_in.popleft()
+        #self.swapping_in.clear()
+
+        # Check all requests in the swapped queue, check whether it is necessary to 
+        # to swap in. 
+        swapped_queue = self.swapped
+        leftover_swapped: Deque[SequenceGroup] = deque()
+        while swapped_queue:
+            # NOTE: the swapping order is first-in-last-out
+            seq_group = swapped_queue[0]
+
+            is_prefill = seq_group.is_prefill()
+
+            # If the sequence group cannot be swapped in, stop.
+            alloc_status = self.block_manager.can_swap_in(
+                seq_group, self._get_num_lookahead_slots(is_prefill))
+            if alloc_status == AllocStatus.LATER:
+                break
+            elif alloc_status == AllocStatus.NEVER:
+                logger.warning(
+                    "Failing the request %s because there's not enough kv "
+                    "cache blocks to run the entire sequence.",
+                    seq_group.request_id)
+                for seq in seq_group.get_seqs():
+                    seq.status = SequenceStatus.FINISHED_IGNORED
+                infeasible_seq_groups.append(seq_group)
+                swapped_queue.popleft()
+                continue
+
+            # The total number of sequences in the RUNNING state should not
+            # exceed the maximum number of sequences.
+            num_new_seqs = seq_group.get_max_num_running_seqs()
+            num_new_tokens = self._get_num_new_tokens(seq_group,
+                                                      SequenceStatus.SWAPPED,
+                                                      enable_chunking, budget)
+
+            if (num_new_tokens == 0
+                    or not budget.can_schedule(num_new_tokens=num_new_tokens,
+                                               num_new_seqs=num_new_seqs)):
+                break
+
+            swapped_queue.popleft()
+
+            # We will invoke the asynchronous swapping_in
+            self._swap_in_async(seq_group, blocks_to_swap_in)
+
+            budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
+            budget.add_num_seqs(seq_group.request_id, num_new_seqs)
+
+        # Now for all requests in the swapping_out queue, adding to the swapped queue. 
+        # Also, changed the status to swapped_out
+        for seq_group in self.swapping_out:
+            for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
+                seq.status = SequenceStatus.SWAPPED
+            self.swapped_out.append(seq_group)
+        # Added to the swapped queue. 
+        #self.swapped_out.extend(self.swapping_out)
+        
+        self.swapping_out.clear()
+
+        return SchedulerSwappedInOutputs(
+            decode_seq_groups=decode_seq_groups,
+            prefill_seq_groups=prefill_seq_groups,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_copy=blocks_to_copy,
+            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=False),
             infeasible_seq_groups=infeasible_seq_groups,
         )
 
@@ -1288,6 +1429,9 @@ class Scheduler:
         # Move to next cache (if exists)
         self.cache_id = self.next_cache_id
 
+        # Update self.step_index for dAttention support
+        self.step_index += 1
+
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,
                 allow_async_output_proc)
@@ -1446,6 +1590,16 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
 
+    def _swap_in_async(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_in: List[Tuple[int, int]],
+    ) -> None:
+        mapping = self.block_manager.swap_in(seq_group)
+        blocks_to_swap_in.extend(mapping)
+        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
+            seq.status = SequenceStatus.SWAPPING
+
     def _swap_out(
         self,
         seq_group: SequenceGroup,
@@ -1461,6 +1615,22 @@ class Scheduler:
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
+
+    def _swap_out_async(
+        self,
+        seq_group: SequenceGroup,
+        blocks_to_swap_out: List[Tuple[int, int]],
+    ) -> None:
+        if not self.block_manager.can_swap_out(seq_group):
+            # FIXME(woosuk): Abort the sequence group instead of aborting the
+            # entire engine.
+            raise RuntimeError(
+                "Aborted due to the lack of CPU swap space. Please increase "
+                "the swap space to avoid this error.")
+        mapping = self.block_manager.swap_out(seq_group)
+        blocks_to_swap_out.extend(mapping)
+        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            seq.status = SequenceStatus.SWAPPING
 
     def _passed_delay(self, now: float) -> bool:
         if self.prev_prompt:

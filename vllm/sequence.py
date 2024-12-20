@@ -55,7 +55,8 @@ class SequenceStatus(enum.IntEnum):
     WAITING = 0
     RUNNING = 1
     SWAPPED = 2
-    # Note: anything after SWAPPED (2) will be considered
+    SWAPPING = 7
+    # Note: anything after this will be considered
     # as a finished status.
     FINISHED_STOPPED = 3
     FINISHED_LENGTH_CAPPED = 4

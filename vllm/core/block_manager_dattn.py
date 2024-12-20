@@ -74,7 +74,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.vmm_frequency = vmm_frequency
         self.vmm_frequency_mask = vmm_frequency - 1 
         
-
         # Tracking the number of gpu_blocks (including self.cached_free_gpu_blocks) 
         self.num_free_gpu_blocks = num_gpu_blocks
         self.num_free_cpu_blocks = num_cpu_blocks
@@ -439,7 +438,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # After the swapped out, num_free_cpu_blocks should be decremented 
             self.num_free_cpu_blocks -= real_gpu_blocks
             
-            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, freeCPUBlocks:{self.num_free_cpu_blocks},  gpu_cache_id:{gpu_cache_id}, blocks:{real_gpu_blocks} at step-{self.step_index}, requests:{self.total_active_reqs}", file=sys.stderr)
+            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, freeCPUBlocks:{self.num_free_cpu_blocks}, freeGPUBlocks:{self.num_free_gpu_blocks},  gpu_cache_id:{gpu_cache_id}, blocks:{real_gpu_blocks} at step-{self.step_index}, requests:{self.total_active_reqs}", file=sys.stderr)
             
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, real_gpu_blocks]) 
 

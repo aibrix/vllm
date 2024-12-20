@@ -1414,7 +1414,7 @@ class Scheduler:
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
-            print(f"_preempt_by_recompute, free_seq:{seq.seq_id}", file=sys.stderr)
+            # print(f"_preempt_by_recompute, free_seq:{seq.seq_id}", file=sys.stderr)
             self.free_seq(seq)
             seq.reset_state_for_recompute()
 

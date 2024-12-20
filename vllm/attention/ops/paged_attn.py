@@ -279,8 +279,10 @@ class PagedAttention:
             alibi_slopes,
             k_scale,
             v_scale,     
-        ) 
+        )
 
+        # if (use_reduce):
+        #     print(f'QQQ max_logits:{max_logits}')
         return output
     
     @staticmethod

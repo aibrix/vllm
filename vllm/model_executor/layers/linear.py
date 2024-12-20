@@ -132,9 +132,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        func = ops.flat_gemm if x.shape[0] <= 8 else F.linear
+        # Vanilla
+        return F.linear(x, layer.weight, bias)
 
-        return func(x, layer.weight, bias)
+        # FD++
+        # func = ops.flat_gemm if x.shape[0] <= 8 else F.linear
+
+        # return func(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):

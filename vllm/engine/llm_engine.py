@@ -1180,7 +1180,7 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
-        print(f"step-{self.step_index}", file=sys.stderr)
+        # print(f"step-{self.step_index}", file=sys.stderr)
         # Update the step index
         self.step_index += 1
 
@@ -1358,7 +1358,7 @@ class LLMEngine:
             self.total_time += T7 - T1
 
             if self.step_index % 512 == 0:
-                print(f"STEP-{self.step_index}: sched-{self.sched_time}, inference-{self.infer_time}, proc-{self.proc_time}, other-{self.other_time}, total-{self.total_time}", file=sys.stderr)
+                # print(f"STEP-{self.step_index}: sched-{self.sched_time}, inference-{self.infer_time}, proc-{self.proc_time}, other-{self.other_time}, total-{self.total_time}", file=sys.stderr)
                 self.sched_time = 0
                 self.infer_time = 0
                 self.proc_time = 0

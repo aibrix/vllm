@@ -46,10 +46,9 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 
 //0930 1 1  000000     loc1722andfunc
-///* DATTN_UNIFIED_QK_MAX & DATTN_SHIFT_PERHEAD_QKMAX cannot be on at the same time */
 /* DATTN_SHIFT_PERHEAD_QKMAX relies on DATTN_UNIFIED_QK_MAX */
 #define DATTN_UNIFIED_QK_MAX 1 // 0:Vanilla 1:Unified qk_max
-#define DATTN_SHIFT_PERHEAD_QKMAX 0 // 0:Unified qk_max 1:Shifting window per-head qk_max
+#define DATTN_SHIFT_PERHEAD_QKMAX 1 // 0:Unified qk_max 1:Shifting window per-head qk_max
 #define DATTN_DEBUG_OVERFLOW_ROLLBACK 0 // 1:statistics 0:perf
 #define DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE 0
 #define VANILLA_DEBUG_PERHEAD_QKMAX 0 // Cannot run - no layer_num info passed in
@@ -1126,11 +1125,6 @@ __global__ void dattention_kernel(
     }
   }
   
-  if(to_profile2) {
-    time2 = clock64();
-    newTime += time2 - time0; 
-    time1 = time2; 
-  } 
   
   __syncthreads(); // this works but not very sure why yet
 
@@ -1422,7 +1416,7 @@ void paged_attention_v1_launcher(
   int shared_mem_size = std::max(logits_size, outputs_size);
 
   
-  fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_seq_len %ld\n", num_heads*num_seqs, num_heads, num_seqs, max_seq_len);
+  // fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_seq_len %ld\n", num_heads*num_seqs, num_heads, num_seqs, max_seq_len);
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
@@ -1582,11 +1576,11 @@ void paged_attention_v2_launcher(
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
 
   // For paged attention v2 kernel.
-  fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
+  // fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
   dim3 grid(num_heads, num_seqs, max_num_partitions);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
-  fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
+  // fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
   // For paged attention v2 reduce kernel.
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
@@ -1863,14 +1857,14 @@ void dattention_launcher(
 
   dim3 grid(num_heads, num_seqs, max_num_partitions);
 
-  fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
+  // fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
 
   // each thread block will be 128 threads
   dim3 block(NUM_THREADS);
 
 
-  if(use_reduce)
-    fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
+  // if(use_reduce)
+    // fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
 
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
@@ -1916,16 +1910,6 @@ void dattention_launcher(
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }  
-
-  if(to_profile) {
-    cudaDeviceSynchronize();
-    end_time = std::chrono::high_resolution_clock::now();
-    total += end_time - start_time; 
-    if(step_index % 512 == 0) {
-      fprintf(stderr, "step_index-%ld time %f\n", step_index, total);  
-      total = std::chrono::duration<double, std::milli>(0); 
-    }
-  }
 
 #if DATTN_DEBUG_OVERFLOW_ROLLBACK_USING_VARIABLE // rollback counter
   // TODO: I don't know when is done..... I cannot do&free it all at once

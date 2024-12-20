@@ -761,17 +761,17 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             if self.profile == True:
                 self.attent_time += time.time() - start_time
             
-        if self.profile == True:
-            #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}", file=sys.stderr) 
-            if self.step % 512 == 0:
-                if layer_idx % 16 == 1: 
-                    #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
-                    print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}, portion: 1-{self.attent_time/self.cache_time}", file=sys.stderr)
-                print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
-                self.cache_time = 0
-                self.attent_time = 0
-                self.schedule_time = 0
-            self.stop_time = time.time()
+        # if self.profile == True:
+        #     #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}", file=sys.stderr) 
+        #     if self.step % 512 == 0:
+        #         # if layer_idx % 16 == 1: 
+        #             #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
+        #             # print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}, portion: 1-{self.attent_time/self.cache_time}", file=sys.stderr)
+        #         # print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
+        #         self.cache_time = 0
+        #         self.attent_time = 0
+        #         self.schedule_time = 0
+        #     self.stop_time = time.time()
 
         # Reshape the output tensor.
         result = output.view(-1, self.num_heads * self.head_size)

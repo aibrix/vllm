@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import numpy as np
 import time
@@ -10,14 +11,14 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import ModelConfig, ParallelConfig
+from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              get_tensor_model_parallel_world_size)
 from vllm.distributed.communication_op import (tensor_model_parallel_all_reduce,
                                                tensor_model_parallel_broadcast_object_list,
                                                tensor_model_parallel_broadcast,)
 from vllm.sequence import (SequenceData, SequenceGroupMetadata)
-from vllm.utils import init_logger, ObjectPool
+from vllm.utils import init_logger, make_async, ObjectPool
 
 try:
     from vineyard.llm import KVCache as VineyardKVCache
@@ -72,6 +73,7 @@ class VineyardLLMCache:
         enable_async_update: bool = False,
         min_inflight_tasks: int = 1,
         max_inflight_tasks: int = 1,
+        chunked_prefill_enabled: bool = False,
     ):
         self._init_vineyard_logger()
 
@@ -106,8 +108,18 @@ class VineyardLLMCache:
         # + chunk_size in the case of context_len is not aligned with chunk_size.
         self.max_num_batched_tokens += self.chunk_size
 
-        self.fetch_buffer, self.fetch_tensors = self._pinned_tensor_creator()
-        self.cuda_buffer = self.fetch_buffer.cuda()
+        fetch_buffer, fetch_tensors = self._pinned_tensor_creator()
+        self.cuda_buffer = fetch_buffer.cuda()
+        self.fetch_buffers = [fetch_buffer]
+        self.fetch_tensors = [fetch_tensors]
+        # if chunked prefill is not enabled, we will use another fetch buffer to overlap
+        # llm cache query and kv cache loading
+        if not chunked_prefill_enabled:
+            fetch_buffer, fetch_tensors = self._pinned_tensor_creator()
+            self.fetch_buffers.append(fetch_buffer)
+            self.fetch_tensors.append(fetch_tensors)
+
+        self.enable_async_update = False
         self.enable_async_update = enable_async_update
 
         if self.enable_async_update:
@@ -187,8 +199,8 @@ class VineyardLLMCache:
     def from_envs(
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
         kv_cache_dtype: str,
-        max_num_batched_tokens: int,
         torch_dtype: torch.dtype = torch.bfloat16,
         metrics: CacheServiceMetrics = None,
     ) -> Optional["VineyardLLMCache"]:
@@ -196,9 +208,12 @@ class VineyardLLMCache:
             logger.warn("VineyardKVCache module is not available")
             return None
 
-        if not envs.VLLM_USE_FLASH_ATTN_DECODING:
-            logger.warn("VineyardLLMCache requires flash attention decoding")
-            return None
+        # if chunked prefill is enabled, we will use the max_num_batched_tokens,
+        # otherwise, we will use at most 512 tokens as the num of batched tokens.
+        if scheduler_config.chunked_prefill_enabled:
+            num_batched_tokens = scheduler_config.max_num_batched_tokens
+        else:
+            num_batched_tokens = min(scheduler_config.max_num_batched_tokens, 512)
 
         cpu_mem_limit = int(envs.VINEYARD_CACHE_CPU_MEM_LIMIT_GB * 1024**3)
         head_size = model_config.get_head_size()
@@ -209,6 +224,11 @@ class VineyardLLMCache:
         # we will use one temp buffer to hold the kv tensors fetched from v6d cache
         # , i.e., `fetch_buffer`
         num_temp_cpu_buffer = 1
+        # if chunked prefill is not enabled, we will use another temp buffer to overlap
+        # llm cache query and kv cache loading
+        if not scheduler_config.chunked_prefill_enabled:
+            num_temp_cpu_buffer += 1
+
         kwargs = {}
 
         # if async update is enabled, we will use a portion of cpu memory as temp
@@ -218,7 +238,7 @@ class VineyardLLMCache:
             async_update_cpu_mem_util = envs.VINEYARD_CACHE_ASYNC_UPDATE_CPU_MEM_UTIL
             async_update_cpu_mem_limit = async_update_cpu_mem_util * cpu_mem_limit
             max_inflight_tasks = int(
-                async_update_cpu_mem_limit // (max_num_batched_tokens * token_nbytes)
+                async_update_cpu_mem_limit // (num_batched_tokens * token_nbytes)
             )
             max_inflight_tasks = min(max_inflight_tasks, envs.VINEYARD_CACHE_MAX_INFLIGHT_TASKS)
             num_temp_cpu_buffer += max_inflight_tasks
@@ -229,19 +249,19 @@ class VineyardLLMCache:
 
         # convert cache capacity to number of tokens
         cache_capacity = (
-            cpu_mem_limit
-            - num_temp_cpu_buffer * max_num_batched_tokens * token_nbytes
+            cpu_mem_limit - num_temp_cpu_buffer * num_batched_tokens * token_nbytes
         ) // token_nbytes
         logger.info(f"VineyardLLMCache from_envs {metrics}")
         return VineyardLLMCache(
             head_size=head_size,
             num_kv_heads=num_kv_heads,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_num_batched_tokens=num_batched_tokens,
             cache_capacity=cache_capacity,
             layer=num_layers,
             kv_cache_dtype=kv_cache_dtype,
             torch_dtype=torch_dtype,
-            metrics = metrics,
+            metrics=metrics,
+            chunked_prefill_enabled=scheduler_config.chunked_prefill_enabled,
             **kwargs,
         )
 
@@ -258,69 +278,28 @@ class VineyardLLMCache:
             seq_data.update_num_computed_tokens(value)
             seq_group_metadata.token_chunk_size -= value
 
-    def prefetch_seq_kv_caches(
-        self,
-        seq_group_metadata: SequenceGroupMetadata,
-        kv_caches: List[torch.Tensor],
-        block_size: int,
-        is_comp_skippable: bool,
-    ) -> Tuple[str, int]:
-        from vllm._custom_ops import reshape_and_cache_flash
-        if get_tensor_model_parallel_rank() == 0:
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            assert len(seq_ids) == 1
-            seq_id = seq_ids[0]
-            seq_data = seq_group_metadata.seq_data[seq_id]
-
-            context_len = seq_data.get_num_computed_tokens()
-            token_chunk_size = seq_group_metadata.token_chunk_size
-            tokens = seq_data.get_prompt_token_ids()
-
-            # Previously, at least one token is left unmatched to always trigger sampling.
-            # However, when there is full KV cache hit, there is no need to sample
-            # unless it is explicitly required.
-            # # leave at least one token unmatched
-            # token_chunk_size -= 1
-
-            # alignment `context_len` to `self.chunk_size`
-            query_context_len = context_len - context_len % self.chunk_size
-            query_token_size = context_len + token_chunk_size - query_context_len
-            # align `query_token_size` to the next multiple of `self.chunk_size`.
-            # suppose `query_token_size` is 511 and `self.chunk_size` is 16, rather
-            # than using 496 to query, we use 512 in order to reduce the number of
-            # tokens to be recomputed.
-            query_token_size = (
-                (query_token_size + self.chunk_size - 1)
-                // self.chunk_size
-                * self.chunk_size
-            )
-            query_token_size = min(query_token_size, len(tokens) - query_context_len)
-            query_prefix = tokens[:query_context_len]
-            query_tokens = tokens[query_context_len:query_context_len + query_token_size]
-            query_args = [
-                seq_id,
-                context_len,
-                token_chunk_size,
-                query_context_len,
-                query_token_size,
-                query_prefix,
-                query_tokens,
-            ]
-            tensor_model_parallel_broadcast_object_list(query_args, src=0)
-        else:
-            query_args = [None, None, None, None, None, None, None]
-            tensor_model_parallel_broadcast_object_list(query_args, src=0)
-            (seq_id,
-             context_len,
-             token_chunk_size,
-             query_context_len,
-             query_token_size,
-             query_prefix,
-             query_tokens
-            ) = query_args
+    def _query_kv_cache(
+        self, context_len: int, batch_size: int, tokens: List[int], block_size: int,
+        fetch_tensors: List[List[Tuple[VineyardKVTensor, VineyardKVTensor]]],
+    ) -> int:
+        # alignment `context_len` to `self.chunk_size`
+        query_context_len = context_len - context_len % self.chunk_size
+        query_token_size = context_len + batch_size - query_context_len
+        # align `query_token_size` to the next multiple of `self.chunk_size`.
+        # suppose `query_token_size` is 511 and `self.chunk_size` is 16, rather
+        # than using 496 to query, we use 512 in order to reduce the number of
+        # tokens to be recomputed.
+        query_token_size = (
+            (query_token_size + self.chunk_size - 1)
+            // self.chunk_size
+            * self.chunk_size
+        )
+        query_token_size = min(query_token_size, len(tokens) - query_context_len)
+        query_prefix = tokens[:query_context_len]
+        query_tokens = tokens[query_context_len:query_context_len + query_token_size]
 
         if query_token_size <= 0:
-            return seq_id, 0
+            return 0
 
         start_time = time.perf_counter()
         matched = 0
@@ -328,31 +307,56 @@ class VineyardLLMCache:
             matched = self.cache.query(
                 prefix=query_prefix,
                 tokens=query_tokens,
-                kv_cache_list=self.fetch_tensors[:query_token_size],
+                kv_cache_list=fetch_tensors[:query_token_size],
             )
         except Exception:
             self.metrics.err_query += 1
         duration = time.perf_counter() - start_time
         self.metrics.time_query.append(duration)
-        self.metrics.normalized_time_query.append(duration/(len(query_tokens) + len(query_prefix)))
+        self.metrics.normalized_time_query.append(duration/len(query_tokens))
+
+        self.metrics.total_tokens += query_token_size
+        self.metrics.total_blocks += ((-query_token_size) // (-block_size))
+        self.metrics.counter += 1
+
+        return matched
+
+    async def _batch_prefetch_seq_kv_caches(
+        self,
+        context_len: int,
+        batch_size: int,
+        query_fut: asyncio.Future,
+        is_comp_skippable: bool,
+    ) -> int:
+        matched = await query_fut
         # shift
         offset = context_len % self.chunk_size
         matched -= offset
         # If not comp skippable or sampling is required, we need to leave one token unmatched
         # to trigger the following sampling step in engine worker's workflow.
-        if not is_comp_skippable or (
-            seq_group_metadata is not None and seq_group_metadata.is_sampling_enabled
-        ):
-            matched = min(matched, token_chunk_size - 1)
+        if not is_comp_skippable:
+            matched = min(matched, batch_size - 1)
         else:
-            matched = min(matched, token_chunk_size)
+            matched = min(matched, batch_size)
         # synchronized across tensor parallel ranks
         matched_tensor = torch.tensor([matched], dtype=torch.long, device='cuda')
         tensor_model_parallel_all_reduce(input_=matched_tensor, op=torch.distributed.ReduceOp.MIN)
         matched = matched_tensor[0].item()
 
-        if matched <= 0:
-            return seq_id, 0
+        return matched if matched > 0 else 0
+
+    def _load_seq_kv_caches(
+        self,
+        seq_id: str,
+        context_len: int,
+        matched: int,
+        fetch_buffer: torch.Tensor,
+        seq_group_metadata: SequenceGroupMetadata,
+        kv_caches: List[torch.Tensor],
+        block_size: int,
+    ) -> None:
+        from vllm._custom_ops import reshape_and_cache_flash
+
         if get_tensor_model_parallel_rank() == 0:
             block_table = seq_group_metadata.block_tables[seq_id]
             slot_mapping = []
@@ -367,10 +371,9 @@ class VineyardLLMCache:
             slot_mapping = torch.zeros((matched,), dtype=torch.long, device='cuda')
             tensor_model_parallel_broadcast(slot_mapping, src=0)
         self.metrics.hit_tokens += matched
-        self.metrics.total_tokens += query_token_size
         self.metrics.hit_blocks += (matched // block_size)
-        self.metrics.total_blocks += ((-query_token_size) // (-block_size))
-        self.metrics.counter += 1
+
+        offset = context_len % self.chunk_size
 
         # save to GPU kv cache
         torch.cuda.synchronize()
@@ -382,13 +385,13 @@ class VineyardLLMCache:
         # efficient than performing multiple smaller copy operations. This
         # approach reduces the number of transfers between CPU and GPU,
         # leading to faster overall performance.
-        buffer = self.cuda_buffer.copy_(self.fetch_buffer)[:, :, offset:offset + matched]
+        buffer = self.cuda_buffer.copy_(fetch_buffer)[:, :, offset:offset + matched]
         copy_end.record()
         copy_end.synchronize()
         duration = copy_start.elapsed_time(copy_end) / 1000.0
         self.metrics.time_load.append(duration)
         self.metrics.normalized_time_load.append(0 if matched == 0 else duration/matched)
-        
+
         torch.cuda.synchronize()
         reshape_start = torch.cuda.Event(enable_timing=True)
         reshape_end = torch.cuda.Event(enable_timing=True)
@@ -412,10 +415,121 @@ class VineyardLLMCache:
         self.metrics.time_reshape.append(duration)
         self.metrics.normalized_time_reshape.append(0 if matched == 0 else duration/matched)
 
-        # update the seq_group_metadata's and seq's metadata
-        self._update_seq_group_metadata(seq_group_metadata, matched)
+    async def prefetch_seq_kv_caches(
+        self,
+        seq_group_metadata: SequenceGroupMetadata,
+        kv_caches: List[torch.Tensor],
+        block_size: int,
+        is_comp_skippable: bool,
+    ) -> Tuple[str, int]:
+        if get_tensor_model_parallel_rank() == 0:
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            assert len(seq_ids) == 1
+            seq_id = seq_ids[0]
+            seq_data = seq_group_metadata.seq_data[seq_id]
 
-        return seq_id, matched
+            context_len = seq_data.get_num_computed_tokens()
+            token_chunk_size = seq_group_metadata.token_chunk_size
+            tokens = seq_data.get_prompt_token_ids()
+            all_tokens = tokens[:context_len+token_chunk_size]
+
+            query_args = [
+                seq_id,
+                context_len,
+                token_chunk_size,
+                all_tokens,
+            ]
+            tensor_model_parallel_broadcast_object_list(query_args, src=0)
+        else:
+            query_args = [None, None, None, None]
+            tensor_model_parallel_broadcast_object_list(query_args, src=0)
+            (seq_id,
+             context_len,
+             token_chunk_size,
+             all_tokens,
+            ) = query_args
+
+        batch_context_len = context_len
+        total_matched = 0
+        prev_fut = None
+        prev_args = None
+        index = 0
+        # in each loop, if we have a pending async query task (Ti), wait for its result
+        # and issue the next async query task (Tj) if any, and then load the fetched
+        # kv tensors of Ti to the gpu kv caches. This machinism is to overlap the
+        # time of querying and loading the fetched kv tensors.
+        #
+        # Note that, the async query task (Tj) is issued only if the previous async query
+        # task (Ti) is finished and fully matched.
+        while batch_context_len < context_len + token_chunk_size or prev_fut is not None:
+            matched = 0
+            issue_next_query = True
+            if prev_fut is not None:
+                (prev_context_len, prev_batch_size, _, is_prev_batch_comp_skippable) = prev_args
+                matched = await self._batch_prefetch_seq_kv_caches(
+                    prev_context_len,
+                    prev_batch_size,
+                    prev_fut,
+                    is_prev_batch_comp_skippable,
+                )
+
+                total_matched += matched if matched > 0 else 0
+
+                # if the prev batch is partially matched, we don't issue next query
+                if matched != prev_batch_size:
+                    issue_next_query = False
+
+            curr_fut = None
+            curr_args = None
+            # if we have more query task to issue
+            if issue_next_query and batch_context_len < context_len + token_chunk_size:
+                batch_size = min(
+                    self.max_num_batched_tokens, len(all_tokens) - batch_context_len
+                )
+
+                # intermediate batches are comp skippable
+                is_batch_comp_skippable = True
+                if batch_context_len + batch_size >= context_len + token_chunk_size:
+                    if not is_comp_skippable or (
+                        seq_group_metadata is not None
+                        and seq_group_metadata.is_sampling_enabled
+                    ):
+                        is_batch_comp_skippable = False
+
+                curr_fetch_tensors = self.fetch_tensors[index % len(self.fetch_tensors)]
+                # query asynchronously
+                curr_fut = make_async(self._query_kv_cache)(
+                    batch_context_len,
+                    batch_size,
+                    all_tokens,
+                    block_size,
+                    curr_fetch_tensors,
+                )
+                curr_args = (batch_context_len, batch_size, index, is_batch_comp_skippable)
+
+            # let's load the fetched kv tensors to the GPU
+            if prev_fut is not None and matched > 0:
+                (prev_context_len, prev_batch_size, prev_index, _) = prev_args
+                prev_fetch_buffer = self.fetch_buffers[prev_index % len(self.fetch_buffers)]
+                self._load_seq_kv_caches(
+                    seq_id,
+                    prev_context_len,
+                    matched,
+                    prev_fetch_buffer,
+                    seq_group_metadata,
+                    kv_caches,
+                    block_size,
+                )
+
+            index += 1
+            batch_context_len += batch_size
+            prev_fut = curr_fut
+            prev_args = curr_args
+
+        # update the seq_group_metadata's and seq's metadata
+        self._update_seq_group_metadata(seq_group_metadata, total_matched)
+
+        return seq_id, total_matched
 
     def prefetch_kv_caches(
         self,
@@ -428,7 +542,7 @@ class VineyardLLMCache:
         '''
         if block_size is None or kv_caches[0] is None:  # profile run
             return {}
-        # skippable only if the seq_group_metadata_list contains a single element 
+        # skippable only if the seq_group_metadata_list contains a single element
         is_comp_skippable = True
         if get_tensor_model_parallel_rank() == 0:
             prefill_requests = []
@@ -446,9 +560,9 @@ class VineyardLLMCache:
         num_prefill_requests = num_prefill_requests[0]
         matched = {}
         for seq_group_meta in prefill_requests:
-            seq_id, seq_matched = self.prefetch_seq_kv_caches(
+            seq_id, seq_matched = asyncio.run(self.prefetch_seq_kv_caches(
                 seq_group_meta, kv_caches, block_size, is_comp_skippable,
-            )
+            ))
             matched[seq_id] = seq_matched
         if matched:
             logger.debug(f"prefetch_kv_caches: matched=%r", matched)
@@ -478,6 +592,7 @@ class VineyardLLMCache:
                                   operation.
             scheduled_time: The timestamp that the task is scheduled.
         '''
+        updated = 0
         try:
             start_time = time.perf_counter()
             queue_duration = start_time - scheduled_time
@@ -504,83 +619,31 @@ class VineyardLLMCache:
         finally:
             if self.enable_async_update:
                 self.tensor_pool.put(buffer_tensors_tuple)
+            return updated
 
-    def update_seq_kv_caches(
+    def _batch_update_seq_kv_caches(
         self,
-        matched: Dict[str, int],
-        seq_group_metadata: SequenceGroupMetadata,
+        update_prefix: List[int],
+        update_tokens: List[int],
+        update_token_size: int,
+        slot_mapping: torch.Tensor,
         kv_caches: List[torch.Tensor],
         block_size: int,
-    ) -> None:
-        if get_tensor_model_parallel_rank() == 0:
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            assert len(seq_ids) == 1
-            seq_id = seq_ids[0]
-            seq_data = seq_group_metadata.seq_data[seq_id]
-
-            context_len = seq_data.get_num_computed_tokens()
-            token_chunk_size = seq_group_metadata.token_chunk_size
-            tokens = seq_data.get_prompt_token_ids()
-
-            # alignment `context_len` to `self.chunk_size`
-            update_context_len = context_len - context_len % self.chunk_size
-            update_token_size = context_len + token_chunk_size - update_context_len
-            update_token_size -= update_token_size % self.chunk_size
-            update_prefix = tokens[:update_context_len]
-            update_tokens = tokens[update_context_len:update_context_len+update_token_size]
-
-            update_args = [
-                seq_id,
-                update_context_len,
-                update_token_size,
-                update_prefix,
-                update_tokens,
-            ]
-            tensor_model_parallel_broadcast_object_list(update_args, src=0)
-        else:
-            update_args = [None, None, None, None, None]
-            tensor_model_parallel_broadcast_object_list(update_args, src=0)
-            (seq_id,
-             update_context_len,
-             update_token_size,
-             update_prefix,
-             update_tokens,
-            ) = update_args
-        if update_token_size <= 0:
-            # restore the seq_group_metadata's and seq's metadata
-            self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
-            return
-        
-        if get_tensor_model_parallel_rank() == 0:
-            block_table = seq_group_metadata.block_tables[seq_id]
-            slot_mapping = []
-            for i in range(update_context_len, update_context_len + update_token_size):
-                block_number = block_table[i // block_size]
-                block_offset = i % block_size
-                slot = block_number * block_size + block_offset
-                slot_mapping.append(slot)
-            slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
-            tensor_model_parallel_broadcast(slot_mapping, src=0)
-        else:
-            slot_mapping = torch.zeros((update_token_size,), dtype=torch.long, device='cuda')
-            tensor_model_parallel_broadcast(slot_mapping, src=0)
-
+    ) -> int:
         if self.enable_async_update:
             buffer_tensors_tuple = self.tensor_pool.get(block=False)
             # buffer_tensors_tuple is None means that we have max number of async
             # updates in the flight. Right now, we just skip updates if we have no
             # buffer.
             if buffer_tensors_tuple is None:
-                # restore the seq_group_metadata's and seq's metadata
-                self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
-                return
+                return 0
         else:
             # if async update is disabled, its safe to reuse the same buffer and
             # tensors used in the fetch operation
-            buffer_tensors_tuple = self.fetch_buffer, self.fetch_tensors
+            buffer_tensors_tuple = self.fetch_buffers[0], self.fetch_tensors[0]
 
+        ret = 1
         update_buffer, _ = buffer_tensors_tuple
-
 
         # fetch from GPU kv cache
         torch.cuda.synchronize()
@@ -621,11 +684,100 @@ class VineyardLLMCache:
                 self.metrics.err_async_update_task_queue_full += 1
                 self.tensor_pool.put(buffer_tensors_tuple)
         else:
-            update_task()
+            ret = 1 if update_task() > 0 else 0
 
         duration = time.perf_counter() - start_time
         self.metrics.time_update.append(duration)   
         self.metrics.normalized_time_update.append(0 if update_token_size == 0 else duration/update_token_size)
+
+        return ret
+
+    def update_seq_kv_caches(
+        self,
+        matched: Dict[str, int],
+        seq_group_metadata: SequenceGroupMetadata,
+        kv_caches: List[torch.Tensor],
+        block_size: int,
+    ) -> None:
+        if get_tensor_model_parallel_rank() == 0:
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            assert len(seq_ids) == 1
+            seq_id = seq_ids[0]
+            seq_data = seq_group_metadata.seq_data[seq_id]
+
+            context_len = seq_data.get_num_computed_tokens()
+            token_chunk_size = seq_group_metadata.token_chunk_size
+            tokens = seq_data.get_prompt_token_ids()
+
+            # alignment `context_len` to `self.chunk_size`
+            update_context_len = context_len - context_len % self.chunk_size
+            update_token_size = context_len + token_chunk_size - update_context_len
+            update_token_size -= update_token_size % self.chunk_size
+            all_tokens = tokens[:update_context_len+update_token_size]
+
+            update_args = [
+                seq_id,
+                update_context_len,
+                update_token_size,
+                all_tokens,
+            ]
+            tensor_model_parallel_broadcast_object_list(update_args, src=0)
+        else:
+            update_args = [None, None, None, None]
+            tensor_model_parallel_broadcast_object_list(update_args, src=0)
+            (seq_id,
+             update_context_len,
+             update_token_size,
+             all_tokens,
+            ) = update_args
+        if update_token_size <= 0:
+            # restore the seq_group_metadata's and seq's metadata
+            self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])
+            return
+
+        if get_tensor_model_parallel_rank() == 0:
+            block_table = seq_group_metadata.block_tables[seq_id]
+            slot_mapping = []
+            for i in range(update_context_len, update_context_len + update_token_size):
+                block_number = block_table[i // block_size]
+                block_offset = i % block_size
+                slot = block_number * block_size + block_offset
+                slot_mapping.append(slot)
+            slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
+            tensor_model_parallel_broadcast(slot_mapping, src=0)
+        else:
+            slot_mapping = torch.zeros((update_token_size,), dtype=torch.long, device='cuda')
+            tensor_model_parallel_broadcast(slot_mapping, src=0)
+
+        batch_context_len = update_context_len
+        while batch_context_len < update_context_len + update_token_size:
+            batch_prefix = all_tokens[:batch_context_len]
+            batch_size = min(
+                self.max_num_batched_tokens, len(all_tokens) - batch_context_len
+            )
+            batch_tokens = all_tokens[batch_context_len:batch_context_len+batch_size]
+            batch_slot_mapping_offset = batch_context_len - update_context_len
+            ret_code = self._batch_update_seq_kv_caches(
+                batch_prefix,
+                batch_tokens,
+                batch_size,
+                slot_mapping[batch_slot_mapping_offset:batch_slot_mapping_offset+batch_size],
+                kv_caches,
+                block_size,
+            )
+            # update batch context len
+            batch_context_len += batch_size
+
+            # if we have multiple batches to update, after each update, we need to check
+            # if current update has been executed successfully. if any worker has failed,
+            # we need to stop updating the rest of the batches.
+            if batch_context_len < update_context_len + update_token_size:
+                ret_code_tensor = torch.tensor([ret_code], dtype=torch.int, device='cuda')
+                tensor_model_parallel_all_reduce(input_=ret_code_tensor, op=torch.distributed.ReduceOp.MIN)
+                ret_code = ret_code_tensor[0].item()
+                if ret_code == 0:
+                    # update failed, stop updating the rest of the batches
+                    break
 
         # restore the seq_group_metadata's and seq's metadata
         self._update_seq_group_metadata(seq_group_metadata, -matched[seq_id])

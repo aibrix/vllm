@@ -459,6 +459,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.block_aligned_sliding_window = \
                 self.sliding_window_blocks * self.block_size
 
+        self.vineyard_llm_cache_enabled = self.runner.vineyard_llm_cache is not None
+
     def _compute_lens(self, inter_data: InterDataForSeqGroup, seq_idx: int,
                       seq_group_metadata: SequenceGroupMetadata):
         """Compute context length, sequence length and tokens
@@ -989,30 +991,27 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
         self.prompt_adapter_manager: LRUCacheWorkerPromptAdapterManager = None
 
-        # Delay the initialization of vineyard cache after model loading
-        # to ensure the tensor model parallel group is initialized.
-        self.vineyard_llm_cache = None
-
         set_cpu_offload_max_bytes(
             int(self.cache_config.cpu_offload_gb * 1024**3))
-        
+
         # Delay the initialization of vineyard cache after model loading
         # to ensure the tensor model parallel group is initialized.
         self.vineyard_llm_cache = None
 
     def _init_vineyard_cache(self, metrics: CacheServiceMetrics = None):
         if envs.VLLM_USE_VINEYARD_CACHE:
-            if not self.scheduler_config.chunked_prefill_enabled:
-                raise Exception("Vineyard LLM cache is not enabled, requires chunked prefill")
-            if not envs.VLLM_USE_FLASH_ATTN_DECODING:
-                raise Exception("Vineyard LLM cache is not enabled, requires flash attention decoding")
-            
+            from vllm.attention.backends.flash_attn import FlashAttentionBackend
+            if not issubclass(self.attn_backend, FlashAttentionBackend):
+                raise Exception(
+                    f"Vineyard LLM cache does not support {self.attn_backend}, "
+                    "requires flash attention backend")
+
             from vllm.worker.vineyard_llm_cache import VineyardLLMCache
             self.vineyard_llm_cache: VineyardLLMCache = VineyardLLMCache.from_envs(
                 model_config=self.model_config,
                 parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
                 kv_cache_dtype=self.kv_cache_dtype,
-                max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
                 torch_dtype=get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                         self.model_config.dtype),
                 metrics = metrics,

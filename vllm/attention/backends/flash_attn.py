@@ -380,7 +380,8 @@ class FlashAttentionMetadataBuilder(
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+            chunked_prefill_enabled: bool, prefix_cache_hit: bool,
+            vineyard_llm_cache_enabled: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
@@ -417,8 +418,8 @@ class FlashAttentionMetadataBuilder(
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
                 block_table = block_tables[seq_id]
-            elif ((chunked_prefill_enabled or not is_prompt)
-                  and block_tables is not None):
+            elif ((chunked_prefill_enabled or vineyard_llm_cache_enabled
+                   or not is_prompt) and block_tables is not None):
                 if curr_sliding_window_block == 0:
                     block_table = block_tables[seq_id]
                 else:
@@ -453,7 +454,8 @@ class FlashAttentionMetadataBuilder(
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
-                                prefix_cache_hit)
+                                prefix_cache_hit,
+                                self.input_builder.vineyard_llm_cache_enabled)
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1

@@ -519,6 +519,12 @@ class Scheduler:
             print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)}")
         return ret
 
+    def has_active_seqs(self) -> bool:
+        ret = len(self.waiting) != 0 or len(self.running) != 0 or len(
+            self.swapped) != 0
+
+        return ret
+
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
 
@@ -1309,7 +1315,11 @@ class Scheduler:
             # Collect the information related to cache update for dattn
             scheduler_outputs.to_allocate_blocks, scheduler_outputs.to_free_kv_caches, \
             scheduler_outputs.immediate_allocate = self.block_manager.step()
-            
+
+            # When there is no active requests, we will need to change immediate_allocate to be True
+            if self.has_active_seqs() == False:
+                scheduler_outputs.immediate_allocate
+
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
 

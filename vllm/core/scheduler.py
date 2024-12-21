@@ -145,7 +145,8 @@ class SchedulerOutputs:
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
-        assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
+        # dAttn: disabling this check, as it can occur in dAttention's swapping support
+        # assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
 
         self.num_loras: int = len(self.lora_requests)
         if self.num_loras > 0:
@@ -684,7 +685,7 @@ class Scheduler:
                     curr_loras.add(seq_group.lora_int_id)
 
         #if len(self.running) == 0 and len(decode_seq_groups) == 0 and len(prefill_seq_groups) == 0:
-        print(f"NOOOOOOOO, len(self.running):{len(self.running)}, len(decode_seq_groups):{len(decode_seq_groups)}, len(prefill_seq_groups):{len(prefill_seq_groups)} at step-{self.step_index}", file=sys.stderr)
+        #print(f"NOOOOOOOO, len(self.running):{len(self.running)}, len(decode_seq_groups):{len(decode_seq_groups)}, len(prefill_seq_groups):{len(prefill_seq_groups)} at step-{self.step_index}", file=sys.stderr)
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
 
@@ -818,7 +819,7 @@ class Scheduler:
         # TODO: make sure that the time has passed a period (e.g. 16 steps)
         #if (self.step_index & self.vmm_frequency_mask) and len(self.running) != 0:
         if self.step_index & self.vmm_frequency_mask:
- 
+            #print(f"self.step_index:{self.step_index}, self.vmm_frequency_mask:{self.vmm_frequency_mask}")
             return SchedulerSwappedInOutputs(
                 decode_seq_groups=decode_seq_groups,
                 prefill_seq_groups=prefill_seq_groups,
@@ -828,11 +829,15 @@ class Scheduler:
                 infeasible_seq_groups=infeasible_seq_groups,
             )
 
-        #if len(self.running) == 0:
-        #    print(f"NNNNNNNNN Adding more requests from swapped queue!", file=sys.stderr)
-
         # For all requests in the swapping_in queue, adding to the RUNNING queue. 
-        for seq_group in self.swapping_in:
+        to_check = False
+        for seq_group in list(self.swapping_in):
+            # No need to do anything for the group that is just swapping in
+            if self.step_index == seq_group.swapping_step_index:
+                continue
+            
+            to_check = True
+            print(f"NNNNNNNNNNN_schedule_running, swapping_in:{seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
                 seq.status = SequenceStatus.RUNNING
 
@@ -845,8 +850,11 @@ class Scheduler:
                 decode_seq_groups.append(
                     ScheduledSequenceGroup(seq_group, token_chunk_size=1))
 
+            # Remove the current sequence group in self.swapping_in
             self.swapping_in.popleft()
-        #self.swapping_in.clear()
+
+        if to_check:
+            print(f"swapping_in:{len(self.swapping_in)} decode_seq_groups:{len(decode_seq_groups)} at step-{self.step_index}", file=sys.stderr)
 
         # Check all requests in the swapped queue, check whether it is necessary to 
         # to swap in. 
@@ -874,6 +882,8 @@ class Scheduler:
                 swapped_queue.popleft()
                 continue
 
+            
+            # Now alloc_status == AllocStatus.OK
             # The total number of sequences in the RUNNING state should not
             # exceed the maximum number of sequences.
             num_new_seqs = seq_group.get_max_num_running_seqs()
@@ -896,14 +906,18 @@ class Scheduler:
 
         # Now for all requests in the swapping_out queue, adding to the swapped queue. 
         # Also, changed the status to swapped_out
-        for seq_group in self.swapping_out:
+        for seq_group in list(self.swapping_out):
+            # No need to do anything for the group that is just swapping out
+            if self.step_index == seq_group.swapping_step_index:
+                continue
+
+            print(f"NOOOOOOOO_schedule_running, swapping_out:{seq_group.swapping_step_index},  adding seq_group to self.swapped at step-{self.step_index}", file=sys.stderr)
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
                 seq.status = SequenceStatus.SWAPPED
-            self.swapped_out.append(seq_group)
-        # Added to the swapped queue. 
-        #self.swapped_out.extend(self.swapping_out)
-        
-        self.swapping_out.clear()
+            self.swapped.append(seq_group)
+
+            # Remove the current sequence group in self.swapping_in
+            self.swapping_out.popleft()
 
         return SchedulerSwappedInOutputs(
             decode_seq_groups=decode_seq_groups,
@@ -1094,11 +1108,14 @@ class Scheduler:
                                                        enable_chunking=False)
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
-            if len(running_scheduled.preempted) + len(
+            if self.use_dattn and self.user_specified_preemption_mode == "swap":
+                swapped_in = self._schedule_swapped_async(budget, curr_loras)
+                if len(swapped_in.decode_seq_groups) > 0:
+                    print(f"schedule_async, with len(swapped_in.decode_seq_groups)-{len(swapped_in.decode_seq_groups)} at step-{self.step_index}", file=sys.stderr) 
+            elif len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
-                if len(running_scheduled.preempted) > 0 or len(running_scheduled.swapped_out) > 0:  
-                    print(f"len(running_scheduled.preempted):{len(running_scheduled.preempted)}, len(running_scheduled.swapped_out):{len(running_scheduled.swapped_out)}")
                 swapped_in = self._schedule_swapped(budget, curr_loras)
+
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -1186,7 +1203,11 @@ class Scheduler:
         # If preemption happens, it means we don't have space for swap-in.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
-            swapped_in = self._schedule_swapped(budget, curr_loras)
+            if self.use_dattn and self.user_specified_preemption_mode == "swap":
+                swapped_in = self._schedule_swapped_async(budget, curr_loras)
+            else:
+                swapped_in = self._schedule_swapped(budget, curr_loras)
+
 
         # Schedule new prefills.
         prefills = self._schedule_prefills(budget,
@@ -1578,7 +1599,10 @@ class Scheduler:
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
     ) -> None:
-        self._swap_out(seq_group, blocks_to_swap_out)
+        if self.use_dattn:
+            self._swap_out_async(seq_group, blocks_to_swap_out)
+        else:
+            self._swap_out(seq_group, blocks_to_swap_out)
 
     def _swap_in(
         self,
@@ -1599,6 +1623,8 @@ class Scheduler:
         blocks_to_swap_in.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.SWAPPING
+        self.swapping_in.append(seq_group)
+        seq_group.swapping_step_index = self.step_index
 
     def _swap_out(
         self,
@@ -1631,6 +1657,8 @@ class Scheduler:
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPING
+
+        seq_group.swapping_step_index = self.step_index
 
     def _passed_delay(self, now: float) -> bool:
         if self.prev_prompt:

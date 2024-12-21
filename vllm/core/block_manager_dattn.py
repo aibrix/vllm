@@ -60,7 +60,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        watermark: float = 0.01,
+        watermark: float = 0.03,
         sliding_window: Optional[int] = None, # Not supported
         enable_caching: bool = False, # Not supported
         vmm_frequency: int = 16, 
@@ -88,7 +88,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Watermark indicates that the least amount of blocks should be free. 
         assert watermark >= 0.0
-        self.watermark_blocks = int(watermark * num_gpu_blocks)
+        self.watermark_blocks = 4
+        #int(watermark * num_gpu_blocks)
         
         # Mapping from cache_id to the number of allocated blocks.
         # The information is more persitent across different steps
@@ -188,19 +189,21 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
 
-        self.total_active_reqs +=1
-        
     #  Allocate a new GPU cache, when the available GPU blocks are sufficient
     def _allocate_gpu_cache(self, need_blocks: int) -> Tuple[int, int]:
         cache_id = -1
-        to_allocate_num = need_blocks
-        allocated_block_num = need_blocks
+        to_allocate = True
+        
+        # update total_active_reqs and num_free_gpu_blocks
+        self.total_active_reqs +=1
+        self.num_free_gpu_blocks -= need_blocks
 
         # Prefer to reuse the to_free_gpu_caches at first, as some pages have been allocated already. 
         if self.cached_free_gpu_blocks > 0:
             # Make it block_diff a big number for the better comparison
             block_diff = need_blocks*100
-        
+            allocated_block_num = None
+
             # Find one kv_cache with the smallest difference on the number of blocks
             # The found cache can have more or less available blocks.   
             for id, num_blocks in self.to_free_gpu_caches.items():
@@ -216,39 +219,38 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
                     # No need to check anymore if we already found a perfect one
                     if diff == 0:
                         break 
-            
+
             # Remove this item from the to_free_gpu_caches
             del self.to_free_gpu_caches[cache_id]
-
-            print(f"Finding one existing cacheid-{cache_id}, with blocks:{allocated_block_num}", file=sys.stderr)
-            # After the loop, allocated_block_num will be the number of blocks for the best cache id 
-            # We will assign all blocks for the request now.
-            # FIXME: we may use a smaller number if allocated_block_num is too big
             self.cached_free_gpu_blocks -= allocated_block_num
-            self.num_free_gpu_blocks -= allocated_block_num 
 
-            if allocated_block_num < need_blocks:
-                to_allocate_num = need_blocks - allocated_block_num
-                
-                # update the allocated number
-                allocated_block_num = need_blocks
-            else:
-                # allocated_block_num == num_blocks 
-                # No need to allocate more blocks
-                to_allocate_num = 0   
+            # If the cache has too many blocks, then we will release some blocks to other requests
+            if allocated_block_num > need_blocks + self.watermark_blocks:
+                #free_blocks_per_req = (int)((allocated_block_num-need_blocks)/self.total_active_reqs)
+
+                # Compute the number of free blocks for each requst
+                #free_blocks_per_req = self._compute_free_blocks(allocated_block_num, need_blocks) 
+                print(f"Reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
+
+                # Now the current request will keep free_blocks_per_req blocks, while others 
+                # are still need to be freed 
+                need_blocks += self.watermark_blocks
+                self.num_free_gpu_blocks -= self.watermark_blocks
+            elif allocated_block_num > need_blocks:
+                # when allocated_block_num <= need_blocks + self.watermark_blocks, no need to allocate
+                to_allocate = False 
         else:
             # Check whether the can_allocate or can_swap_in has a bug
-            if self.num_free_gpu_blocks < need_blocks: 
+            if self.num_free_gpu_blocks < 0: 
                 print(f"Error: self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
-            assert self.num_free_gpu_blocks >= need_blocks
+            assert self.num_free_gpu_blocks >= 0
 
             cache_id = self.gpu_allocator.allocate()
-            
-            #print(f"_allocate_buffer new, need_blocks:{need_blocks}, cache_id:{cache_id}", file=sys.stderr)
-        self.num_free_gpu_blocks -= to_allocate_num
-        self.allocated_gpu_blocks[cache_id] = allocated_block_num
-        if to_allocate_num > 0: 
-            self.to_allocate_blocks[cache_id] = allocated_block_num 
+
+        self.allocated_gpu_blocks[cache_id] = need_blocks 
+
+        if to_allocate == True:
+            self.to_allocate_blocks[cache_id] = need_blocks
 
         return cache_id
 
@@ -393,8 +395,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             
             # Allocate a gpu cache id, based on the need_blocks. 
             # Note that we specifically request one more block in order to accomodate vmm_frequency's memory management
-            gpu_cache_id = self._allocate_gpu_cache(need_blocks+1)
-            self.total_active_reqs +=1
+            gpu_cache_id = self._allocate_gpu_cache(need_blocks + 1)
 
             seq.cache_id = gpu_cache_id
             seq.data.cache_id = gpu_cache_id
@@ -519,7 +520,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         immediate_allocate = self.immediate_allocate
         self.immediate_allocate = False
 
-        #print(f"in the end step-{self.step_index} now!", file=sys.stderr) 
+        print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
         # We will perform virtual memory management once for every self.vmm_frequency 
         if (self.step_index & self.vmm_frequency_mask) != 0 and immediate_allocate != True:
             # No need to invoke virtual memory management
@@ -527,7 +528,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             self.step_index += 1
             return to_allocate_blocks, to_free_gpu_caches, immediate_allocate
 
-        to_allocate_blocks = self.to_allocate_blocks.copy()
+        for cache_id, num_blocks in self.to_allocate_blocks.items():
+            print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            to_allocate_blocks[cache_id] = num_blocks
 
         to_free_blocks = 0
         # Check whether there is a need to free kv caches

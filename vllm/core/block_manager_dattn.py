@@ -520,7 +520,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         immediate_allocate = self.immediate_allocate
         self.immediate_allocate = False
 
-        print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
+        #print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
         # We will perform virtual memory management once for every self.vmm_frequency 
         if (self.step_index & self.vmm_frequency_mask) != 0 and immediate_allocate != True:
             # No need to invoke virtual memory management
@@ -529,19 +529,19 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             return to_allocate_blocks, to_free_gpu_caches, immediate_allocate
 
         for cache_id, num_blocks in self.to_allocate_blocks.items():
-            print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            #print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
             to_allocate_blocks[cache_id] = num_blocks
 
         to_free_blocks = 0
         # Check whether there is a need to free kv caches
         for cache_id, num_blocks in self.to_free_gpu_caches.items():
-            print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            #print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
             to_free_gpu_caches.append(cache_id)
             self.gpu_allocator.free(cache_id)
             to_free_blocks += num_blocks 
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
+        #print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
         
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()

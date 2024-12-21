@@ -513,7 +513,7 @@ class Scheduler:
 
     def has_unfinished_seqs(self) -> bool:
         ret = len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0 
+            self.swapped) != 0 or len(self.swapping_in) != 0
 
         if ret == False:
             print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)}")

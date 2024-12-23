@@ -133,7 +133,8 @@ private:
   int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks, cudaStream_t stream);
 
   bool manager_running;
-
+  bool immediate_allocate; 
+  
   pthread_t thread_id;
   void doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks,
           std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>>  to_swap_in); 

@@ -303,12 +303,6 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
 int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t blocks, cudaStream_t stream) {
   int64_t pages = -1;
 
-  CUresult result = cuCtxSetCurrent(origContext);
-  if (result != CUDA_SUCCESS) {
-      std::cerr << "Failed to set CUDA context in new thread: " << result << std::endl;
-      return -1;
-  }
-
   // Find the region corresponding to the given region_id, which should reserveRegion before
   // If the region_id doesn't exist at all, it is the bug that should be fixed.  
   if(this->active_regions_map.count(region_id) == 0) {
@@ -335,25 +329,25 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
     uint64_t blocks = row[1]; 
 
     pages += _allocCacheBlocksForRequest(region_id, blocks, stream);
-    //if (region_id == 7)
     //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
   }
 
   // Make sure that the asynchronized memcopy has finished. 
   if(stream)
-  //cudaDeviceSynchronize();
     cudaStreamSynchronize(stream);
 
   return pages; 
 }
 
-
+// This is a separate thread that performing both synchronous and asynchronous 
+// memory management operations. 
 void * kvCacheAllocator::memoryManagerThread(void * arg) {
   kvCacheAllocator * instance = static_cast<kvCacheAllocator *>(arg); 
   CUresult result = cuCtxSetCurrent(instance->origContext);
   
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  //cudaStream_t stream = cudaStreamCreate();
+  //cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  cudaStream_t asyncStream;
+  cudaStreamCreate(&asyncStream);
 
   while(true) {
     pthread_mutex_lock(&instance->mutex_manager); 
@@ -363,7 +357,14 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     while(!instance->manager_running) {
       pthread_cond_wait(&instance->cond_manager, &instance->mutex_manager); 
     }
-  
+
+    cudaStream_t stream = nullptr; 
+    // We will use a different stream for asynchronous operations. 
+    if(!instance->immediate_allocate) {
+      //stream = asyncStream;
+      stream = at::cuda::getCurrentCUDAStream();
+    } 
+
     // Perform memory management asynchronously
     instance->swapOutCache(instance->swap_out_caches, stream);
     instance->swapInCache(instance->swap_in_caches, stream);
@@ -384,6 +385,12 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
  */
 void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks, 
         std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in) {
+}
+
+void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, 
+                                         std::vector<std::vector<int64_t>> req_cache_blocks,
+                                         std::vector<std::vector<int64_t>> to_swap_out,
+                                         std::vector<std::vector<int64_t>> to_swap_in) {
     pthread_mutex_lock(&this->mutex_manager);
     
     // If the manager has not finished, waiting on the condition 
@@ -416,17 +423,21 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     }    
     
     this->manager_running = true; 
+    this->immediate_allocate = immediate_allocate; 
     pthread_cond_signal(&this->cond_manager); 
     pthread_mutex_unlock(&this->mutex_manager);
-}
 
-void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, 
-                                         std::vector<std::vector<int64_t>> req_cache_blocks,
-                                         std::vector<std::vector<int64_t>> to_swap_out,
-                                         std::vector<std::vector<int64_t>> to_swap_in) {
-  //Py_BEGIN_ALLOW_THREADS
-  //fprintf(stderr, "NNNNNNN immediate_allocate is %d\n", immediate_allocate); 
+    if(immediate_allocate) {
+      // We will wait until the manager thread finishes its job
+      pthread_mutex_lock(&this->mutex_manager);
+      while(this->manager_running) {
+        //fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
+        pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
+      } 
+      pthread_mutex_unlock(&this->mutex_manager); 
+    }
 
+  /*
   if(immediate_allocate) {
     pthread_mutex_lock(&this->mutex_manager);
     
@@ -444,6 +455,7 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<in
   else {
     doAsyncKVCacheManage(free_caches, req_cache_blocks, to_swap_out, to_swap_in);
   }
+  */
   //Py_END_ALLOW_THREADS
 }
 

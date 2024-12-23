@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     VINEYARD_CACHE_ASYNC_UPDATE_CPU_MEM_UTIL: float = 0.2
     VINEYARD_CACHE_MIN_INFLIGHT_TASKS: int = 1
     VINEYARD_CACHE_MAX_INFLIGHT_TASKS: int = 32
+    VINEYARD_CACHE_METRICS_ENABLED: bool = False
 
 
 def get_default_cache_root():
@@ -458,6 +459,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Max number of inflight async tasks for vineyard cache
     "VINEYARD_CACHE_MAX_INFLIGHT_TASKS":
     lambda: int(os.getenv("VINEYARD_CACHE_MAX_INFLIGHT_TASKS", "32")),
+    
+    # Max number of inflight async tasks for vineyard cache
+    "VINEYARD_CACHE_METRICS_ENABLED":lambda: (
+        os.environ.get("VINEYARD_CACHE_METRICS_ENABLED", "0").strip().lower()
+        in ("1", "true")
+    ),
 }
 
 # end-env-vars-definition

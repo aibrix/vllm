@@ -190,6 +190,132 @@ class Metrics:
             labelnames=labelnames,
             multiprocess_mode="sum",
         )
+        
+        self.gauge_cache_service_tokens_hit_rate = self._gauge_cls(
+            name="vllm:cache_service_tokens_hit_rate",
+            documentation="External cache service tokens hit rate.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_blocks_hit_rate = self._gauge_cls(
+            name="vllm:cache_service_blocks_hit_rate",
+            documentation="External cache service blocks hit rate.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_hit_tokens = self._gauge_cls(
+            name="vllm:cache_service_hit_tokens",
+            documentation="External cache service hit tokens.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_total_tokens = self._gauge_cls(
+            name="vllm:cache_service_total_tokens",
+            documentation="External cache service total tokens.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_hit_blocks = self._gauge_cls(
+            name="vllm:cache_service_hit_blocks",
+            documentation="External cache service hit blocks.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_total_blocks = self._gauge_cls(
+            name="vllm:cache_service_total_blocks",
+            documentation="External cache service total blocks.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_err_query = self._gauge_cls(
+            name="vllm:cache_service_err_query",
+            documentation="External cache service query errors.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_err_async_update_task_queue_full = self._gauge_cls(
+            name="vllm:cache_service_err_async_update_task_queue_full",
+            documentation="External cache service async update task queue full errors.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.gauge_cache_service_err_update = self._gauge_cls(
+            name="vllm:cache_service_err_update",
+            documentation="External cache service update errors.",
+            labelnames=labelnames,
+            multiprocess_mode="all")
+        
+        self.histogram_cache_service_time_query_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_query_seconds",
+            documentation="Histogram of cache service time query in seconds.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_time_load_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_load_seconds",
+            documentation="Histogram of cache service time load.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_time_reshape_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_reshape_seconds",
+            documentation="Histogram of cache service time update.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_time_unload_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_unload_seconds",
+            documentation="Histogram of cache service time unload.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_time_update_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_update_seconds",
+            documentation="Histogram of cache service time update.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_time_async_update_queue_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_async_update_queue_seconds",
+            documentation="Histogram of cache service async update time in queue.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_time_async_update_exec_seconds = self._histogram_cls(
+            name="vllm:cache_service_time_async_update_exec_seconds",
+            documentation="Histogram of cache service async update time in execution.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
+        
+        self.histogram_cache_service_counter_async_update_updated_seconds = self._histogram_cls(
+            name="vllm:cache_service_counter_async_update_updated_seconds",
+            documentation="Histogram of cache service async update time in update.",
+            labelnames=labelnames,
+            buckets=[
+                0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
+                1.0, 2.5
+            ])
 
 
 # end-metrics-definitions
@@ -375,12 +501,10 @@ class LoggingStatLogger(StatLoggerBase):
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
-            if self.external_cache_service_metrics is not None:
-                logger.info(
-                    "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%",
-                    0 if self.external_cache_service_metrics.total_tokens == 0 else self.external_cache_service_metrics.hit_tokens/self.external_cache_service_metrics.total_tokens * 100,
-                    0 if self.external_cache_service_metrics.total_blocks == 0 else self.external_cache_service_metrics.hit_blocks/self.external_cache_service_metrics.total_blocks * 100,
-                )
+            logger.info(
+                "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%",
+                stats.cache_service_tokens_hit_rate, stats.cache_service_blocks_hit_rate
+            )
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
@@ -482,6 +606,42 @@ class PrometheusStatLogger(StatLoggerBase):
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
         self._log_histogram(self.metrics.histogram_best_of_request,
                             stats.best_of_requests)
+        
+        # Cache Service
+        self._log_gauge(self.metrics.gauge_cache_service_hit_tokens,
+                        stats.cache_service_hit_tokens)
+        self._log_gauge(self.metrics.gauge_cache_service_total_tokens,
+                        stats.cache_service_total_tokens)
+        self._log_gauge(self.metrics.gauge_cache_service_hit_blocks,
+                        stats.cache_service_hit_blocks)
+        self._log_gauge(self.metrics.gauge_cache_service_total_blocks,
+                        stats.cache_service_total_blocks)
+        self._log_gauge(self.metrics.gauge_cache_service_tokens_hit_rate,
+                        stats.cache_service_tokens_hit_rate)
+        self._log_gauge(self.metrics.gauge_cache_service_blocks_hit_rate,
+                        stats.cache_service_blocks_hit_rate)
+        self._log_gauge(self.metrics.gauge_cache_service_err_query,
+                        stats.cache_service_err_query)
+        self._log_gauge(self.metrics.gauge_cache_service_err_async_update_task_queue_full,
+                        stats.cache_service_err_async_update_task_queue_full)
+        self._log_gauge(self.metrics.gauge_cache_service_err_update,
+                        stats.cache_service_err_update)
+        self._log_histogram(self.metrics.histogram_cache_service_time_query_seconds,
+                            stats.cache_service_time_query)
+        self._log_histogram(self.metrics.histogram_cache_service_time_load_seconds,
+                            stats.cache_service_time_load)
+        self._log_histogram(self.metrics.histogram_cache_service_time_reshape_seconds,
+                            stats.cache_service_time_reshape)
+        self._log_histogram(self.metrics.histogram_cache_service_time_unload_seconds,
+                            stats.cache_service_time_unload)
+        self._log_histogram(self.metrics.histogram_cache_service_time_update_seconds,
+                            stats.cache_service_time_update)
+        self._log_histogram(self.metrics.histogram_cache_service_time_async_update_queue_seconds,
+                            stats.cache_service_time_async_update_queue)
+        self._log_histogram(self.metrics.histogram_cache_service_time_async_update_exec_seconds,
+                            stats.cache_service_time_async_update_exec)
+        self._log_histogram(self.metrics.histogram_cache_service_counter_async_update_updated_seconds,
+                            stats.cache_service_counter_async_update_updated)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:

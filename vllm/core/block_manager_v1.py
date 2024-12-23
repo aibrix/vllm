@@ -234,7 +234,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_size: int,
         num_gpu_blocks: int,
         num_cpu_blocks: int,
-        watermark: float = 0.03,
+        watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
     ) -> None:
@@ -555,7 +555,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return AllocStatus.NEVER
         elif num_free_blocks - num_required_blocks >= self.watermark_blocks:
         #elif num_free_blocks > num_required_blocks:
-            print(f"seq-{seq_group.request_id}, blocks:{len(blocks)}, num_free_blocks:{num_free_blocks}, num_swapped_seqs:{num_swapped_seqs}, num_required_blocks:{num_required_blocks}, self.watermark_blocks:{self.watermark_blocks}")
+            #print(f"seq-{seq_group.request_id}, blocks:{len(blocks)}, num_free_blocks:{num_free_blocks}, num_swapped_seqs:{num_swapped_seqs}, num_required_blocks:{num_required_blocks}, self.watermark_blocks:{self.watermark_blocks}")
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
@@ -654,7 +654,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             # Already freed or haven't been scheduled yet.
             return
 
-        print(f"Free seq-{seq.seq_id}")
+        #print(f"Free seq-{seq.seq_id}")
         if self.num_swap_out > 0:
             self.num_free += 1
             

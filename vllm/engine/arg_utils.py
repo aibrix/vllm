@@ -112,7 +112,7 @@ class EngineArgs:
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
-    swap_space: float = 4  # GiB
+    swap_space: float = 256  # GiB
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None

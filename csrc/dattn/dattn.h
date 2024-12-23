@@ -165,7 +165,7 @@ public:
   // In particular, the regionSize == 2 * max_seq_length * layers_num * heads_num * head_size * dtype_size
   // "2" here is to allocate Key and Value cache together, which helps to reduce the fragmentation 
   int64_t reserveRegion(int64_t region_id);
-
+  std::vector<int64_t> allocCPUCaches(int64_t num_caches, int64_t cache_size);
   void releaseRegions(std::vector<int64_t> regions);
 
   int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);

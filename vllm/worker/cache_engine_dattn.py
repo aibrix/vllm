@@ -17,9 +17,8 @@ from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available, get_dt
 from vllm import _dattn_ops as dattn
 import subprocess
 from enum import Enum
+import mmap, ctypes
 import re
-import mmap
-import ctypes
 import sys
 
 logger = init_logger(__name__)
@@ -72,6 +71,7 @@ class CacheEngineDAttn:
         cache_space_size = max_batch_size * sequence_buffer_bytes_size
         cache_space_bytes_size = cache_space_size * 2
 
+        # reserve size for both K/V cache
         cache_space_per_req = sequence_buffer_bytes_size * self.num_layers * 2
         assert (cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"
         
@@ -89,9 +89,7 @@ class CacheEngineDAttn:
         self.device_cache_allocator = dattn.kvCacheAllocator(max_seq_len, self.num_layers, num_kv_heads,
                                                              head_size, self.block_size, dtype_size)
 
-        # Let's use 1/20 of max_batch_size for cpu caches
-        # NOTE: make sure that is same as BlockSpaceManagerDAttn::num_cpu_caches
-        cpu_cache_num = int(max_batch_size/20) 
+        cpu_cache_num = cache_config.num_cpu_caches 
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
@@ -163,15 +161,28 @@ class CacheEngineDAttn:
 
     def _reserve_cpu_kv_cache(self, cache_num: int, cache_space_per_req: int) -> List[int]:
 
+        self.cpu_cache = self.device_cache_allocator.alloc_cpu_caches(cache_num, cache_space_per_req) 
+        for cache in self.cpu_cache:
+            print(f"cache - {hex(cache)}", file=sys.stderr)
+        """
         for i in range(cache_num):
             # Using mmap to reserve space for cpu cache. Multiple*2 in order to hold K/V cache
+            pinned_tensor = torch.empty(cache_space_per_req, dtype=torch.uint8, pin_memory=True)
+            self.mmap.append(pinned_tensor)
+            address = pinned_tensor.data_ptr()
+            
             mm = mmap.mmap(-1, cache_space_per_req)
             self.mmap.append(mm)
             address = ctypes.addressof(ctypes.c_char.from_buffer(mm))
             
-            # record the address for ith cache
+            cuda.cudaHostAlloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint]
+            cuda.cudaHostAlloc.restype = ctypes.c_int
+            host_ptr = ctypes.c_void_p()
+            status = cuda.cudaHostAlloc(ctypes.byref(host_ptr), cache_space_per_req, 0)
+            address = host_ptr.value
             self.cpu_cache[i] = address
-            #print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}", file=sys.stderr)
+            print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}", file=sys.stderr)
+        """
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         to_swap_in_caches = []
@@ -187,7 +198,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
 
             size = blocks * self.block_bytes_size
-            print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
+            #print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
             to_swap_in_caches.append([cpu_cache_address, gpu_cache_id, blocks])
 
         return to_swap_in_caches
@@ -210,7 +221,7 @@ class CacheEngineDAttn:
             cpu_cache_address = self.cpu_cache[cpu_cache_id]
             size = blocks * self.block_bytes_size 
             
-            print(f"Engine swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
+            #print(f"Engine swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_address, size])
 
         return to_swap_out_caches

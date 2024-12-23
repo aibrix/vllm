@@ -362,7 +362,8 @@ class Scheduler:
                 num_cpu_blocks=num_cpu_blocks,
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching,
-                num_caches=self.scheduler_config.max_num_seqs, 
+                num_caches=self.scheduler_config.max_num_seqs,
+                num_cpu_caches=self.cache_config.num_cpu_caches,  
                 vmm_frequency = self.vmm_frequency)
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
@@ -836,14 +837,14 @@ class Scheduler:
             )
 
         # For all requests in the swapping_in queue, adding to the RUNNING queue. 
-        to_check = False
+        #to_check = False
         for seq_group in list(self.swapping_in):
             # No need to do anything for the group that is just swapping in
             if self.step_index == seq_group.swapping_step_index:
                 continue
             
-            to_check = True
-            print(f"NNNNNNNNNNN_schedule_running, swapping_in:{seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
+            #to_check = True
+            #print(f"NNNNNNNNNNN_schedule_running, swapping_in {seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
                 seq.status = SequenceStatus.RUNNING
 
@@ -859,8 +860,8 @@ class Scheduler:
             # Remove the current sequence group in self.swapping_in
             self.swapping_in.popleft()
 
-        if to_check:
-            print(f"swapping_in:{len(self.swapping_in)} decode_seq_groups:{len(decode_seq_groups)} at step-{self.step_index}", file=sys.stderr)
+        #if to_check:
+        #    print(f"swapping_in:{len(self.swapping_in)} decode_seq_groups:{len(decode_seq_groups)} at step-{self.step_index}", file=sys.stderr)
 
         # Check all requests in the swapped queue, check whether it is necessary to 
         # to swap in. 
@@ -917,7 +918,7 @@ class Scheduler:
             if self.step_index == seq_group.swapping_step_index:
                 continue
 
-            print(f"NOOOOOOOO_schedule_running, swapping_out:{seq_group.swapping_step_index},  adding seq_group to self.swapped at step-{self.step_index}", file=sys.stderr)
+            #print(f"NOOOOOOOO_schedule_running, swapping_out:{seq_group.swapping_step_index},  adding seq_group to self.swapped at step-{self.step_index}", file=sys.stderr)
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
                 seq.status = SequenceStatus.SWAPPED
             self.swapped.append(seq_group)
@@ -1116,8 +1117,8 @@ class Scheduler:
             # group. because it means there's no slot for new running requests.
             if self.use_dattn and self.user_specified_preemption_mode == "swap":
                 swapped_in = self._schedule_swapped_async(budget, curr_loras)
-                if len(swapped_in.decode_seq_groups) > 0:
-                    print(f"schedule_async, with len(swapped_in.decode_seq_groups)-{len(swapped_in.decode_seq_groups)} at step-{self.step_index}", file=sys.stderr) 
+                #if len(swapped_in.decode_seq_groups) > 0:
+                #    print(f"schedule_async, with len(swapped_in.decode_seq_groups)-{len(swapped_in.decode_seq_groups)} at step-{self.step_index}", file=sys.stderr) 
             elif len(running_scheduled.preempted) + len(
                     running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras)
@@ -1164,6 +1165,8 @@ class Scheduler:
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
+        if swapped_in.blocks_to_swap_in or running_scheduled.blocks_to_swap_out:
+            print(f"step-{self.step_index} has swapping blocks", file=sys.stderr) 
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
@@ -1318,7 +1321,8 @@ class Scheduler:
 
             # When there is no active requests, we will need to change immediate_allocate to be True
             if self.has_active_seqs() == False:
-                scheduler_outputs.immediate_allocate
+                print(f"in scheduling step-{self.step_index}, FORCE to use immediate_allocate == TRUE", file=sys.stderr)
+                scheduler_outputs.immediate_allocate = True
 
         if not self.cache_config.enable_prefix_caching:
             common_computed_block_nums = []
@@ -1472,7 +1476,7 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
-        #print(f"free_seq: seq:{seq.seq_id}", file=sys.stderr)
+        print(f"free_seq: seq:{seq.seq_id} at step-{self.step_index}", file=sys.stderr)
         self.block_manager.free(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:

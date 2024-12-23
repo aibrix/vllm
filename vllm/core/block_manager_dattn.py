@@ -31,6 +31,7 @@ class CacheAllocator:
         self.kv_caches = deque(range(num_caches))
 
     def allocate(self) -> int:
+        assert len(self.kv_caches) > 0, f"Please set self.num_caches to a bigger value"
         cache_id = self.kv_caches.popleft() 
         #    print(f"ERROR: self.kv_caches is 000000000 NOW", file=sys.stderr)
         #elif self.type == "cpu":
@@ -65,6 +66,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         enable_caching: bool = False, # Not supported
         vmm_frequency: int = 16, 
         num_caches: int = 0,
+        num_cpu_caches: int = 40, 
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -77,18 +79,19 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # Tracking the number of gpu_blocks (including self.cached_free_gpu_blocks) 
         self.num_free_gpu_blocks = num_gpu_blocks
         self.num_free_cpu_blocks = num_cpu_blocks
-        print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}", file=sys.stderr)
+        
         
         num_gpu_caches = num_caches
-        num_cpu_caches = int(num_caches/20)
+        num_cpu_caches = num_cpu_caches 
 
+        print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}, num_cpu_caches:{num_cpu_caches}", file=sys.stderr)
         # use to alloc cache buffer id for seq
         self.gpu_allocator = CacheAllocator("cuda", num_gpu_caches)
         self.cpu_allocator = CacheAllocator("cpu", num_cpu_caches)
 
         # Watermark indicates that the least amount of blocks should be free. 
         assert watermark >= 0.0
-        self.watermark_blocks = 4
+        self.watermark_blocks = 2
         #int(watermark * num_gpu_blocks)
         
         # Mapping from cache_id to the number of allocated blocks.
@@ -230,7 +233,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
                 # Compute the number of free blocks for each requst
                 #free_blocks_per_req = self._compute_free_blocks(allocated_block_num, need_blocks) 
-                print(f"Reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
+                #print(f"Reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
 
                 # Now the current request will keep free_blocks_per_req blocks, while others 
                 # are still need to be freed 
@@ -439,7 +442,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # After the swapped out, num_free_cpu_blocks should be decremented 
             self.num_free_cpu_blocks -= real_gpu_blocks
             
-            print(f"SWAPOUT {seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, freeCPUBlocks:{self.num_free_cpu_blocks}, freeGPUBlocks:{self.num_free_gpu_blocks},  gpu_cache_id:{gpu_cache_id}, blocks:{real_gpu_blocks} at step-{self.step_index}, requests:{self.total_active_reqs}", file=sys.stderr)
+            print(f"SWAPOUT request-{seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, freeCPUBlocks:{self.num_free_cpu_blocks}, freeGPUBlocks:{self.num_free_gpu_blocks},  gpu_cache_id:{gpu_cache_id}, blocks:{real_gpu_blocks} at step-{self.step_index}, requests:{self.total_active_reqs}", file=sys.stderr)
             
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, real_gpu_blocks]) 
 
@@ -454,7 +457,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Get blocks of this cache
         free_blocks = self.allocated_gpu_blocks[cache_id]
-        print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
+        #print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
        
         # Note that we update self.total_active_reqs here, as free_cache() is invoked twice for every request
         self.total_active_reqs -=1
@@ -469,7 +472,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
     Initially, we did this inside the memory management library. Maybe we should do it here as well. 
     """
     def free(self, seq: Sequence) -> None:
-        print(f"free sequence:{seq.seq_id}, cache_id:{seq.cache_id}, data_cache_id:{seq.data.cache_id}", file=sys.stderr)
+        #print(f"free sequence:{seq.seq_id}, cache_id:{seq.cache_id}, data_cache_id:{seq.data.cache_id}", file=sys.stderr)
         self._free_cache(cache_id=seq.cache_id)
         
         #print(f"After free, self.total_active_reqs: {self.total_active_reqs}", file=sys.stderr)
@@ -541,7 +544,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             to_free_blocks += num_blocks 
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        #print(f"step-{self.step_index} of updating, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
+        #print(f"step-{self.step_index}, immediate_allocate:{immediate_allocate}, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
         
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()

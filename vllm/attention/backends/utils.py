@@ -214,7 +214,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         if not use_dattn and use_captured_graph:
             print(f"IN use_captured_graph!!!")
-            exit(0)
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size

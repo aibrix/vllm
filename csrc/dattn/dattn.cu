@@ -62,7 +62,7 @@ public:
 
 private:
   void _free_blocks_from_pool(int64_t num_blocks);
-  void _alloc_blocks(int64_t num_blocks);
+  void _increase_blocks(int64_t num_blocks);
 
 }; 
 
@@ -93,7 +93,7 @@ PhysicalBlocksManager::PhysicalBlocksManager() {
 PhysicalBlocksManager::~PhysicalBlocksManager() {
 }
 
-void PhysicalBlocksManager::_alloc_blocks(int64_t num_blocks) {
+void PhysicalBlocksManager::_increase_blocks(int64_t num_blocks) {
     CUresult result;
     for (size_t i = 0; i < num_blocks; i++) {
         CUmemGenericAllocationHandle handle;
@@ -124,7 +124,6 @@ void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_mem
     // We assume that cache_block_size is multiple of megabytes here.  
 
     // Allocate the initial blocks based on user's specification
-    this->total_size = total_memory; 
     this->block_size = block_size; 
 
     this->max_allowed_size = max_allowed_size; 
@@ -132,8 +131,11 @@ void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_mem
     this->num_tofree_blocks = this->incremental_size/block_size;  
 
     // Allocate the physical memory with specified size 
-    size_t num_blocks = total_memory / block_size;
-    _alloc_blocks(num_blocks);
+    int32_t to_allocate_memory = min(total_memory, max_allowed_size); 
+    this->total_size = to_allocate_memory; 
+    size_t num_blocks = to_allocate_memory / block_size;
+    //fprintf(stderr, "total_memory %lx, max_allowed_size %lx num_blocks-%ld\n", total_memory, max_allowed_size, num_blocks);
+    _increase_blocks(num_blocks);
 }
 
 PhysicalBlock PhysicalBlocksManager::allocate(void) {
@@ -143,6 +145,7 @@ PhysicalBlock PhysicalBlocksManager::allocate(void) {
       // Keeping increase the memory if the GPU memory is sufficient
       int64_t allow_size = this->max_allowed_size - this->total_size;
       int64_t alloc_size; 
+      //fprintf(stderr, "alloc_size %lx allow_size %lx total_size %lx\n", alloc_size, allow_size, this->total_size);
 
       if(allow_size <= 0) {
         fprintf(stderr, "There is no sufficent GPU memory now. ");
@@ -159,7 +162,7 @@ PhysicalBlock PhysicalBlocksManager::allocate(void) {
 
       int64_t blocks = alloc_size/this->block_size; 
 
-      _alloc_blocks(blocks);
+      _increase_blocks(blocks);
       this->total_size += alloc_size; 
     }
 
@@ -168,7 +171,7 @@ PhysicalBlock PhysicalBlocksManager::allocate(void) {
 
     PhysicalBlock block = block_pool.back(); 
     block_pool.pop_back();     
-
+    this->free_blocks--; 
     return block; 
 }
 
@@ -189,6 +192,7 @@ void PhysicalBlocksManager::free(void * virtual_address) {
 
   // Adding this block to the block_pool
   block_pool.push_back(block); 
+  this->free_blocks += 1; 
 
   if(block_pool.size() > this->tofree_blocks_watermark) {
     _free_blocks_from_pool(num_tofree_blocks);
@@ -293,18 +297,26 @@ void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
 
     char * addr = this->nextUnmappedAddr;
 
+    //cudaDeviceSynchronize();
+
     // Map new memory
     CUresult res; 
+    int64_t size = this->physical_block_size;  
+    //fprintf(stderr, "now newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx blocks_num:%lx, \n", newSize, addr, distance, blocks_num, this->mapped_size, blocks_num);
     for(int i = 0; i < blocks_num; i++) {
       // Allocate a physical block 
-      PhysicalBlock block = _block_manager.allocate(); 
-      int64_t size = this->physical_block_size;  
+      PhysicalBlock block = _block_manager.allocate();
       if ((res = cuMemMap(reinterpret_cast<CUdeviceptr>(addr), size, 0ULL, block.handle, 0ULL)) == CUDA_SUCCESS) {
         if ((res = cuMemSetAccess(reinterpret_cast<CUdeviceptr>(addr), size, &_accessDescr, 1)) != CUDA_SUCCESS) {
           fprintf(stderr, "cuMemMap success,but cuMemSetAccess failed!, err code: %d\n", res);
           cuMemUnmap(reinterpret_cast<CUdeviceptr>(addr), size);
           exit(-1);
         }
+      }
+      else {
+        const char* errorStr;
+        cuGetErrorString(res, &errorStr);
+        fprintf(stderr, "cuMemMap failed when deallocating ptr %p res %ld with error %s\n", addr, res, errorStr);
       }
 
       _block_manager.record(addr, block); 
@@ -351,13 +363,13 @@ void kvCacheRegion::freeAllPhyMemory(void) {
 */
 kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_block_size, int64_t region_cache_size) {
   CUdevice device;
-  CHECK_DRV(cuInit(0));
+  //CHECK_DRV(cuInit(0));
   CHECK_RT(cudaFree(0));
   // Getting the cuda device and force the initialization
   CHECK_DRV(cuCtxGetDevice(&device));
 
   CHECK_DRV(cuCtxGetCurrent(&this->torchContext)); 
-  CHECK_DRV(cuCtxCreate(&this->origContext, 0, device));
+  //CHECK_DRV(cuCtxCreate(&this->origContext, 0, device));
   //CHECK_DRV(cuCtxSetCurrent(this->origContext));
 
   size_t free_memory, total_memory;
@@ -382,7 +394,7 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_bl
     exit(-1);
   }
 
-  fprintf(stderr, "kvCacheAllocator: max_gpu_memory_size - %lx, cache_block_size - %lx, region_cache_size - %lx, page_size - %lx", max_gpu_memory_size, cache_block_size, region_cache_size, page_size);
+  fprintf(stderr, "kvCacheAllocator: max_gpu_memory_size - %lx, cache_block_size - %lx, region_cache_size - %lx, page_size - %lx\n", max_gpu_memory_size, cache_block_size, region_cache_size, page_size);
   assert(page_size == PAGE_SIZE); 
 
   int64_t to_allocate_memory = 2 * GIGABYTES; 
@@ -457,6 +469,9 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   // Record the region information
   this->active_regions_map[region_id] = region; 
 
+  void * ret = reinterpret_cast<void *>(ptr); 
+  //fprintf(stderr, "region_id-%d, ret-%p\n", region_id, ret);  
+  //return static_cast<int64_t>(ptr);
   return static_cast<int64_t>(ptr);
 }
 
@@ -487,9 +502,11 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   //std::lock_guard<std::mutex> lock(this->mutex);
   kvCacheRegion * region = this->active_regions_map[region_id];
 
+  //fprintf(stderr, "before release region %ld, blocks %d\n", region_id, _block_manager.block_pool.size()); 
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
   region->freeAllPhyMemory();
+  //fprintf(stderr, "after release region %ld, blocks %d\n", region_id, _block_manager.block_pool.size()); 
   //fprintf(stderr, "release region %ld\n", region_id); 
 }
 
@@ -501,11 +518,12 @@ void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_ca
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
+    //fprintf(stderr, "region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
     assert(this->active_regions_map.count(region_id) > 0);
     kvCacheRegion * region = this->active_regions_map[region_id];
-    //fprintf(stderr, "region-%ld allocates %ld blocks done. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
     region->updateBlocks(blocks, stream);
+    //fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
+    //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
   }
 
   // Make sure that the asynchronized memcopy has finished. 
@@ -543,7 +561,7 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
       stream = at::cuda::getCurrentCUDAStream();
     } 
 
-    fprintf(stderr, "NNNNNNNNN in handling the request!!!!!");
+    //fprintf(stderr, "NNNNNNNNN in handling the request!!!!!\n");
     // Perform memory management asynchronously
     instance->swapOutCache(instance->swap_out_caches, stream);
     instance->swapInCache(instance->swap_in_caches, stream);
@@ -661,7 +679,7 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
 
     int64_t size = blocks  * this->cache_block_size; 
 
-    fprintf(stderr, "SWPAIN allocation regionid-%ld, blocks %ld, size: %lx\n", region_id, blocks, size);
+    //fprintf(stderr, "SWPAIN allocation regionid-%ld, blocks %ld, size: %lx\n", region_id, blocks, size);
     region->updateBlocks(blocks, stream);
     
     CUdeviceptr dest_ptr = region->getStartPtr(); 

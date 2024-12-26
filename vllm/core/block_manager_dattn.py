@@ -20,6 +20,7 @@ from vllm.utils import Device, Counter
 from collections import deque
 from dataclasses import dataclass, field
 import sys
+import torch
 
 logger = init_logger(__name__)
 
@@ -187,7 +188,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         self.immediate_allocate = True 
         cache_id = self._allocate_gpu_cache(need_blocks)
-        
+
+        torch.cuda.synchronize()
         print(f"NNOOOOOOWWW step_index-{self.step_index}, allocate cache_id: {cache_id}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
@@ -233,7 +235,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
                 # Compute the number of free blocks for each requst
                 #free_blocks_per_req = self._compute_free_blocks(allocated_block_num, need_blocks) 
-                #print(f"Reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
+                print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
 
                 # Now the current request will keep free_blocks_per_req blocks, while others 
                 # are still need to be freed 
@@ -532,7 +534,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             return to_allocate_blocks, to_free_gpu_caches, immediate_allocate
 
         for cache_id, num_blocks in self.to_allocate_blocks.items():
-            #print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
             to_allocate_blocks[cache_id] = num_blocks
 
         to_free_blocks = 0
@@ -544,8 +546,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             to_free_blocks += num_blocks 
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        #print(f"step-{self.step_index}, immediate_allocate:{immediate_allocate}, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
-        
+        print(f"step-{self.step_index}, immediate_allocate:{immediate_allocate}, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
+
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()
         self.to_allocate_blocks.clear()

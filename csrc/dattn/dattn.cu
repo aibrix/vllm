@@ -18,69 +18,222 @@
 
 #define KV_UTILIZATION_RATE (0.9)
 
-static CUmemAllocationProp _prop = {};
-static CUmemAccessDesc _accessDescr = {};
- 
+constexpr int64_t MEGABYTES=1048576;
+constexpr int64_t PAGE_SIZE=(MEGABYTES * 2); 
+constexpr int64_t GIGABYTES=(MEGABYTES * 1024);
+
 /* 
   In this allocator, we only have the following concepts, but without the concept of tokens.
-  The python portion should convert the number of tokens to tokens depending on their block_size (e.g., 16)
+  The python portion should convert the number of tokens to tokens depending on their cache_block_size (e.g., 16)
   Region: virtual address space for a request. Currently, we support the space for max_seq_len.
  */
 static uint64_t roundup(uint64_t size, uint64_t align_size) {
   return ((size + align_size - 1)/align_size) * align_size; 
 }
 
-static int allocatePhyPages(void * ptr, uint64_t size) {
-  CUdeviceptr dptr = (CUdeviceptr)ptr;
+using PhysicalBlock = struct {
+    CUmemGenericAllocationHandle handle;
+};
 
-  CUdevice dev; // device
-  CHECK_DRV(cuCtxGetDevice(&dev));
-  _prop.location.id = dev;
-  _accessDescr.location = _prop.location;
+class PhysicalBlocksManager {
+public:
+  std::vector<PhysicalBlock> block_pool; // Available 
+  std::unordered_map<void *, PhysicalBlock> block_map;
+  int64_t block_size;
+  int64_t free_blocks; 
+  int64_t total_size;
+  int64_t max_allowed_size; // maximum allowed size for KV cache
+  int64_t page_size;  
+  int64_t incremental_size; 
+  int64_t tofree_blocks_watermark; 
+  int64_t num_tofree_blocks; 
+  CUmemAllocationProp prop;
 
-  CUresult status = CUDA_SUCCESS;
-  CUmemGenericAllocationHandle allocationHandle;
-  if ((status = cuMemCreate(&allocationHandle, size, &_prop, 0)) == CUDA_SUCCESS) {
-    if ((status = cuMemMap(dptr, size, 0ULL, allocationHandle, 0ULL)) == CUDA_SUCCESS) {
-      if ((status = cuMemSetAccess(dptr, size, &_accessDescr, 1)) != CUDA_SUCCESS) {
-        fprintf(stderr, "cuMemMap success,but cuMemSetAccess failed!, err code: %d\n", status);
-        cuMemUnmap(dptr, size);
-      }
+  PhysicalBlocksManager(); 
+  ~PhysicalBlocksManager();
+  void initialize(size_t max_allowed_size, size_t total_memory, size_t block_size);
+
+  PhysicalBlock allocate();
+  void record(void * virtual_address, PhysicalBlock block);
+
+  void free(void * virtual_address);
+
+  void cleanup();
+
+private:
+  void _free_blocks_from_pool(int64_t num_blocks);
+  void _alloc_blocks(int64_t num_blocks);
+
+}; 
+
+
+
+static PhysicalBlocksManager _block_manager;
+
+/*
+ * In this file, there are three concepts:
+    page_size: the actual page size of the underlying hardware, typically 2MB for cuda GPU
+    cache_block_size: the original size of each block (16 tokens). However, this size (e.g., 5M) may not be aligned well with pages. 
+    physical_block_size: the actual size used in managing of pysical blocks, which is consisted of multiple of cache_block_size. 
+                      In particular, this size is algined with page_size.  
+ */
+PhysicalBlocksManager::PhysicalBlocksManager() {
+  this->prop = {};
+  this->prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  this->prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  this->prop.location.id = 0;
+
+  // Each time, the size of physical blocks is to be increased whenever no objects is available
+  this->incremental_size = 2 * GIGABYTES;
+  this->total_size = 0;
+  this->block_size = 0; 
+  this->free_blocks = 0;  
+}
+
+PhysicalBlocksManager::~PhysicalBlocksManager() {
+}
+
+void PhysicalBlocksManager::_alloc_blocks(int64_t num_blocks) {
+    CUresult result;
+    for (size_t i = 0; i < num_blocks; i++) {
+        CUmemGenericAllocationHandle handle;
+        result = cuMemCreate(&handle, this->block_size, &this->prop, 0);
+        if (result != CUDA_SUCCESS) {
+            throw std::runtime_error("Failed to create memory allocation");
+        }
+
+        block_pool.emplace_back(PhysicalBlock{handle});
     }
-    // always release the handle, but the memory is accessible util cuMemUnmap
-    if((status = cuMemRelease(allocationHandle)) != CUDA_SUCCESS) {
-      fprintf(stderr, "cuMemRelease failed, err code: %d\n", status);
-    } 
-  } else {
-    fprintf(stderr, "cuMemCreate %lx failed!, err code: %d\n", size, status);
-  }
-  return status == CUDA_SUCCESS ? 0 : -1;
+    // Update the number of blocks
+    this->free_blocks += num_blocks; 
 }
 
-// Free the physical memory [ptr, ptr + size]
-static void freePhysicalMemory(void* ptr, size_t size) {
-  CUdeviceptr dptr = (CUdeviceptr)ptr;
-  CUresult res = cuMemUnmap(dptr, size); 
-  if(res != CUDA_SUCCESS) {
-    const char* errorStr;
-    cuGetErrorString(res, &errorStr);
-    fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx with error %s\n", ptr, size, errorStr);
-  } 
+void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_memory, size_t block_size) {
+    CUresult result;
+    size_t page_size; 
+
+    // Getting the granularity of page isze. 
+    result = cuMemGetAllocationGranularity(&page_size, &this->prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+    if (result != CUDA_SUCCESS) {
+        throw std::runtime_error("Failed to get page size");
+    }
+
+    assert(page_size == PAGE_SIZE); 
+    assert(total_memory % GIGABYTES == 0);
+
+    // We assume that cache_block_size is multiple of megabytes here.  
+
+    // Allocate the initial blocks based on user's specification
+    this->total_size = total_memory; 
+    this->block_size = block_size; 
+
+    this->max_allowed_size = max_allowed_size; 
+    this->tofree_blocks_watermark = (this->incremental_size * 2)/block_size; 
+    this->num_tofree_blocks = this->incremental_size/block_size;  
+
+    // Allocate the physical memory with specified size 
+    size_t num_blocks = total_memory / block_size;
+    _alloc_blocks(num_blocks);
 }
+
+PhysicalBlock PhysicalBlocksManager::allocate(void) {
+    if(this->free_blocks == 0) {
+      assert(this->block_pool.size() == 0); 
+
+      // Keeping increase the memory if the GPU memory is sufficient
+      int64_t allow_size = this->max_allowed_size - this->total_size;
+      int64_t alloc_size; 
+
+      if(allow_size <= 0) {
+        fprintf(stderr, "There is no sufficent GPU memory now. ");
+        exit(0);         
+      }
+
+      if (allow_size > this->incremental_size) {
+        alloc_size = this->incremental_size; 
+      }
+      else {
+        // Less than the incremental_size. 
+        alloc_size = roundup(allow_size, this->block_size);  
+      }
+
+      int64_t blocks = alloc_size/this->block_size; 
+
+      _alloc_blocks(blocks);
+      this->total_size += alloc_size; 
+    }
+
+    assert(this->free_blocks > 0); 
+    assert(this->block_pool.size() > 0); 
+
+    PhysicalBlock block = block_pool.back(); 
+    block_pool.pop_back();     
+
+    return block; 
+}
+
+void PhysicalBlocksManager::free(void * virtual_address) {
+  PhysicalBlock block;
+  bool is_exist = false; 
+
+  if(block_map.count(virtual_address)) {
+    block = block_map[virtual_address];
+
+    block_map.erase(virtual_address); 
+    is_exist = true; 
+  }
+  
+  if (!is_exist) {
+    return; 
+  }
+
+  // Adding this block to the block_pool
+  block_pool.push_back(block); 
+
+  if(block_pool.size() > this->tofree_blocks_watermark) {
+    _free_blocks_from_pool(num_tofree_blocks);
+  }
+}
+
+void PhysicalBlocksManager::_free_blocks_from_pool(int64_t num_blocks) {
+    for(int i = 0; i < num_blocks; i++) {
+      PhysicalBlock block = block_pool.back(); 
+      CUresult status = CUDA_SUCCESS;
+      if((status = cuMemRelease(block.handle)) != CUDA_SUCCESS) {
+        fprintf(stderr, "cuMemRelease failed, err code: %d\n", status);
+      } 
+      block_pool.pop_back(); 
+    }
+
+    this->free_blocks -= num_blocks; 
+}
+
+void PhysicalBlocksManager::cleanup() {
+    for (auto& block : block_pool) {
+      CUresult status = CUDA_SUCCESS;
+      if((status = cuMemRelease(block.handle)) != CUDA_SUCCESS) {
+        fprintf(stderr, "cuMemRelease failed, err code: %d\n", status);
+      } 
+    }
+    block_pool.clear();
+}
+
+void PhysicalBlocksManager::record(void * virtual_address, PhysicalBlock block) {
+  block_map[virtual_address] = block; 
+}
+
+static CUmemAccessDesc _accessDescr = {};
+ 
 
 /*
 ** kvCacheRegion functions implementation
 */
-kvCacheRegion::kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t page_size, CUdeviceptr ptr) {
-  this->region_size = region_size;
-  this->block_size = block_size;
-  this->page_size = page_size; 
+kvCacheRegion::kvCacheRegion(int64_t cache_block_size, int64_t physical_block_size, CUdeviceptr ptr) {
+  this->cache_block_size = cache_block_size;
+  this->physical_block_size = physical_block_size;
   this->dptr = reinterpret_cast<char*>(ptr);  
-  this->nextUnmapedAddr = reinterpret_cast<char*>(ptr); 
-
-  this->total_pages = 0;
-  this->used_pages = 0; 
-  this->alignedSize = 0;
+  this->nextUnmappedAddr = reinterpret_cast<char*>(ptr); 
+  this->mapped_size = 0;
 }
 
 // Decontructor: release all physical pages of this region
@@ -98,119 +251,168 @@ CUdeviceptr kvCacheRegion::getStartPtr(void) {
   kvCacheRegion function: allocate cached blocks  
     if the return value > 0, then it is succesful. 
  */ 
-int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream) {
-  uint64_t size = blocks * this->block_size;
+void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
+  uint64_t newSize = blocks * this->cache_block_size;
+  newSize = roundup(newSize, this->physical_block_size); 
 
-  int64_t toallocPages = -1; 
+  int64_t distance; 
 
-  // Align the new offset to page_size
-  uint64_t alignedSize = roundup(size, this->page_size); 
-
-  // No need to allocate if the cache is already larger than what we need
-  if(alignedSize < this->alignedSize) {
-    return 0; 
+  // No need to allocate if size is not changed
+  if(newSize == this->mapped_size) {
+    return; 
   }
+  else if (newSize < this->mapped_size) {
+    // Shrink the memory for this region
+    distance = this->mapped_size - newSize; 
+    int64_t blocks_num = distance/this->physical_block_size; 
 
-  this->total_pages = alignedSize/this->page_size;
+    char * addr = this->dptr + newSize; 
+    this->nextUnmappedAddr = addr; 
 
-  // Updating the offset as we are using more blocks here. 
-  this->alignedSize = alignedSize;
-  
-  // Check how many pages should we allocated this time
-  char * alignedAddr = this->dptr + alignedSize; 
-  if( alignedAddr > this->nextUnmapedAddr) {
+    // Unmap unnecessary memory
+    CUresult res; 
+    res = cuMemUnmap(reinterpret_cast<CUdeviceptr>(addr), distance); 
+    if(res != CUDA_SUCCESS) {
+      const char* errorStr;
+      cuGetErrorString(res, &errorStr);
+      fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx with error %s\n", addr, distance, errorStr);
+      exit(-1);
+    }       
 
-    // Check whether alignedAddr is actually aligned well
-    assert((alignedAddr - this->nextUnmapedAddr)%this->page_size == 0);
-    toallocPages = (alignedAddr - this->nextUnmapedAddr)/this->page_size; 
+    for(int i = 0; i < blocks_num; i++) {
+      // Free the actual physical memory by putting it back to the pool
+      _block_manager.free(addr); 
 
-    assert(toallocPages >= 0);
+      addr += this->physical_block_size; 
+    }
+  }
+  else {
+    // Increase the memory for this region
+    distance = newSize - this->mapped_size; 
+    int64_t blocks_num = distance/this->physical_block_size; 
 
-    uint64_t allocSize = toallocPages * this->page_size;
+    char * addr = this->nextUnmappedAddr;
 
-    // Allocate physical pages, which will exit if can't allocate successfully
-    if (toallocPages > 0 && allocatePhyPages(this->nextUnmapedAddr, allocSize) == 0) {
-      
-      // Touch newly-allocates pages in order to initiate physical page allocation
-      // This is important to avoid the memory allocation overhead on the critical path. 
-      for(int i = 0; i < toallocPages; i++) {
-        int64_t h_data = 0;
-        int64_t offset = this->page_size * i;
-        // Using different APIs for asynchronous memory allocations. 
-        if(stream == nullptr) { 
-          cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t));
-        } else {
-          cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t), stream);
+    // Map new memory
+    CUresult res; 
+    for(int i = 0; i < blocks_num; i++) {
+      // Allocate a physical block 
+      PhysicalBlock block = _block_manager.allocate(); 
+      int64_t size = this->physical_block_size;  
+      if ((res = cuMemMap(reinterpret_cast<CUdeviceptr>(addr), size, 0ULL, block.handle, 0ULL)) == CUDA_SUCCESS) {
+        if ((res = cuMemSetAccess(reinterpret_cast<CUdeviceptr>(addr), size, &_accessDescr, 1)) != CUDA_SUCCESS) {
+          fprintf(stderr, "cuMemMap success,but cuMemSetAccess failed!, err code: %d\n", res);
+          cuMemUnmap(reinterpret_cast<CUdeviceptr>(addr), size);
+          exit(-1);
         }
       }
 
-      this->nextUnmapedAddr = alignedAddr;
-      //fprintf(stderr, "%p : blocks %ld blocksize %lx this->alignedSize %lx this->nextUnmapedAddr %p alignedAddr %p\n", this->dptr, blocks, this->block_size, this->alignedSize, this->nextUnmapedAddr, alignedAddr);
-      // Update the used pages correspondingly. The statement works even when this->offset is not aligned to page_size
-      *used_pages += toallocPages; 
+      _block_manager.record(addr, block); 
+
+      // Update addr to the next block
+      addr += this->physical_block_size; 
     }
+    this->nextUnmappedAddr = addr; 
   }
- 
-  return toallocPages; 
+
+  this->mapped_size = newSize; 
 }
 
 void kvCacheRegion::freeAllPhyMemory(void) {
-  //fprintf(stderr, "freeAllPhyMemory dtpr %p alignedSize %lx\n", this->dptr, this->alignedSize);
-  assert (this->alignedSize > 0);
-  freePhysicalMemory(this->dptr, this->alignedSize);
-  this->nextUnmapedAddr = this->dptr; 
-  this->alignedSize = 0; 
+  //fprintf(stderr, "freeAllPhyMemory dtpr %p mapped_size %lx\n", this->dptr, this->mapped_size);
+  assert (this->mapped_size > 0);
+
+  char * addr = this->dptr;
+  CUresult res = cuMemUnmap(reinterpret_cast<CUdeviceptr>(addr), this->mapped_size); 
+  if(res != CUDA_SUCCESS) {
+    const char* errorStr;
+    cuGetErrorString(res, &errorStr);
+    fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx with error %s\n", reinterpret_cast<CUdeviceptr>(addr), this->mapped_size, errorStr);
+    exit(-1);
+  }       
+
+  int64_t blocks_num = this->mapped_size/this->physical_block_size; 
+  for(int i = 0; i < blocks_num; i++) {
+    // Free the actual physical memory by putting it back to the pool
+    _block_manager.free(addr); 
+
+    addr += this->physical_block_size; 
+  }
+
+  // Note that we don't actually release virtual memory (cuMemAddressFree)
+  this->nextUnmappedAddr = this->dptr; 
+  this->mapped_size = 0; 
 }
 
 /*
 ** kvCacheAllocator functions implementation
+* TODO: we may need to remove some details from the allocator, such as max_seq_length, layers_num. 
+*       But instead, we should add the initial allocation size, or we can use number of blocks (allocated size, so that )
 */
-kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, int64_t heads_num, int64_t head_size, int64_t tokens_per_block, int64_t dtype_size) {
-  uint64_t key_cache_block_per_layer =  tokens_per_block * heads_num * head_size * dtype_size; 
-  uint64_t value_cache_block_per_layer = key_cache_block_per_layer;
-  uint64_t cache_block_size = (key_cache_block_per_layer + value_cache_block_per_layer) * layers_num; 
-
-  fprintf(stderr, "kvCacheAllocator initialization: key_cache_block_per_layer-%d, cache_block_size-%lx\n", key_cache_block_per_layer, cache_block_size); 
+kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_block_size, int64_t region_cache_size) {
+  CUdevice device;
+  CHECK_DRV(cuInit(0));
+  CHECK_RT(cudaFree(0));
   // Getting the cuda device and force the initialization
-  CUdevice dev; // device
-  CHECK_RT(cudaFree(0));  // Force and check the initialization of the runtime
-  CHECK_DRV(cuCtxGetDevice(&dev));
-  
-  size_t aligned_sz; 
-  //_prop.type = CU_MEM_ALLOCATION_TYPE_MAX;
-  _prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-  //_prop.type = CU_MEM_ALLOCATION_TYPE_PORTABLE;
-  _prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  _prop.location.id = dev;
+  CHECK_DRV(cuCtxGetDevice(&device));
+
+  CHECK_DRV(cuCtxGetCurrent(&this->torchContext)); 
+  CHECK_DRV(cuCtxCreate(&this->origContext, 0, device));
+  //CHECK_DRV(cuCtxSetCurrent(this->origContext));
+
+  size_t free_memory, total_memory;
+  CHECK_RT(cudaMemGetInfo(&free_memory, &total_memory)); 
+  fprintf(stderr, "free_memory-%lx, total_memory-%lx\n", free_memory, total_memory);
+
+  CUresult result;
+  size_t page_size; 
+
+  CUmemAllocationProp prop = {};
+  prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  prop.location.id = 0;
+
   _accessDescr.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-  _accessDescr.location = _prop.location;
+  _accessDescr.location = prop.location;
 
-  CHECK_DRV(cuMemGetAllocationGranularity(&aligned_sz, &_prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
-  
-  uint64_t max_blocks = roundup(max_seq_length, tokens_per_block)/tokens_per_block; 
-  uint64_t region_size = max_blocks * cache_block_size * 2; 
+  // Getting the granularity of page isze. 
+  result = cuMemGetAllocationGranularity(&page_size, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+  if (result != CUDA_SUCCESS) {
+    fprintf(stderr, "Failed to get page size!\n");
+    exit(-1);
+  }
 
-  this->page_size = aligned_sz;
-  this->region_size = ((region_size + aligned_sz - 1) / aligned_sz) * aligned_sz;
-  this->block_size = cache_block_size;
+  fprintf(stderr, "kvCacheAllocator: max_gpu_memory_size - %lx, cache_block_size - %lx, region_cache_size - %lx, page_size - %lx", max_gpu_memory_size, cache_block_size, region_cache_size, page_size);
+  assert(page_size == PAGE_SIZE); 
 
-  //printf("kvCacheAllocator: page_size-%ld, region_size-%ld, block_size-%ld\n", this->page_size, this->region_size, this->block_size);
+  int64_t to_allocate_memory = 2 * GIGABYTES; 
+  if(free_memory < to_allocate_memory) {
+    fprintf(stderr, "Insufficient gpu memory\n");
+    exit(-1);
+  }
 
-  // TODO: finding out how much physical blocks it includes. This is just for the reference or watermark, as 
-  // there is no need to rely on pre-assigned values if physical blocks are allocated on-demand
-  size_t freeMem, totalMem;
-  CHECK_RT(cudaMemGetInfo(&freeMem, &totalMem)); 
+  int64_t physical_block_size = cache_block_size; 
 
-  this->watermark_pages = (((uint64_t)(freeMem * KV_UTILIZATION_RATE))/this->page_size);  
-   
-  // Doing other initialization
-  this->total_pages = 0;
-  this->used_pages = 0;
-  this->active_regions = 0;
+  while(physical_block_size%page_size != 0) {
+    physical_block_size *= 2; 
+
+    // Adding an explicit checking. 
+    if(physical_block_size > 40*MEGABYTES) {
+      fprintf(stderr, "Invalid physical_block_size %lx, with cache_block_size-%lx!!", physical_block_size, cache_block_size);
+      exit(-1);
+    }
+  }
+  this->physical_block_size = physical_block_size; 
+
+  // Initialize block manager
+  // max_allowed_size should be related to num_blocks, initialized GPU memory, cache_block_size
+  _block_manager.initialize(max_gpu_memory_size, to_allocate_memory, physical_block_size);
+
+  this->page_size = PAGE_SIZE;
+  this->region_size = region_cache_size;
+  this->cache_block_size = cache_block_size;
 
   this->manager_running = false;
-  cuCtxGetCurrent(&origContext);
-
 
   // Initialize of mutex lock and condition
   pthread_mutex_init(&mutex_manager, NULL); 
@@ -222,11 +424,12 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
   // Set the thread to be detached
   pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-  int result = pthread_create(&this->thread_id, &attr, kvCacheAllocator::memoryManagerThread, this);
-  if(result != 0) {
+  if(pthread_create(&this->thread_id, &attr, kvCacheAllocator::memoryManagerThread, this) != 0) {
     fprintf(stderr, "thread creation failed!"); 
-    exit(0); 
+    exit(-1); 
   }
+
+  CHECK_DRV(cuCtxSetCurrent(this->torchContext));
 }
 
 int64_t kvCacheAllocator::getPageSize() {
@@ -244,18 +447,14 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
 
   // Create a new region from the scratch
-  region = new kvCacheRegion(this->region_size, this->block_size, this->page_size, ptr);
+  region = new kvCacheRegion(this->cache_block_size, this->physical_block_size, ptr);
 
   // Allocate one block the first region
   if(region_id == 0) {
-    uint64_t total_pages; 
-    region->allocCacheBlocks(1, &total_pages, nullptr); 
+    region->updateBlocks(1, nullptr); 
   }
 
-  std::lock_guard<std::mutex> lock(this->mutex);
-  
   // Record the region information
-  this->active_regions += 1; 
   this->active_regions_map[region_id] = region; 
 
   return static_cast<int64_t>(ptr);
@@ -263,7 +462,7 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
 
 std::vector<int64_t> kvCacheAllocator::allocCPUCaches(int64_t num_caches, int64_t cache_size) {
   std::vector<int64_t> cache_addresses; 
-
+  
   for(int i = 0; i < num_caches; i++) {
     void * address;  
     cudaError_t err = cudaHostAlloc(&address, cache_size, cudaHostAllocDefault);
@@ -285,8 +484,7 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
     exit(-1); 
   }
 
-  std::lock_guard<std::mutex> lock(this->mutex);
-
+  //std::lock_guard<std::mutex> lock(this->mutex);
   kvCacheRegion * region = this->active_regions_map[region_id];
 
   // Note that as we don't actually release physical cache blocks. 
@@ -295,55 +493,35 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   //fprintf(stderr, "release region %ld\n", region_id); 
 }
 
-// alloc function, allocate physical memory, map to the reserved virtual address
-// This function is designed for both prefill and decoding phase, where prefill may 
-// require to save KV cache of multiple tokens, which should not invoke this function multiple times. 
-// Similarly, the python code may get the physical blocks for multiple tokens during the decoding phase
-// Note that the allocator doesn't care about tokens (which should be handled by the python code), but only blocks here.
-int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t blocks, cudaStream_t stream) {
-  int64_t pages = -1;
-
-  // Find the region corresponding to the given region_id, which should reserveRegion before
-  // If the region_id doesn't exist at all, it is the bug that should be fixed.  
-  if(this->active_regions_map.count(region_id) == 0) {
-    fprintf(stderr, "ERROR in allocation: region_id %ld does not exist at all!\n", region_id);
-    exit(-1); 
-  }
-
-  std::lock_guard<std::mutex> lock(this->mutex);
-
-  kvCacheRegion * region = this->active_regions_map[region_id]; 
-
-  pages = region->allocCacheBlocks(blocks, &this->used_pages, stream);
-
-  return pages;
-}
 
 // Allocate cache blocks for a range of requests. Each request information will be an vector, with
 // the request id as the first, and then number of blocks as the second. 
-int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_cache_blocks, cudaStream_t stream) {
-  int64_t pages = 0; 
-
+void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_cache_blocks, cudaStream_t stream) {
   for(auto row : req_cache_blocks) {
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    pages += _allocCacheBlocksForRequest(region_id, blocks, stream);
-    //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
+    //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
+    assert(this->active_regions_map.count(region_id) > 0);
+    kvCacheRegion * region = this->active_regions_map[region_id];
+    //fprintf(stderr, "region-%ld allocates %ld blocks done. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
+    region->updateBlocks(blocks, stream);
   }
 
   // Make sure that the asynchronized memcopy has finished. 
   if(stream)
     cudaStreamSynchronize(stream);
 
-  return pages; 
+  return; 
 }
 
 // This is a separate thread that performing both synchronous and asynchronous 
 // memory management operations. 
 void * kvCacheAllocator::memoryManagerThread(void * arg) {
   kvCacheAllocator * instance = static_cast<kvCacheAllocator *>(arg); 
-  CUresult result = cuCtxSetCurrent(instance->origContext);
+  
+  // It is required to set current context if we are going 
+  //CUresult result = cuCtxSetCurrent(instance->origContext);
   
   //cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   cudaStream_t asyncStream;
@@ -365,6 +543,7 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
       stream = at::cuda::getCurrentCUDAStream();
     } 
 
+    fprintf(stderr, "NNNNNNNNN in handling the request!!!!!");
     // Perform memory management asynchronously
     instance->swapOutCache(instance->swap_out_caches, stream);
     instance->swapInCache(instance->swap_in_caches, stream);
@@ -379,18 +558,12 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
 
   return NULL;
 }
-/* 
-   This function mainly sets the work to be done, and then notify the manager thread to 
-   perform memory management asynchronously. 
- */
-void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks, 
-        std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in) {
-}
 
 void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, 
                                          std::vector<std::vector<int64_t>> req_cache_blocks,
                                          std::vector<std::vector<int64_t>> to_swap_out,
                                          std::vector<std::vector<int64_t>> to_swap_in) {
+    //fprintf(stderr, "NNNNNNNNN in handling the request updateCacheBlocks!!!!!");
     pthread_mutex_lock(&this->mutex_manager);
     
     // If the manager has not finished, waiting on the condition 
@@ -436,27 +609,6 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<in
       } 
       pthread_mutex_unlock(&this->mutex_manager); 
     }
-
-  /*
-  if(immediate_allocate) {
-    pthread_mutex_lock(&this->mutex_manager);
-    
-    // If the manager has not finished, waiting on the condition 
-    while(this->manager_running) {
-      pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
-    }
-    this->swapOutCache(to_swap_out, nullptr);
-    this->swapInCache(to_swap_in, nullptr);
-    this->releaseRegions(free_caches);
-    this->allocCacheBlocks(req_cache_blocks, nullptr);
-
-    pthread_mutex_unlock(&this->mutex_manager); 
-  }
-  else {
-    doAsyncKVCacheManage(free_caches, req_cache_blocks, to_swap_out, to_swap_in);
-  }
-  */
-  //Py_END_ALLOW_THREADS
 }
 
 // Release regions specified in the vector
@@ -470,14 +622,12 @@ void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
 // Swap out the caches listed in src_to_dests (from Device to Host)
 void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
   
-  //const at::cuda::OptionalCUDAGuard device_guard(
-  //    src_device.is_cuda() ? src_device : dst_device);
-  //stream = at::cuda::getCurrentCUDAStream();
-
   for(auto item: swap_caches) {
     int64_t region_id = item[0]; 
     int64_t dest_ptr = item[1]; 
     int64_t size = item[2]; 
+
+    assert(this->active_regions_map.count(region_id) != 0);
 
     kvCacheRegion * region = this->active_regions_map[region_id];
     CUdeviceptr src_ptr = region->getStartPtr(); 
@@ -509,12 +659,12 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
     // Allocate physical memory at first
     kvCacheRegion * region = this->active_regions_map[region_id];
 
-    int64_t size = blocks  * this->block_size; 
+    int64_t size = blocks  * this->cache_block_size; 
 
-    region->allocCacheBlocks(blocks+1, &this->used_pages, stream);
+    fprintf(stderr, "SWPAIN allocation regionid-%ld, blocks %ld, size: %lx\n", region_id, blocks, size);
+    region->updateBlocks(blocks, stream);
     
     CUdeviceptr dest_ptr = region->getStartPtr(); 
-    //fprintf(stderr, "SWPAIN src_ptr %lx, regionid-%ld, blocks %ld, address: %p, size: %lx\n", src_ptr, region_id, blocks, dest_ptr, size);
 
     if(stream == nullptr) {
       cuMemcpyHtoD(dest_ptr, reinterpret_cast<const void*>(src_ptr), size);
@@ -523,6 +673,4 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
       cuMemcpyHtoDAsync(dest_ptr, reinterpret_cast<const void*>(src_ptr), size, stream);
     }
   }
-
 }
-

@@ -1207,14 +1207,13 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         If cuda graph is required, this API automatically pads inputs.
         """
         builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
-        #print(f"in _prepare_model_input_tensors: size:{len(seq_group_metadata_list)}", file=sys.stderr)
         for seq_group_metadata in seq_group_metadata_list:
             request_id = int(seq_group_metadata.request_id)
             cache_id = seq_group_metadata.seq_data[request_id].cache_id 
+            #print(f"in _prepare_model_input_tensors: request_id-{request_id}, cache_id:{cache_id} , kv_ptr:{hex(self._get_kv_ptr(cache_id))}", file=sys.stderr)
             builder.add_seq_group(seq_group_metadata, self._get_kv_ptr(cache_id) if self.use_dattn else 0)
 
         builder.reset_cached_inter_data()
-
         return builder.build()  # type: ignore
 
     @torch.inference_mode()

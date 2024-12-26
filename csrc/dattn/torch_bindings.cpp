@@ -11,8 +11,7 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // kvCacheAllocator class bind
   m.class_<kvCacheAllocator>("kvCacheAllocator")
-    //.def(torch::init<>())
-    .def(torch::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>())
+    .def(torch::init<int64_t, int64_t, int64_t>())
     .def("reserveRegion", &kvCacheAllocator::reserveRegion)
     .def("allocCPUCaches", &kvCacheAllocator::allocCPUCaches)
     .def("releaseRegions", &kvCacheAllocator::releaseRegions)

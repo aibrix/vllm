@@ -311,6 +311,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     # notify all other workers to stop their execution loop.
                     broadcast_tensor_dict({}, src=0)
                 return None
+            print(f"_get_driver_input_and_broadcast:!!!", file=sys.stderr)
             return self._get_driver_input_and_broadcast(execute_model_req)
         else:
             return self._get_worker_input_from_broadcast()
@@ -323,7 +324,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         sequences are provided."""
         start_time = time.perf_counter()
 
-        #print(f"In prepare_input now", file=sys.stderr)
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None
@@ -332,7 +332,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         num_steps = worker_input.num_steps
         if self.use_dattn:
             to_swap_out_caches, to_swap_in_caches = self.execute_worker_dattn(worker_input)
-            
+
             # If any of these not zero
             if (execute_model_req.to_free_kv_caches or execute_model_req.to_allocate_blocks 
                or to_swap_out_caches or to_swap_in_caches): 

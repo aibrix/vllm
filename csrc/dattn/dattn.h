@@ -54,40 +54,32 @@ checkDrvError(CUresult res, const char *tok, const char *file, unsigned line) {
 // TODO: we may avoid expose this class externally in the future. 
 class kvCacheRegion : public torch::CustomClassHolder{
 private:
+  // the starting address of this region
   char * dptr;
 
-  // the number of bytes for the request's virtual address space (region)
-  uint64_t region_size; 
-  
-  // the size of a kv cache block in bytes, which is NOT the number tokens inside a block
-  uint64_t block_size; 
+  // the size of a kv cache block in bytes
+  uint64_t cache_block_size; 
 
-  // The real page_size supported by the hardware, which could be larger or smaller than block_size
-  uint64_t page_size; 
+  // the size of a physical block, which is the multiple of cache_block_size and is aligned with page_size
+  uint64_t physical_block_size; 
 
-  // The number of allocated physical pages for the current region.
-  uint64_t total_pages;
-
-  // Note that total_pages can be larger than use_pages, as it may inherit a 
-  // live region that already has many allocated physical pages. 
-  uint64_t used_pages;
- 
-  uint64_t alignedSize; 
+  // The actual size that has been mapped successfully
+  uint64_t mapped_size; 
 
   // virtual address of the next page that needs to be mapped. 
-  // Typically, (nextUnmapedAddr - dptr)/page_size == total_pagees 
-  char * nextUnmapedAddr; 
+  // Typically, (nextUnmappedAddr - dptr)/page_size == total_pagees 
+  char * nextUnmappedAddr; 
 
 public:
 
-  kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t page_size, CUdeviceptr ptr);
+  kvCacheRegion(int64_t cache_block_size, int64_t physical_block_size, CUdeviceptr ptr);
 
   ~kvCacheRegion();
 
   // get the number of physical pages
   CUdeviceptr getStartPtr(void); 
   
-  int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream);
+  void updateBlocks(uint64_t blocks, cudaStream_t stream);
   void freeAllPhyMemory(void);
 };
 
@@ -95,49 +87,30 @@ public:
 // kvCacheAllocator class, used for memory allocation of kv-cachemanager, memory allocation is based on page granularity,
 class kvCacheAllocator : public torch::CustomClassHolder{
 private:
-
+  CUcontext torchContext;  
   CUcontext origContext;   
 
-  /*
-    The following information are about physical blocks. 
-       
-      total_pages is the total number of physical pages that have been assigned from the allocator. 
-      used_pages can be less than total_pages, as used_pages will be incremented only when allocCacheBlock is invoked. 
-   */
-  uint64_t total_pages; 
-  uint64_t used_pages; 
-
-  // How many regions (requests) in this allocator
-  uint64_t active_regions;
-
-  // If total_pages is larger than the watermark, then we will start to garbage collect physical pages
-  // More specifically, we will reclaim pages from cached regions at first, and then from active regions 
-  uint64_t watermark_pages; 
-  
-  uint64_t region_size; 
-  uint64_t block_size;
+  int64_t region_size; 
+  int64_t cache_block_size;
+  int64_t physical_block_size; 
   uint64_t page_size;
   CUdevice device;
   std::mutex mutex;
 
   cudaStream_t stream;
+  
   // the hashtable to record the relationship between regions and ptrs
-  unordered_map<uint64_t, kvCacheRegion*> active_regions_map;
+  std::unordered_map<uint64_t, kvCacheRegion*> active_regions_map;
 
   // Internal functions
   static void *memoryManagerThread(void * arg); 
-  void _initializeAllocHandles(void);
   // Release the virtual address space for a region that is related to one request
   void _releaseRegion(int64_t region_id);
-  // Allocate physical memory, map to the reserved virtual address space of dptr, and set access permission
-  int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks, cudaStream_t stream);
 
   bool manager_running;
   bool immediate_allocate; 
   
   pthread_t thread_id;
-  void doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks,
-          std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>>  to_swap_in); 
   pthread_mutex_t mutex_manager;
   pthread_cond_t  cond_manager; 
   std::vector<int64_t> free_caches;
@@ -147,19 +120,13 @@ private:
 
 public:
 
-  //kvCacheAllocator(); 
   // The default contructor. Otherwise, torch bindings will complain it. 
-  kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, int64_t heads_num, int64_t head_size, int64_t tokens_per_block, int64_t dtype_size);
-  // {
-    // Nothing to do
-  //}
+  kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_block_size, int64_t region_cache_size);
+
 
   ~kvCacheAllocator() = default;
 
-  //void initialization(int64_t max_seq_length, int64_t layers_num, int64_t heads_num, int64_t head_size, int64_t tokens_per_block, int64_t dtype_size);
-  
-
-  // get the granularity of the physical memory allocation
+   // get the granularity of the physical memory allocation
   int64_t getPageSize(void);
 
   // Reserve the virtual address space for a region that is related to one request
@@ -169,7 +136,7 @@ public:
   std::vector<int64_t> allocCPUCaches(int64_t num_caches, int64_t cache_size);
   void releaseRegions(std::vector<int64_t> regions);
 
-  int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
+  void allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
 
   void updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches, 
                       std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in);

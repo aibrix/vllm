@@ -54,7 +54,7 @@ class CacheEngineDAttn:
             dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         dtype_size = get_dtype_size(dtype)
-        self.block_bytes_size = (head_size * num_kv_heads * dtype_size * self.block_size) * self.num_layers  * 2 
+        self.block_bytes_size = (num_kv_heads * head_size * dtype_size * self.block_size) * self.num_layers  * 2 
 
         max_batch_size = scheduler_config.max_num_seqs
         max_seq_len = scheduler_config.max_model_len
@@ -73,7 +73,9 @@ class CacheEngineDAttn:
 
         # reserve size for both K/V cache
         cache_space_per_req = sequence_buffer_bytes_size * self.num_layers * 2
-        assert (cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"
+        if (cache_space_bytes_size) % self.block_bytes_size != 0:
+            print(f"cache_space_bytes_size:{cache_space_bytes_size}, self.block_bytes_size:{self.block_bytes_size}", file=sys.stderr) 
+            assert (cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"
         
         cache_space_page_num = cache_space_bytes_size // self.block_bytes_size
 
@@ -86,8 +88,9 @@ class CacheEngineDAttn:
                     token_size, sequence_buffer_size, cache_space_size,
                     cache_space_bytes_size, cache_space_page_num, cache_space_per_req, self.block_bytes_size)
 
-        self.device_cache_allocator = dattn.kvCacheAllocator(max_seq_len, self.num_layers, num_kv_heads,
-                                                             head_size, self.block_size, dtype_size)
+        max_gpu_memory_size = cache_config.num_gpu_blocks * self.block_bytes_size
+        
+        self.device_cache_allocator = dattn.kvCacheAllocator(max_gpu_memory_size, self.block_bytes_size, cache_space_per_req)
 
         cpu_cache_num = cache_config.num_cpu_caches 
 
@@ -160,29 +163,7 @@ class CacheEngineDAttn:
         return kv_cache_ptrs
 
     def _reserve_cpu_kv_cache(self, cache_num: int, cache_space_per_req: int) -> List[int]:
-
         self.cpu_cache = self.device_cache_allocator.alloc_cpu_caches(cache_num, cache_space_per_req) 
-        for cache in self.cpu_cache:
-            print(f"cache - {hex(cache)}", file=sys.stderr)
-        """
-        for i in range(cache_num):
-            # Using mmap to reserve space for cpu cache. Multiple*2 in order to hold K/V cache
-            pinned_tensor = torch.empty(cache_space_per_req, dtype=torch.uint8, pin_memory=True)
-            self.mmap.append(pinned_tensor)
-            address = pinned_tensor.data_ptr()
-            
-            mm = mmap.mmap(-1, cache_space_per_req)
-            self.mmap.append(mm)
-            address = ctypes.addressof(ctypes.c_char.from_buffer(mm))
-            
-            cuda.cudaHostAlloc.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_size_t, ctypes.c_uint]
-            cuda.cudaHostAlloc.restype = ctypes.c_int
-            host_ptr = ctypes.c_void_p()
-            status = cuda.cudaHostAlloc(ctypes.byref(host_ptr), cache_space_per_req, 0)
-            address = host_ptr.value
-            self.cpu_cache[i] = address
-            print(f"{i}-th address-{hex(address)}, cache_space_per_req:{hex(cache_space_per_req)}", file=sys.stderr)
-        """
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         to_swap_in_caches = []
@@ -257,6 +238,7 @@ class CacheEngineDAttn:
 
     def update_cache_blocks(self, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], 
                             to_swap_out: List[List[int]], to_swap_in: List[List[int]]):
+        #print(f"innnnnnnnn update_cache_blocks!", file=sys.stderr)
         to_alloc_list = []
         for cache_id, blocks in to_allocate_blocks.items():
             to_alloc_list.append([cache_id, blocks])

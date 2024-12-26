@@ -46,22 +46,15 @@ class kvCacheRegion:
 # cache allocator based dAttention, used to manage kv cache tensor
 class kvCacheAllocator:
     def __init__(self, 
-                 max_seq_length, 
-                 layers_num, 
-                 heads_num, 
-                 head_size, 
-                 block_size, 
-                 dtype_size,
+                 max_gpu_memory_size, 
+                 block_bytes_size,
+                 cache_space_per_req,  
         ):
-        self.block_size = block_size
-        self._allocator = torch.classes._dattn_C.kvCacheAllocator(max_seq_length, 
-                                                                  layers_num,
-                                                                  heads_num,
-                                                                  head_size, 
-                                                                  block_size,
-                                                                  dtype_size 
+        self.block_size = block_bytes_size
+        self._allocator = torch.classes._dattn_C.kvCacheAllocator(max_gpu_memory_size,
+                                                                  block_bytes_size,
+                                                                  cache_space_per_req 
                                                                   )
-        #self.page_size = self._allocator.getPageSize()
 
     
     #def reserve_cache_ptr(self, ptr:CacheDevicePtr, page_num:int = 1):
@@ -91,5 +84,6 @@ class kvCacheAllocator:
                             req_cache_blocks:List[List[int]], 
                             to_swap_out: List[List[int]], 
                             to_swap_in: List[List[int]]):
+        #print(f"before invoking updateCacheBlocks!!!!", file=sys.stderr)
         return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks, to_swap_out, to_swap_in)
      

@@ -503,7 +503,8 @@ class LoggingStatLogger(StatLoggerBase):
 
             logger.info(
                 "Cache service hit rate: by tokens: %.2f%%, by blocks: %.2f%%",
-                stats.cache_service_tokens_hit_rate, stats.cache_service_blocks_hit_rate
+                stats.cache_service_tokens_hit_rate * 100, 
+                stats.cache_service_blocks_hit_rate * 100,
             )
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []

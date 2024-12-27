@@ -358,8 +358,8 @@ class Worker(LocalOrDistributedWorkerBase):
         )
 
     @torch.inference_mode()
-    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], to_swap_out: List[List[int]], to_swap_in: List[List[int]]) -> None:
-       self.cache_engine[virtual_engine].update_cache_blocks(immediate_allocate, free_kv_caches, to_allocate_blocks, to_swap_out, to_swap_in) 
+    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, to_update_blocks: Dict[int, int], to_swap_out: List[List[int]], to_swap_in: List[List[int]]) -> None:
+       self.cache_engine[virtual_engine].update_cache_blocks(immediate_allocate, to_update_blocks, to_swap_out, to_swap_in) 
 
     @torch.inference_mode()
     def execute_worker_dattn(self, worker_input: WorkerInput) -> Tuple[List[List[int]], List[List[int]]]:

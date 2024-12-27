@@ -1257,8 +1257,7 @@ class LLMEngine:
                 last_sampled_token_ids=last_sampled_token_ids,
                 # dattn's support
                 immediate_alloc=scheduler_outputs.immediate_allocate, 
-                to_allocate_blocks=scheduler_outputs.to_allocate_blocks,
-                to_free_kv_caches=scheduler_outputs.to_free_kv_caches,
+                to_update_blocks=scheduler_outputs.to_update_blocks,
                 )
 
             if allow_async_output_proc:

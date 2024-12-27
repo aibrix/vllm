@@ -18,7 +18,7 @@ prompts = [
 
 
 #prompts = prompts * 4
-#prompts = prompts * 10
+prompts = prompts * 10
 set_seed(32)
 
 import os
@@ -29,15 +29,19 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
 #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
 #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
-sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=2048)
+#sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=2048)
+sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=512)
 
 # Create an LLM.
 #llm = LLM(model="facebook/opt-6.7b")
 #llm = LLM(model="facebook/opt-6.7b", use_dattn=True)
 #llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
+#llm = LLM(model="Qwen/Qwen-7B", use_dattn=True, trust_remote_code=True, enforce_eager=True, preemption_mode="swap")
+#llm = LLM(model="facebook/opt-2.7B", use_dattn=True, enforce_eager=True, preemption_mode="swap")
 llm = LLM(model="facebook/opt-6.7b", use_dattn=True,  enforce_eager=True, preemption_mode="swap")
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True, preemption_mode="swap")
+#llm = LLM(model="facebook/opt-2.7b", enforce_eager=True, preemption_mode="swap")
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True, preemption_mode="swap")
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
 #llm = LLM(model="facebook/opt-1.3b", enforce_eager=True)

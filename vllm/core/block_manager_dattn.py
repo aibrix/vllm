@@ -228,7 +228,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # Remove this item from the to_free_gpu_caches
             del self.to_free_gpu_caches[cache_id]
             self.cached_free_gpu_blocks -= allocated_block_num
-
+            
+            print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, need_blocks:{need_blocks}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
             # If the cache has too many blocks, then we will release some blocks to other requests
             #if allocated_block_num == need_blocks:
             #    to_allocate = False
@@ -264,8 +265,12 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.allocated_gpu_blocks[cache_id] = need_blocks 
 
         # We need to adjust the number of blocks for this cache id
-        if allocated_block_num != need_blocks:
+        # Here, we specifically differentiate to_allocate and to_free so that 
+        # we could place to_free before to_allocate in the step() function
+        if allocated_block_num < need_blocks:
             self.to_allocate_blocks[cache_id] = need_blocks
+        elif allocated_block_num > need_blocks: 
+            self.to_free_blocks[cache_id] = need_blocks
 
         return cache_id
 
@@ -529,8 +534,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
     # In the end of each step's scheduling, this function is invoked to 
     # collect the information of allocation and deallocation  
     def step(self) -> Tuple[Dict[int, int], List[int], bool]:
-        to_allocate_blocks = {}
-        to_free_gpu_caches = []
+        to_update_blocks = {}
 
         immediate_allocate = self.immediate_allocate
         self.immediate_allocate = False
@@ -541,31 +545,44 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # No need to invoke virtual memory management
             #print(f"step-{self.step_index} no need to do memory management", file=sys.stderr) 
             self.step_index += 1
-            return to_allocate_blocks, to_free_gpu_caches, immediate_allocate
+            return to_update_blocks, immediate_allocate
 
-        for cache_id, num_blocks in self.to_allocate_blocks.items():
-            print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
-            to_allocate_blocks[cache_id] = num_blocks
-
+        # In the following, we place to_free_blocks in the header of to_update_blocks, which 
+        # ensures that allocation can be performed without any issue. 
+    
         to_free_blocks = 0
-        # Check whether there is a need to free kv caches
+        # First, place all to_free_gpu_caches at first. 
         for cache_id, num_blocks in self.to_free_gpu_caches.items():
-            print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
-            to_free_gpu_caches.append(cache_id)
+            #print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            # Freeing all blocks of this cache
+            to_update_blocks[cache_id] = 0
             self.gpu_allocator.free(cache_id)
             to_free_blocks += num_blocks 
 
+        # Second, place all to_free_blocks (caused by reusing a freed cache)
+        for cache_id, num_blocks in self.to_free_blocks.items():
+            print(f"step-{self.step_index} tofree cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            to_update_blocks[cache_id] = num_blocks
+
+        # Third, place the caches that need to increase their blocks
+        for cache_id, num_blocks in self.to_allocate_blocks.items():
+            print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            to_update_blocks[cache_id] = num_blocks
+
+        
+
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        print(f"step-{self.step_index}, to_allocate_blocks:{len(to_allocate_blocks)}, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
+        print(f"step-{self.step_index}, to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
 
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()
+        self.to_free_blocks.clear()
         self.to_allocate_blocks.clear()
         self.cached_free_gpu_blocks = 0
         self.allocated_active_reqs = 0
 
         self.step_index += 1    
-        return to_allocate_blocks, to_free_gpu_caches, immediate_allocate
+        return to_update_blocks, immediate_allocate
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return 0

@@ -80,10 +80,9 @@ class kvCacheAllocator:
 
     def update_cache_blocks(self, 
                             immediate_allocate: bool, 
-                            free_caches: List[int], 
-                            req_cache_blocks:List[List[int]], 
+                            to_update_blocks:List[List[int]], 
                             to_swap_out: List[List[int]], 
                             to_swap_in: List[List[int]]):
         #print(f"before invoking updateCacheBlocks!!!!", file=sys.stderr)
-        return self._allocator.updateCacheBlocks(immediate_allocate, free_caches, req_cache_blocks, to_swap_out, to_swap_in)
+        return self._allocator.updateCacheBlocks(immediate_allocate, to_update_blocks, to_swap_out, to_swap_in)
      

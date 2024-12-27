@@ -37,7 +37,9 @@ using PhysicalBlock = struct {
 
 class PhysicalBlocksManager {
 public:
-  std::vector<PhysicalBlock> block_pool; // Available 
+  // Available blocks will be placed in this pool 
+  std::vector<PhysicalBlock> block_pool; 
+  // All in-use blocks will be placed in the map. 
   std::unordered_map<void *, PhysicalBlock> block_map;
   int64_t block_size;
   int64_t free_blocks; 
@@ -100,7 +102,7 @@ void PhysicalBlocksManager::_increase_blocks(int64_t num_blocks) {
         CUmemGenericAllocationHandle handle;
         result = cuMemCreate(&handle, this->block_size, &this->prop, 0);
         if (result != CUDA_SUCCESS) {
-          fprintf(stderr, "Failed to create memory allocation, i-%d, with result %d\n", i, result);
+          fprintf(stderr, "Failed to create memory allocation, i-%d, with result %ld\n", i, result);
           exit(-1);        
         }
 
@@ -320,7 +322,7 @@ void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
       else {
         const char* errorStr;
         cuGetErrorString(res, &errorStr);
-        fprintf(stderr, "cuMemMap failed when deallocating ptr %p res %ld with error %s\n", addr, res, errorStr);
+        fprintf(stderr, "cuMemMap failed when deallocating ptr %p res %d with error %s\n", addr, res, errorStr);
       }
 
       _block_manager.record(addr, block); 
@@ -473,9 +475,6 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   // Record the region information
   this->active_regions_map[region_id] = region; 
 
-  void * ret = reinterpret_cast<void *>(ptr); 
-  //fprintf(stderr, "region_id-%d, ret-%p\n", region_id, ret);  
-  //return static_cast<int64_t>(ptr);
   return static_cast<int64_t>(ptr);
 }
 
@@ -517,8 +516,8 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
 
 // Allocate cache blocks for a range of requests. Each request information will be an vector, with
 // the request id as the first, and then number of blocks as the second. 
-void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_cache_blocks, cudaStream_t stream) {
-  for(auto row : req_cache_blocks) {
+void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blocks, cudaStream_t stream) {
+  for(auto row : update_blocks) {
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
@@ -526,7 +525,7 @@ void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_ca
     assert(this->active_regions_map.count(region_id) > 0);
     kvCacheRegion * region = this->active_regions_map[region_id];
     region->updateBlocks(blocks, stream);
-    fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
+    fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%ld\n", region_id, blocks, _block_manager.block_pool.size()); 
     //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
   }
 
@@ -534,7 +533,7 @@ void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_ca
   if(stream)
     cudaStreamSynchronize(stream);
 
-  fprintf(stderr, "NNNNNN after allocCacheBlocks, handling %ld request\n", req_cache_blocks.size());
+  fprintf(stderr, "NNNNNN after updateBlocks, handling %ld request\n", update_blocks.size());
   return; 
 }
 
@@ -569,8 +568,7 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     //fprintf(stderr, "NNNNNNNNN in handling the request!!!!!\n");
     // Perform memory management asynchronously
     instance->swapOutCache(instance->swap_out_caches, stream);
-    instance->releaseRegions(instance->free_caches);
-    instance->allocCacheBlocks(instance->req_cache_blocks, stream);
+    instance->updateBlocks(instance->update_blocks, stream);
     // Swap in cache must be done after allocating cache blocks, as 
     // we may reuse an existing cache but with the expansion of its blocks 
     instance->swapInCache(instance->swap_in_caches, stream);
@@ -584,8 +582,8 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
   return NULL;
 }
 
-void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, 
-                                         std::vector<std::vector<int64_t>> req_cache_blocks,
+void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, 
+                                         std::vector<std::vector<int64_t>> to_update_blocks,
                                          std::vector<std::vector<int64_t>> to_swap_out,
                                          std::vector<std::vector<int64_t>> to_swap_in) {
     fprintf(stderr, "NNNNNNNNN in handling the request updateCacheBlocks!!!!!, immediate_allocate-%d\n", immediate_allocate);
@@ -597,19 +595,12 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<in
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
 
-    this->free_caches.clear(); 
-    this->req_cache_blocks.clear();
+    this->update_blocks.clear();
     this->swap_out_caches.clear();  
     this->swap_in_caches.clear();  
 
-    // Copying the work to the shared area
-    for(auto cache_id: free_caches) {
-      //fprintf(stderr, "releasing cache_id %d\n", cache_id); 
-      this->free_caches.push_back(cache_id); 
-    }
-
-    for(auto cache_block: req_cache_blocks) {
-      this->req_cache_blocks.push_back(cache_block); 
+    for(auto cache_block: to_update_blocks) {
+      this->update_blocks.push_back(cache_block); 
     }
 
     for(auto cacheInfo: to_swap_out) {

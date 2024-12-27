@@ -104,7 +104,6 @@ private:
 
   // Internal functions
   static void *memoryManagerThread(void * arg); 
-  // Release the virtual address space for a region that is related to one request
   void _releaseRegion(int64_t region_id);
 
   bool manager_running;
@@ -113,8 +112,7 @@ private:
   pthread_t thread_id;
   pthread_mutex_t mutex_manager;
   pthread_cond_t  cond_manager; 
-  std::vector<int64_t> free_caches;
-  std::vector<std::vector<int64_t>> req_cache_blocks; 
+  std::vector<std::vector<int64_t>> update_blocks; 
   std::vector<std::vector<int64_t>> swap_out_caches; 
   std::vector<std::vector<int64_t>> swap_in_caches; 
 
@@ -135,10 +133,10 @@ public:
   int64_t reserveRegion(int64_t region_id);
   std::vector<int64_t> allocCPUCaches(int64_t num_caches, int64_t cache_size);
   void releaseRegions(std::vector<int64_t> regions);
+  
+  void updateBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
 
-  void allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
-
-  void updateCacheBlocks(bool immediate_allocate, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches, 
+  void updateCacheBlocks(bool immediate_allocate,  std::vector<std::vector<int64_t>> to_update_blocks, 
                       std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in);
 
   void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 

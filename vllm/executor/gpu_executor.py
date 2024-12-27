@@ -176,9 +176,8 @@ class GPUExecutor(ExecutorBase):
     def update_cache_blocks(self, 
                             virtual_engine: int, 
                             immediate_allocate: bool, 
-                            free_caches: List[int], 
-                            req_cache_blocks:List[List[int]]):
-        self.driver_worker.update_cache_blocks(virtual_engine, immediate_allocate, free_caches, req_cache_blocks)
+                            to_update_blocks:List[List[int]]):
+        self.driver_worker.update_cache_blocks(virtual_engine, immediate_allocate, to_update_blocks)
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
 

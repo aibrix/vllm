@@ -236,14 +236,15 @@ class CacheEngineDAttn:
         #print(f"CacheEngineDAttn:cache_config.block_bytes_size:{dtype_size * total}", file=sys.stderr)
         return dtype_size * total
 
-    def update_cache_blocks(self, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], 
+    def update_cache_blocks(self, immediate_allocate: bool, to_update_blocks: Dict[int, int], 
                             to_swap_out: List[List[int]], to_swap_in: List[List[int]]):
         #print(f"innnnnnnnn update_cache_blocks!", file=sys.stderr)
-        to_alloc_list = []
-        for cache_id, blocks in to_allocate_blocks.items():
-            to_alloc_list.append([cache_id, blocks])
+        to_alloc_blocks = []
+        for cache_id, blocks in to_update_blocks.items():
+            #print(f"innnnnnnnn update_cache_blocks cacheid-{cache_id} blocks-{blocks}")
+            to_alloc_blocks.append([cache_id, blocks])
 
-        self.device_cache_allocator.update_cache_blocks(immediate_allocate, free_kv_caches, to_alloc_list, to_swap_out, to_swap_in)
+        self.device_cache_allocator.update_cache_blocks(immediate_allocate, to_alloc_blocks, to_swap_out, to_swap_in)
         
 
 def _get_dtype_size(dtype: torch.dtype) -> int:

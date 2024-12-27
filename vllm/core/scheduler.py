@@ -139,8 +139,7 @@ class SchedulerOutputs:
     preempted: int
 
     # dattn support
-    to_allocate_blocks: Dict[int, int] = field(default_factory=dict)
-    to_free_kv_caches: List[int] = field(default_factory=list)
+    to_update_blocks: Dict[int, int] = field(default_factory=dict)
     immediate_allocate: bool = False
 
     def __post_init__(self):
@@ -1313,8 +1312,7 @@ class Scheduler:
 
         if self.use_dattn:
             # Collect the information related to cache update for dattn
-            scheduler_outputs.to_allocate_blocks, scheduler_outputs.to_free_kv_caches, \
-            scheduler_outputs.immediate_allocate = self.block_manager.step()
+            scheduler_outputs.to_update_blocks, scheduler_outputs.immediate_allocate = self.block_manager.step()
 
             # When there is no active requests, we will need to change immediate_allocate to be True
             if self.has_active_seqs() == False:

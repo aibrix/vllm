@@ -136,11 +136,6 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
 
-    # new add for dattn
-    is_prefill_phase: bool = False
-    allocated_blocks: Optional[Dict[int, int]] = None    
-    free_kv_caches: Optional[List[int]] = None
-    
     num_steps: int = 1
 
     @classmethod
@@ -158,8 +153,6 @@ class WorkerInput:
             blocks_to_swap_out=tensor_dict.pop("blocks_to_swap_out"),
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
-            allocated_blocks=tensor_dict.pop("allocated_blocks"),   # new add for dattn
-            free_kv_caches=tensor_dict.pop("free_kv_caches"),
             num_steps=tensor_dict.pop("num_steps"),
         )
 
@@ -175,8 +168,6 @@ class WorkerInput:
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             # new add for dattn
-            "allocated_blocks": self.allocated_blocks,  
-            "free_kv_caches": self.free_kv_caches,
             "num_steps": self.num_steps,
         }
 
@@ -237,7 +228,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         raise NotImplementedError
 
     @abstractmethod
-    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int], to_swap_out: List[List[int]], to_swap_in: List[List[int]]) -> None:
+    def update_cache_blocks(self, virtual_engine: int, immediate_allocate: bool, to_update_blocks: Dict[int, int], to_swap_out: List[List[int]], to_swap_in: List[List[int]]) -> None:
         """
         Process an execution request.
         """
@@ -333,10 +324,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             to_swap_out_caches, to_swap_in_caches = self.execute_worker_dattn(worker_input)
 
             # If any of these not zero
-            if (execute_model_req.to_free_kv_caches or execute_model_req.to_allocate_blocks 
-               or to_swap_out_caches or to_swap_in_caches): 
+            if (execute_model_req.to_update_blocks or to_swap_out_caches or to_swap_in_caches): 
                 # Perform the update cache blocks in a function. 
-                self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_free_kv_caches, execute_model_req.to_allocate_blocks, to_swap_out_caches, to_swap_in_caches)
+                self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_update_blocks, to_swap_out_caches, to_swap_in_caches)
         else:
             self.execute_worker(worker_input)
         #print(f"after execute worker now num_steps:{num_steps}", file=sys.stderr)

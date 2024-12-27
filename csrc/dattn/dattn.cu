@@ -288,7 +288,7 @@ void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
       exit(-1);
     }       
 
-    fprintf(stderr, "reduceBlocks, newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx \n", newSize, addr, distance, blocks_num, this->mapped_size);
+    //fprintf(stderr, "reduceBlocks, newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx \n", newSize, addr, distance, blocks_num, this->mapped_size);
     for(int i = 0; i < blocks_num; i++) {
       // Free the actual physical memory by putting it back to the pool
       _block_manager.free(addr); 
@@ -308,7 +308,7 @@ void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
     // Map new memory
     CUresult res; 
     int64_t size = this->physical_block_size;  
-    fprintf(stderr, "increaseBlocks newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx\n", newSize, addr, distance, blocks_num, this->mapped_size);
+    //fprintf(stderr, "increaseBlocks newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx\n", newSize, addr, distance, blocks_num, this->mapped_size);
     for(int i = 0; i < blocks_num; i++) {
       // Allocate a physical block 
       PhysicalBlock block = _block_manager.allocate();
@@ -525,7 +525,7 @@ void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blo
     assert(this->active_regions_map.count(region_id) > 0);
     kvCacheRegion * region = this->active_regions_map[region_id];
     region->updateBlocks(blocks, stream);
-    fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%ld\n", region_id, blocks, _block_manager.block_pool.size()); 
+    //fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%ld\n", region_id, blocks, _block_manager.block_pool.size()); 
     //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
   }
 
@@ -533,7 +533,7 @@ void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blo
   if(stream)
     cudaStreamSynchronize(stream);
 
-  fprintf(stderr, "NNNNNN after updateBlocks, handling %ld request\n", update_blocks.size());
+  //fprintf(stderr, "NNNNNN after updateBlocks, handling %ld request\n", update_blocks.size());
   return; 
 }
 
@@ -586,12 +586,12 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate,
                                          std::vector<std::vector<int64_t>> to_update_blocks,
                                          std::vector<std::vector<int64_t>> to_swap_out,
                                          std::vector<std::vector<int64_t>> to_swap_in) {
-    fprintf(stderr, "NNNNNNNNN in handling the request updateCacheBlocks!!!!!, immediate_allocate-%d\n", immediate_allocate);
+    //fprintf(stderr, "NNNNNNNNN in handling the request updateCacheBlocks!!!!!, immediate_allocate-%d\n", immediate_allocate);
     pthread_mutex_lock(&this->mutex_manager);
     
     // If the manager has not finished, waiting on the condition 
     while(this->manager_running) {
-      fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
+      //fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
 
@@ -658,7 +658,7 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
       //cudaMemcpyAsync(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<void*>(src_ptr), size, cudaMemcpyDeviceToHost, stream);
       cuMemcpyDtoHAsync(reinterpret_cast<void*>(dest_ptr), src_ptr, size, stream); 
 
-      fprintf(stderr, "swaping out region-%ld, src-%p, dest-%p, size-%lx\n", region_id, src_ptr, dest_ptr, size);
+      //fprintf(stderr, "swaping out region-%ld, src-%p, dest-%p, size-%lx\n", region_id, src_ptr, dest_ptr, size);
     }
     
   }

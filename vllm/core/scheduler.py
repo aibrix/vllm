@@ -1161,8 +1161,8 @@ class Scheduler:
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
-        if swapped_in.blocks_to_swap_in or running_scheduled.blocks_to_swap_out:
-            print(f"step-{self.step_index} has swapping blocks", file=sys.stderr) 
+        #if swapped_in.blocks_to_swap_in or running_scheduled.blocks_to_swap_out:
+        #    print(f"step-{self.step_index} has swapping blocks", file=sys.stderr) 
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
@@ -1309,14 +1309,15 @@ class Scheduler:
 
         scheduler_outputs = self._schedule()
         now = time.time()
-
+        
+        is_prefill = False
         if self.use_dattn:
             # Collect the information related to cache update for dattn
             scheduler_outputs.to_update_blocks, scheduler_outputs.immediate_allocate = self.block_manager.step()
 
             # When there is no active requests, we will need to change immediate_allocate to be True
             if self.has_active_seqs() == False:
-                print(f"in scheduling step-{self.step_index}, FORCE to use immediate_allocate == TRUE", file=sys.stderr)
+                #print(f"in scheduling step-{self.step_index}, FORCE to use immediate_allocate == TRUE", file=sys.stderr)
                 scheduler_outputs.immediate_allocate = True
 
         if not self.cache_config.enable_prefix_caching:
@@ -1374,6 +1375,7 @@ class Scheduler:
             # is sent. Subsequent requests could be chunked prefill or decode.
             is_first_prefill = False
             if is_prompt:
+                is_prefill = True
                 seqs = seq_group.get_seqs()
                 # Prefill has only 1 sequence.
                 assert len(seqs) == 1
@@ -1460,7 +1462,8 @@ class Scheduler:
         self.cache_id = self.next_cache_id
 
         # Update self.step_index for dAttention support
-        self.step_index += 1
+        if is_prefill != True:
+            self.step_index += 1
 
         # Return results
         return (seq_group_metadata_list, scheduler_outputs,

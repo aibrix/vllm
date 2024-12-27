@@ -95,11 +95,13 @@ PhysicalBlocksManager::~PhysicalBlocksManager() {
 
 void PhysicalBlocksManager::_increase_blocks(int64_t num_blocks) {
     CUresult result;
+    //fprintf(stderr, "_increase_blocks num_blocks-%d\n", num_blocks); 
     for (size_t i = 0; i < num_blocks; i++) {
         CUmemGenericAllocationHandle handle;
         result = cuMemCreate(&handle, this->block_size, &this->prop, 0);
         if (result != CUDA_SUCCESS) {
-            throw std::runtime_error("Failed to create memory allocation");
+          fprintf(stderr, "Failed to create memory allocation, i-%d, with result %d\n", i, result);
+          exit(-1);        
         }
 
         block_pool.emplace_back(PhysicalBlock{handle});
@@ -131,10 +133,10 @@ void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_mem
     this->num_tofree_blocks = this->incremental_size/block_size;  
 
     // Allocate the physical memory with specified size 
-    int32_t to_allocate_memory = min(total_memory, max_allowed_size); 
+    int64_t to_allocate_memory = min(total_memory, max_allowed_size); 
     this->total_size = to_allocate_memory; 
     size_t num_blocks = to_allocate_memory / block_size;
-    //fprintf(stderr, "total_memory %lx, max_allowed_size %lx num_blocks-%ld\n", total_memory, max_allowed_size, num_blocks);
+    fprintf(stderr, "total_memory %lx, max_allowed_size %lx num_blocks-%ld\n", total_memory, max_allowed_size, num_blocks);
     _increase_blocks(num_blocks);
 }
 
@@ -187,7 +189,8 @@ void PhysicalBlocksManager::free(void * virtual_address) {
   }
   
   if (!is_exist) {
-    return; 
+    fprintf(stderr, "Wrong: virtual_address-%p does not exist\n", virtual_address);
+    exit(-1); 
   }
 
   // Adding this block to the block_pool
@@ -195,7 +198,7 @@ void PhysicalBlocksManager::free(void * virtual_address) {
   this->free_blocks += 1; 
 
   if(block_pool.size() > this->tofree_blocks_watermark) {
-    _free_blocks_from_pool(num_tofree_blocks);
+    _free_blocks_from_pool(this->num_tofree_blocks);
   }
 }
 
@@ -283,6 +286,7 @@ void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
       exit(-1);
     }       
 
+    fprintf(stderr, "reduceBlocks, newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx \n", newSize, addr, distance, blocks_num, this->mapped_size);
     for(int i = 0; i < blocks_num; i++) {
       // Free the actual physical memory by putting it back to the pool
       _block_manager.free(addr); 
@@ -302,7 +306,7 @@ void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
     // Map new memory
     CUresult res; 
     int64_t size = this->physical_block_size;  
-    //fprintf(stderr, "now newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx blocks_num:%lx, \n", newSize, addr, distance, blocks_num, this->mapped_size, blocks_num);
+    fprintf(stderr, "increaseBlocks newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx\n", newSize, addr, distance, blocks_num, this->mapped_size);
     for(int i = 0; i < blocks_num; i++) {
       // Allocate a physical block 
       PhysicalBlock block = _block_manager.allocate();
@@ -522,7 +526,7 @@ void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_ca
     assert(this->active_regions_map.count(region_id) > 0);
     kvCacheRegion * region = this->active_regions_map[region_id];
     region->updateBlocks(blocks, stream);
-    //fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
+    fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
     //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
   }
 
@@ -530,6 +534,7 @@ void kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_ca
   if(stream)
     cudaStreamSynchronize(stream);
 
+  fprintf(stderr, "NNNNNN after allocCacheBlocks, handling %ld request\n", req_cache_blocks.size());
   return; 
 }
 
@@ -564,9 +569,11 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     //fprintf(stderr, "NNNNNNNNN in handling the request!!!!!\n");
     // Perform memory management asynchronously
     instance->swapOutCache(instance->swap_out_caches, stream);
-    instance->swapInCache(instance->swap_in_caches, stream);
     instance->releaseRegions(instance->free_caches);
     instance->allocCacheBlocks(instance->req_cache_blocks, stream);
+    // Swap in cache must be done after allocating cache blocks, as 
+    // we may reuse an existing cache but with the expansion of its blocks 
+    instance->swapInCache(instance->swap_in_caches, stream);
 
     //pthread_mutex_lock(&instance->mutex_manager); 
     instance->manager_running = false; 
@@ -581,12 +588,12 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate, std::vector<in
                                          std::vector<std::vector<int64_t>> req_cache_blocks,
                                          std::vector<std::vector<int64_t>> to_swap_out,
                                          std::vector<std::vector<int64_t>> to_swap_in) {
-    //fprintf(stderr, "NNNNNNNNN in handling the request updateCacheBlocks!!!!!");
+    fprintf(stderr, "NNNNNNNNN in handling the request updateCacheBlocks!!!!!, immediate_allocate-%d\n", immediate_allocate);
     pthread_mutex_lock(&this->mutex_manager);
     
     // If the manager has not finished, waiting on the condition 
     while(this->manager_running) {
-      //fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
+      fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
 
@@ -680,7 +687,8 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
     int64_t size = blocks  * this->cache_block_size; 
 
     //fprintf(stderr, "SWPAIN allocation regionid-%ld, blocks %ld, size: %lx\n", region_id, blocks, size);
-    region->updateBlocks(blocks, stream);
+    // NOTE: no need to updateBlocks, as we have done that before
+    //region->updateBlocks(blocks, stream);
     
     CUdeviceptr dest_ptr = region->getStartPtr(); 
 

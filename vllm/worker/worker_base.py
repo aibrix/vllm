@@ -311,7 +311,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
                     # notify all other workers to stop their execution loop.
                     broadcast_tensor_dict({}, src=0)
                 return None
-            print(f"_get_driver_input_and_broadcast:!!!", file=sys.stderr)
             return self._get_driver_input_and_broadcast(execute_model_req)
         else:
             return self._get_worker_input_from_broadcast()

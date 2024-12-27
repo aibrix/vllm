@@ -521,10 +521,7 @@ class Scheduler:
         return ret
 
     def has_active_seqs(self) -> bool:
-        ret = len(self.waiting) != 0 or len(self.running) != 0 or len(
-            self.swapped) != 0
-
-        return ret
+        return len(self.running) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
@@ -1476,7 +1473,7 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
-        print(f"free_seq: seq:{seq.seq_id} at step-{self.step_index}", file=sys.stderr)
+        #print(f"free_seq: seq:{seq.seq_id} at step-{self.step_index}", file=sys.stderr)
         self.block_manager.free(seq)
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:

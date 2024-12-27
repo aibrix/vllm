@@ -104,6 +104,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # Temporary buffer for each step. self.step() will collect these information and freed all 
         # caches of to_free_gpu_caches
         self.to_allocate_blocks: Dict[int, int] = {} 
+        self.to_free_blocks: Dict[int, int] = {} 
 
         # Useful when admitting new requests or swapping in some requests. 
         # Then we prefer those requests that just exit.
@@ -189,8 +190,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.immediate_allocate = True 
         cache_id = self._allocate_gpu_cache(need_blocks)
 
-        torch.cuda.synchronize()
-        print(f"NNOOOOOOWWW step_index-{self.step_index}, allocate cache_id: {cache_id}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
+        #print(f"NNOOOOOOWWW step_index-{self.step_index}, allocate cache_id: {cache_id}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
 
@@ -203,11 +203,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.total_active_reqs +=1
         self.num_free_gpu_blocks -= need_blocks
 
+        allocated_block_num = 0
         # Prefer to reuse the to_free_gpu_caches at first, as some pages have been allocated already. 
         if self.cached_free_gpu_blocks > 0:
             # Make it block_diff a big number for the better comparison
             block_diff = need_blocks*100
-            allocated_block_num = None
 
             # Find one kv_cache with the smallest difference on the number of blocks
             # The found cache can have more or less available blocks.   
@@ -230,20 +230,29 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             self.cached_free_gpu_blocks -= allocated_block_num
 
             # If the cache has too many blocks, then we will release some blocks to other requests
+            #if allocated_block_num == need_blocks:
+            #    to_allocate = False
+            """
+            The following is to improve the performance, but it is disabled now
             if allocated_block_num > need_blocks + self.watermark_blocks:
-                #free_blocks_per_req = (int)((allocated_block_num-need_blocks)/self.total_active_reqs)
-
-                # Compute the number of free blocks for each requst
-                #free_blocks_per_req = self._compute_free_blocks(allocated_block_num, need_blocks) 
-                print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
 
                 # Now the current request will keep free_blocks_per_req blocks, while others 
                 # are still need to be freed 
                 need_blocks += self.watermark_blocks
                 self.num_free_gpu_blocks -= self.watermark_blocks
+                print(f"0-reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
+
+                # For this case, we will need to adjust the number of blocks
+                # to_allocate = True 
             elif allocated_block_num > need_blocks:
                 # when allocated_block_num <= need_blocks + self.watermark_blocks, no need to allocate
-                to_allocate = False 
+                to_allocate = False
+                need_blocks = allocated_block_num 
+                self.num_free_gpu_blocks -= (allocated_block_num-need_blocks)
+                print(f"1-reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
+            else:
+                print(f"2-reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
+            """
         else:
             # Check whether the can_allocate or can_swap_in has a bug
             if self.num_free_gpu_blocks < 0: 
@@ -254,7 +263,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         self.allocated_gpu_blocks[cache_id] = need_blocks 
 
-        if to_allocate == True:
+        # We need to adjust the number of blocks for this cache id
+        if allocated_block_num != need_blocks:
             self.to_allocate_blocks[cache_id] = need_blocks
 
         return cache_id
@@ -459,7 +469,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Get blocks of this cache
         free_blocks = self.allocated_gpu_blocks[cache_id]
-        #print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
+        print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
        
         # Note that we update self.total_active_reqs here, as free_cache() is invoked twice for every request
         self.total_active_reqs -=1
@@ -474,7 +484,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
     Initially, we did this inside the memory management library. Maybe we should do it here as well. 
     """
     def free(self, seq: Sequence) -> None:
-        #print(f"free sequence:{seq.seq_id}, cache_id:{seq.cache_id}, data_cache_id:{seq.data.cache_id}", file=sys.stderr)
+        print(f"free sequence:{seq.seq_id}, cache_id:{seq.cache_id}, data_cache_id:{seq.data.cache_id}", file=sys.stderr)
         self._free_cache(cache_id=seq.cache_id)
         
         #print(f"After free, self.total_active_reqs: {self.total_active_reqs}", file=sys.stderr)
@@ -540,13 +550,13 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         to_free_blocks = 0
         # Check whether there is a need to free kv caches
         for cache_id, num_blocks in self.to_free_gpu_caches.items():
-            #print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
+            print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
             to_free_gpu_caches.append(cache_id)
             self.gpu_allocator.free(cache_id)
             to_free_blocks += num_blocks 
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        print(f"step-{self.step_index}, immediate_allocate:{immediate_allocate}, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
+        print(f"step-{self.step_index}, to_allocate_blocks:{len(to_allocate_blocks)}, to_allocate_blocks:{len(to_allocate_blocks)}, to_free_gpu_caches:{len(to_free_gpu_caches)}({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
 
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()

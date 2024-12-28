@@ -68,7 +68,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         vmm_frequency: int = 16, 
         num_caches: int = 0,
         num_cpu_caches: int = 40,
-        preemption_mode: str = "swap",  
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -82,10 +81,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.num_free_gpu_blocks = num_gpu_blocks
         self.num_free_cpu_blocks = num_cpu_blocks
 
-        self.swap_mode = False
-        if preemption_mode == "swap":
-            self.swap_mode = True
-        
         num_gpu_caches = num_caches
         num_cpu_caches = num_cpu_caches 
 
@@ -159,7 +154,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
     # This function is invoked only in the prefill phase
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
-        if (self.swap_mode == True) and (self.step_index & self.vmm_frequency_mask) and self.total_active_reqs != 0:
+        if (self.step_index & self.vmm_frequency_mask) and self.total_active_reqs != 0:
             return AllocStatus.LATER
     
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -198,8 +193,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         #print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         cache_id = self._allocate_gpu_cache(need_blocks)
 
-        if cache_id == 0:
-           print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr)  
+        #if cache_id == 0:
+        #   print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr)  
         
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
@@ -291,7 +286,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
                          num_lookahead_slots: int = 0) -> bool:
         
         # Only check periodically in asynchronous memory management, not each step
-        if (self.swap_mode == True) and (self.step_index & self.vmm_frequency_mask):
+        if (self.step_index & self.vmm_frequency_mask):
             return True
 
         # Do not evict a request that have at least 16 slots to extend (at least we could do it next step)
@@ -317,15 +312,15 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         num_lookahead_slots: int = 0,
     ) -> List[Tuple[int, int]]:
 
-        cache_id = seq.cache_id
-        if cache_id == 0 and self.step_index >= 700:
-            print(f"APPENDING checking seq_id:{seq.seq_id} cacheid-{cache_id} with tokens-{seq.get_len()} at step-{self.step_index}")
+        #if cache_id == 0 and self.step_index >= 700:
+        #    print(f"APPENDING checking seq_id:{seq.seq_id} cacheid-{cache_id} with tokens-{seq.get_len()} at step-{self.step_index}")
         
         # We only need to check periodically, not each step
-        if (self.swap_mode == True) and (self.step_index & self.vmm_frequency_mask):
+        if (self.step_index & self.vmm_frequency_mask):
             return []
 
         """Allocate a physical token/slot for a new token."""
+        cache_id = seq.cache_id
 
         # If the sequence is allocated, its cache_id must >= 0.
         assert cache_id >= 0
@@ -333,8 +328,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         logical_blocks_num = self._predict_n_blocks(seq.get_len())
         allocated_block_num = self.allocated_gpu_blocks[cache_id]
 
-        if cache_id == 0:
-            print(f"Step-{self.step_index}, APPENDING seq_id:{seq.seq_id}, gpu_cache_id:{cache_id}, tokens:{seq.get_len()}, logical_blocks_num:{logical_blocks_num}, allocated_block_num:{allocated_block_num}, free_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
+        #if cache_id == 0:
+        #    print(f"Step-{self.step_index}, APPENDING seq_id:{seq.seq_id}, gpu_cache_id:{cache_id}, tokens:{seq.get_len()}, logical_blocks_num:{logical_blocks_num}, allocated_block_num:{allocated_block_num}, free_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
 
         # If we need to allocate a new physical block
         if allocated_block_num < logical_blocks_num:
@@ -387,7 +382,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         
         #if self.step_index >= 511:
             #print(f"can_swap_in at step-{self.step_index}", file=sys.stderr)
-        if (self.swap_mode == True) and (self.step_index & self.vmm_frequency_mask):
+        if (self.step_index & self.vmm_frequency_mask):
             return AllocStatus.LATER
 
         # For those swapping requests, now it will return  
@@ -493,8 +488,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Get blocks of this cache
         free_blocks = self.allocated_gpu_blocks[cache_id]
-        if cache_id == 0:
-            print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
+        #if cache_id == 0:
+        #    print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
        
         # Note that we update self.total_active_reqs here, as free_cache() is invoked twice for every request
         self.total_active_reqs -=1
@@ -561,7 +556,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         #print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
         # We will perform virtual memory management once for every self.vmm_frequency 
-        if (self.swap_mode == True) and ((self.step_index & self.vmm_frequency_mask) != 0) and (immediate_allocate != True):
+        if ((self.step_index & self.vmm_frequency_mask) != 0) and (immediate_allocate != True):
             # No need to invoke virtual memory management
             #print(f"step-{self.step_index} no need to do memory management", file=sys.stderr) 
             self.step_index += 1

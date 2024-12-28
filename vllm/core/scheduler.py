@@ -364,7 +364,6 @@ class Scheduler:
                 num_caches=self.scheduler_config.max_num_seqs,
                 num_cpu_caches=self.cache_config.num_cpu_caches,  
                 vmm_frequency = self.vmm_frequency, 
-                preemption_mode = self.scheduler_config.preemption_mode, 
                 )
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.

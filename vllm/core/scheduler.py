@@ -363,7 +363,9 @@ class Scheduler:
                 enable_caching=self.cache_config.enable_prefix_caching,
                 num_caches=self.scheduler_config.max_num_seqs,
                 num_cpu_caches=self.cache_config.num_cpu_caches,  
-                vmm_frequency = self.vmm_frequency)
+                vmm_frequency = self.vmm_frequency, 
+                preemption_mode = self.scheduler_config.preemption_mode, 
+                )
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -516,7 +518,7 @@ class Scheduler:
             self.swapped) != 0 or len(self.swapping_in) != 0
 
         if ret == False:
-            print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)}")
+            print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)} at step-{self.step_index}")
         return ret
 
     def has_active_seqs(self) -> bool:
@@ -1602,7 +1604,7 @@ class Scheduler:
         assert len(seqs) == 1
         for seq in seqs:
             seq.status = SequenceStatus.WAITING
-            print(f"_preempt_by_recompute, free_seq:{seq.seq_id}", file=sys.stderr)
+            print(f"_preempt_by_recompute at step-{self.step_index}, free_seq:{seq.seq_id}, tokens:{seq.get_len()}", file=sys.stderr)
             self.free_seq(seq)
             seq.reset_state_for_recompute()
 

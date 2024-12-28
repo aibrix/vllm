@@ -454,7 +454,6 @@ int64_t kvCacheAllocator::getPageSize() {
   return this->page_size;
 }
 
-
 // reserve function, reserve virtual address space for a request
 int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   CUdeviceptr ptr;
@@ -543,11 +542,21 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
   kvCacheAllocator * instance = static_cast<kvCacheAllocator *>(arg); 
   
   // It is required to set current context if we are going 
-  //CUresult result = cuCtxSetCurrent(instance->origContext);
-  
-  //cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  cudaStream_t asyncStream;
-  cudaStreamCreate(&asyncStream);
+  CUresult result = cuCtxSetCurrent(instance->torchContext);
+
+#if 0
+  cudaStream_t asyncStream = c10::cuda::getStreamFromPool().stream();
+  cudaError_t err = cudaStreamSynchronize(asyncStream);
+  if (err != cudaSuccess) {
+    std::cerr << "CUDA stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
+    exit(-1);
+  }
+  else {
+    std::cout << "Stream synchronized successfully!" << std::endl;
+  }
+#else
+  cudaStream_t asyncStream = at::cuda::getCurrentCUDAStream().stream();  
+#endif
 
   while(true) {
     pthread_mutex_lock(&instance->mutex_manager); 
@@ -561,11 +570,9 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     cudaStream_t stream = nullptr; 
     // We will use a different stream for asynchronous operations. 
     if(!instance->immediate_allocate) {
-      //stream = asyncStream;
-      stream = at::cuda::getCurrentCUDAStream();
+      stream = asyncStream;
     } 
 
-    //fprintf(stderr, "NNNNNNNNN in handling the request!!!!!\n");
     // Perform memory management asynchronously
     instance->swapOutCache(instance->swap_out_caches, stream);
     instance->updateBlocks(instance->update_blocks, stream);

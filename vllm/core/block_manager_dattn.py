@@ -120,7 +120,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # number of active requests (which will be used to improve the scheduler)
         self.total_active_reqs = 0
-        self.allocated_active_reqs = 0
 
         # Track the step information, used for periodical memory management
         self.step_index = 0
@@ -289,16 +288,15 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         if real_blocks < cache_blocks:
             return True
 
-        to_allocate_reqs = self.total_active_reqs - self.allocated_active_reqs 
         # Simple heuristic: at least one free block for each request.
         # Since we will perform the actual allocation in the next epoch (16 steps), where 
         # each request can allocate one block successfully, then there
         # is no need to preempt. Note that self.cache_free_gpu_blocks 
         # should be included as they will be allocated first in the next epoch 
-        if self.num_free_gpu_blocks < to_allocate_reqs:
-            print(f"STOP now!!!!!!Cannot append slots for seq-{seq_group.request_id}, self.total_active_reqs:{self.total_active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, self.allocated_active_reqs:{self.allocated_active_reqs} at step-{self.step_index}", file=sys.stderr) 
+        #if self.num_free_gpu_blocks < self.total_active_reqs:
+        #    print(f"STOP now!!!!!!Cannot append slots for seq-{seq_group.request_id}, self.total_active_reqs:{self.total_active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr) 
         
-        return self.num_free_gpu_blocks >= to_allocate_reqs
+        return self.num_free_gpu_blocks >= self.total_active_reqs
         
     # FIXME: there is no handling on num_lookahead_slots, which should be handled.  
     def append_slots(
@@ -324,7 +322,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         allocated_block_num = self.allocated_gpu_blocks[cache_id]
 
         #if cache_id == 0:
-        #print(f"Step-{self.step_index}, APPENDING seq_id:{seq.seq_id}, gpu_cache_id:{cache_id}, self.allocated_req:{self.allocated_active_reqs}", file=sys.stderr)
+        #print(f"Step-{self.step_index}, APPENDING seq_id:{seq.seq_id}, gpu_cache_id:{cache_id}", file=sys.stderr)
 
         # If we need to allocate a new physical block
         if allocated_block_num < logical_blocks_num:
@@ -343,9 +341,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
             # Note that to_allocate_blocks actually hold the logic blocks number, not a bug. 
             self.to_allocate_blocks[cache_id] = logical_blocks_num 
-
-        # Update that one active request have already been allocated
-        self.allocated_active_reqs += 1 
 
         # No need to return anything here, since step() will collect all information
         # related to the current scheduling phase.            
@@ -395,8 +390,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             req_id = seq.seq_id
             need_blocks += self.swapped_out_caches[req_id].blocks
 
-        to_allocate_reqs = self.total_active_reqs - self.allocated_active_reqs + 1
-        
         # Make sure that the number of free blocks is sufficient for at least 
         # one block for each request
         #need_blocks += to_allocate_reqs
@@ -582,14 +575,13 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-        print(f"step-{self.step_index}, to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
+        #print(f"step-{self.step_index}, to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
 
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()
         self.to_free_blocks.clear()
         self.to_allocate_blocks.clear()
         self.cached_free_gpu_blocks = 0
-        self.allocated_active_reqs = 0
 
         if immediate_allocate == False:
             self.step_index += 1  

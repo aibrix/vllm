@@ -120,6 +120,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # number of active requests (which will be used to improve the scheduler)
         self.total_active_reqs = 0
+        self.allocated_active_reqs = 0
 
         # Track the step information, used for periodical memory management
         self.step_index = 0
@@ -288,6 +289,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         if real_blocks < cache_blocks:
             return True
 
+        to_allocate_reqs = self.total_active_reqs - self.allocated_active_reqs
+        if self.num_free_gpu_blocks < self.total_active_reqs and self.allocated_active_reqs > 0:
+            print(f"can_append_slots with allocated requests-{self.allocated_active_reqs}") 
         # Simple heuristic: at least one free block for each request.
         # Since we will perform the actual allocation in the next epoch (16 steps), where 
         # each request can allocate one block successfully, then there
@@ -296,7 +300,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         #if self.num_free_gpu_blocks < self.total_active_reqs:
         #    print(f"STOP now!!!!!!Cannot append slots for seq-{seq_group.request_id}, self.total_active_reqs:{self.total_active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr) 
         
-        return self.num_free_gpu_blocks >= self.total_active_reqs
+        return self.num_free_gpu_blocks >= to_allocate_reqs
         
     # FIXME: there is no handling on num_lookahead_slots, which should be handled.  
     def append_slots(
@@ -341,6 +345,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
             # Note that to_allocate_blocks actually hold the logic blocks number, not a bug. 
             self.to_allocate_blocks[cache_id] = logical_blocks_num 
+
+        # Update that one active request have already been allocated
+        self.allocated_active_reqs += 1
 
         # No need to return anything here, since step() will collect all information
         # related to the current scheduling phase.            
@@ -390,9 +397,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             req_id = seq.seq_id
             need_blocks += self.swapped_out_caches[req_id].blocks
 
-        # Make sure that the number of free blocks is sufficient for at least 
-        # one block for each request
-        #need_blocks += to_allocate_reqs
+        # Make sure that the number of free blocks at least one block more
+        need_blocks += 1
         
         result = self._check_availability(need_blocks) 
 
@@ -584,6 +590,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.to_free_blocks.clear()
         self.to_allocate_blocks.clear()
         self.cached_free_gpu_blocks = 0
+        self.allocated_active_reqs = 0
 
         if immediate_allocate == False:
             self.step_index += 1  

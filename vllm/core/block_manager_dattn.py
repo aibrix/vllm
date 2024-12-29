@@ -422,7 +422,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
             # NOTE: we may not need the allocation, if gpu_cache_id 
             #if gpu_cache_id == 0:
-            #    print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks} freeCPUBlocks:{self.num_free_cpu_blocks}, at step:{self.step_index}, active requests:{self.total_active_reqs}", file=sys.stderr)
+            #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks} freeCPUBlocks:{self.num_free_cpu_blocks}, at step:{self.step_index}, active requests:{self.total_active_reqs}", file=sys.stderr)
+            #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
             to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
             
             # Delete this entry
@@ -449,6 +450,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # real_gpu_blocks here in order to reduce the overhead involved in copy in swapping
             real_gpu_blocks = self._get_n_blocks(seq.get_len())
 
+            #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
+
             # Free the cache related to gpu_cache_id
             self._free_cache(cache_id=gpu_cache_id)
 
@@ -460,8 +463,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # After the swapped out, num_free_cpu_blocks should be decremented 
             self.num_free_cpu_blocks -= real_gpu_blocks
             
-            if gpu_cache_id == 0: 
-                print(f"SWAPOUT request-{seq.seq_id} with tokens-{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, freeCPUBlocks:{self.num_free_cpu_blocks}, freeGPUBlocks:{self.num_free_gpu_blocks},  gpu_cache_id:{gpu_cache_id}, blocks:{real_gpu_blocks} at step-{self.step_index}, requests:{self.total_active_reqs}", file=sys.stderr)
+            #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
             
             to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, real_gpu_blocks]) 
 

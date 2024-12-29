@@ -586,7 +586,6 @@ class Scheduler:
         running_queue = self.running
         assert len(self._async_stopped) == 0
 
-        #print(f"before checking running queue at step-{self.step_index}", file=sys.stderr)
         while running_queue:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(

@@ -2,8 +2,11 @@
  Copyright (c) ByteDance Inc.
  Authors: 
   - Tongping Liu (tongping.liu@bytedance.com)
- */ 
- 
+ */
+#include <torch/all.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h> 
+#include <torch/torch.h>
 #include <c10/core/ScalarType.h>
 #include <cstdint>
 #include <cstdio>
@@ -260,7 +263,7 @@ CUdeviceptr kvCacheRegion::getStartPtr(void) {
   kvCacheRegion function: allocate cached blocks  
     if the return value > 0, then it is succesful. 
  */ 
-void kvCacheRegion::updateBlocks(uint64_t blocks, cudaStream_t stream) {
+void kvCacheRegion::updateBlocks(uint64_t blocks) {
   uint64_t newSize = blocks * this->cache_block_size;
   newSize = roundup(newSize, this->physical_block_size); 
 
@@ -369,18 +372,17 @@ void kvCacheRegion::freeAllPhyMemory(void) {
 */
 kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_block_size, int64_t region_cache_size) {
   CUdevice device;
-  //CHECK_DRV(cuInit(0));
+  
   CHECK_RT(cudaFree(0));
-  // Getting the cuda device and force the initialization
-  CHECK_DRV(cuCtxGetDevice(&device));
 
-  CHECK_DRV(cuCtxGetCurrent(&this->torchContext)); 
-  //CHECK_DRV(cuCtxCreate(&this->origContext, 0, device));
-  //CHECK_DRV(cuCtxSetCurrent(this->origContext));
+  CHECK_DRV(cuCtxGetCurrent(&this->origContext));
+  if(this->origContext == nullptr) {
+    fprintf(stderr, "Context is nullptr\n"); 
+    exit(-1);
+  }
 
   size_t free_memory, total_memory;
   CHECK_RT(cudaMemGetInfo(&free_memory, &total_memory)); 
-  fprintf(stderr, "free_memory-%lx, total_memory-%lx\n", free_memory, total_memory);
 
   CUresult result;
   size_t page_size; 
@@ -400,7 +402,6 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_bl
     exit(-1);
   }
 
-  fprintf(stderr, "kvCacheAllocator: max_gpu_memory_size - %lx, cache_block_size - %lx, region_cache_size - %lx, page_size - %lx\n", max_gpu_memory_size, cache_block_size, region_cache_size, page_size);
   assert(page_size == PAGE_SIZE); 
 
   int64_t to_allocate_memory = 2 * GIGABYTES; 
@@ -446,8 +447,6 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_bl
     fprintf(stderr, "thread creation failed!"); 
     exit(-1); 
   }
-
-  CHECK_DRV(cuCtxSetCurrent(this->torchContext));
 }
 
 int64_t kvCacheAllocator::getPageSize() {
@@ -468,7 +467,7 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
 
   // Allocate one block the first region
   if(region_id == 0) {
-    region->updateBlocks(1, nullptr); 
+    region->updateBlocks(1); 
   }
 
   // Record the region information
@@ -477,6 +476,10 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   return static_cast<int64_t>(ptr);
 }
 
+
+// FIXME: ideally there is no need to allocate num_caches with the same 
+// size, but the management of CPU caches can be more complicated. 
+// Fixing this problem in the future if the CPU memory size is a problem 
 std::vector<int64_t> kvCacheAllocator::allocCPUCaches(int64_t num_caches, int64_t cache_size) {
   std::vector<int64_t> cache_addresses; 
   
@@ -515,7 +518,7 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
 
 // Allocate cache blocks for a range of requests. Each request information will be an vector, with
 // the request id as the first, and then number of blocks as the second. 
-void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blocks, cudaStream_t stream) {
+void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blocks) {
   for(auto row : update_blocks) {
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
@@ -523,14 +526,10 @@ void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blo
     //fprintf(stderr, "region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
     assert(this->active_regions_map.count(region_id) > 0);
     kvCacheRegion * region = this->active_regions_map[region_id];
-    region->updateBlocks(blocks, stream);
+    region->updateBlocks(blocks);
     //fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%ld\n", region_id, blocks, _block_manager.block_pool.size()); 
     //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
   }
-
-  // Make sure that the asynchronized memcopy has finished. 
-  if(stream)
-    cudaStreamSynchronize(stream);
 
   //fprintf(stderr, "NNNNNN after updateBlocks, handling %ld request\n", update_blocks.size());
   return; 
@@ -541,22 +540,17 @@ void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blo
 void * kvCacheAllocator::memoryManagerThread(void * arg) {
   kvCacheAllocator * instance = static_cast<kvCacheAllocator *>(arg); 
   
-  // It is required to set current context if we are going 
-  CUresult result = cuCtxSetCurrent(instance->torchContext);
-
-#if 0
-  cudaStream_t asyncStream = c10::cuda::getStreamFromPool().stream();
-  cudaError_t err = cudaStreamSynchronize(asyncStream);
-  if (err != cudaSuccess) {
-    std::cerr << "CUDA stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
+  // It is optional to set current context to be the same as origContext 
+  CUresult result = cuCtxSetCurrent(instance->origContext);
+  if (result != CUDA_SUCCESS) {
+    const char* error_string;
+    cuGetErrorString(result, &error_string);
+    std::cerr << "CUDA error: " << error_string << std::endl;
     exit(-1);
-  }
-  else {
-    std::cout << "Stream synchronized successfully!" << std::endl;
-  }
-#else
-  cudaStream_t asyncStream = at::cuda::getCurrentCUDAStream().stream();  
-#endif
+  } 
+  
+  //at::cuda::OptionalCUDAGuard device_guard(device); 
+  cudaStream_t asyncStream; cudaStreamCreate(&asyncStream);
 
   while(true) {
     pthread_mutex_lock(&instance->mutex_manager); 
@@ -566,23 +560,20 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     while(!instance->manager_running) {
       pthread_cond_wait(&instance->cond_manager, &instance->mutex_manager); 
     }
-
-    cudaStream_t stream = nullptr; 
-    // We will use a different stream for asynchronous operations. 
-    if(!instance->immediate_allocate) {
-      stream = asyncStream;
-    } 
-
+   
     // Perform memory management asynchronously
-    instance->swapOutCache(instance->swap_out_caches, stream);
-    instance->updateBlocks(instance->update_blocks, stream);
+    instance->swapOutCache(instance->swap_out_caches, asyncStream, instance->immediate_allocate);
+    instance->updateBlocks(instance->update_blocks);
     // Swap in cache must be done after allocating cache blocks, as 
     // we may reuse an existing cache but with the expansion of its blocks 
-    instance->swapInCache(instance->swap_in_caches, stream);
+    instance->swapInCache(instance->swap_in_caches, asyncStream, instance->immediate_allocate);
 
     //pthread_mutex_lock(&instance->mutex_manager); 
     instance->manager_running = false; 
     pthread_cond_signal(&instance->cond_manager);
+    if(!instance->immediate_allocate) {
+      cudaStreamSynchronize(asyncStream);
+    }
     pthread_mutex_unlock(&instance->mutex_manager); 
   }
 
@@ -606,12 +597,12 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate,
     this->swap_out_caches.clear();  
     this->swap_in_caches.clear();  
 
-    for(auto cache_block: to_update_blocks) {
-      this->update_blocks.push_back(cache_block); 
-    }
-
     for(auto cacheInfo: to_swap_out) {
       this->swap_out_caches.push_back(cacheInfo); 
+    }
+
+    for(auto cache_block: to_update_blocks) {
+      this->update_blocks.push_back(cache_block); 
     }
 
     for(auto cacheInfo: to_swap_in) {
@@ -643,8 +634,8 @@ void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
 }
 
 // Swap out the caches listed in src_to_dests (from Device to Host)
-void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
-  
+void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync) {
+  // Checking every item in swap_caches
   for(auto item: swap_caches) {
     int64_t region_id = item[0]; 
     int64_t dest_ptr = item[1]; 
@@ -654,25 +645,37 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
 
     kvCacheRegion * region = this->active_regions_map[region_id];
     CUdeviceptr src_ptr = region->getStartPtr(); 
-    
-    //cuMemcpyDtoH(reinterpret_cast<void*>(dest_ptr), src_ptr, size); 
-    //continue;
 
-    if(stream == nullptr) {
+    if(is_sync) {
       cuMemcpyDtoH(reinterpret_cast<void*>(dest_ptr), src_ptr, size); 
     } else {
-      //cudaMemcpyAsync(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<void*>(src_ptr), size, cudaMemcpyDeviceToHost, nullptr);
-      //cudaMemcpyAsync(reinterpret_cast<void*>(dest_ptr), reinterpret_cast<void*>(src_ptr), size, cudaMemcpyDeviceToHost, stream);
-      cuMemcpyDtoHAsync(reinterpret_cast<void*>(dest_ptr), src_ptr, size, stream); 
+      //fprintf(stderr, "asynchronously swaping out successfully\n");
+      CUresult result = cuMemcpyDtoHAsync(reinterpret_cast<void*>(dest_ptr), src_ptr, size, stream); 
+      if (result != CUDA_SUCCESS) {
+        const char* error_string;
+        cuGetErrorString(result, &error_string);
+        std::cerr << "CUDA error: " << error_string << std::endl;
+        exit(-1);
+      }
+    }
+  }
 
-      //fprintf(stderr, "swaping out region-%ld, src-%p, dest-%p, size-%lx\n", region_id, src_ptr, dest_ptr, size);
+   
+    cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+      std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
+      } 
+      exit(-1);
     }
     
-  }
+    
 }
 
 // Swap in the caches listed in swap_caches (from Host to Device)
-void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
+void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync) {
     
   for(auto item: swap_caches) {
     int64_t src_ptr = item[0]; 
@@ -685,15 +688,14 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
     int64_t size = blocks  * this->cache_block_size; 
 
     //fprintf(stderr, "SWPAIN allocation regionid-%ld, blocks %ld, size: %lx\n", region_id, blocks, size);
-    // NOTE: no need to updateBlocks, as we have done that before
-    //region->updateBlocks(blocks, stream);
     
     CUdeviceptr dest_ptr = region->getStartPtr(); 
 
-    if(stream == nullptr) {
+    if(is_sync == true) {
       cuMemcpyHtoD(dest_ptr, reinterpret_cast<const void*>(src_ptr), size);
     }
     else {
+      //fprintf(stderr, "asynchronously swaping in region-%ld, src-%p, dest-%p, size-%lx\n", region_id, src_ptr, dest_ptr, size);
       cuMemcpyHtoDAsync(dest_ptr, reinterpret_cast<const void*>(src_ptr), size, stream);
     }
   }

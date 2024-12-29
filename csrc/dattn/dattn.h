@@ -79,7 +79,7 @@ public:
   // get the number of physical pages
   CUdeviceptr getStartPtr(void); 
   
-  void updateBlocks(uint64_t blocks, cudaStream_t stream);
+  void updateBlocks(uint64_t blocks);
   void freeAllPhyMemory(void);
 };
 
@@ -87,7 +87,6 @@ public:
 // kvCacheAllocator class, used for memory allocation of kv-cachemanager, memory allocation is based on page granularity,
 class kvCacheAllocator : public torch::CustomClassHolder{
 private:
-  CUcontext torchContext;  
   CUcontext origContext;   
 
   int64_t region_size; 
@@ -134,13 +133,13 @@ public:
   std::vector<int64_t> allocCPUCaches(int64_t num_caches, int64_t cache_size);
   void releaseRegions(std::vector<int64_t> regions);
   
-  void updateBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
+  void updateBlocks(std::vector<std::vector<int64_t>> reqs_blocks);
 
   void updateCacheBlocks(bool immediate_allocate,  std::vector<std::vector<int64_t>> to_update_blocks, 
                       std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in);
 
-  void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
-  void swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
+  void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync); 
+  void swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync); 
 
 };
 

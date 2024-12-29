@@ -51,6 +51,7 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
   const at::cuda::OptionalCUDAGuard device_guard(
       src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  
   // NOTE(woosuk): This can be slow if the number of blocks is large.
   const int64_t num_blocks = block_mapping.size(0);
   for (size_t i = 0; i < num_blocks; i++) {

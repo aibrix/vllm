@@ -585,8 +585,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         request_id = seq_group.request_id
 
-        print(f"swap_in seq-{request_id}")
-        
         # CPU block -> GPU block.
         # dict is efficient in lookup `if cpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -629,7 +627,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                        self.gpu_allocator,
                                        self.cpu_allocator,
                                        mapping)
-        print(f"swap_out seq-{request_id} with {len(mapping)} blocks")
 
         return [(cpu_block.block_number, gpu_block.block_number)
                 for cpu_block, gpu_block in mapping.items()]

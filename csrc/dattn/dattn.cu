@@ -551,6 +551,8 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
   
   //at::cuda::OptionalCUDAGuard device_guard(device); 
   cudaStream_t asyncStream; cudaStreamCreate(&asyncStream);
+  cudaStream_t computeStream = at::cuda::getCurrentCUDAStream();
+
 
   while(true) {
     pthread_mutex_lock(&instance->mutex_manager); 
@@ -571,9 +573,6 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     //pthread_mutex_lock(&instance->mutex_manager); 
     instance->manager_running = false; 
     pthread_cond_signal(&instance->cond_manager);
-    if(!instance->immediate_allocate) {
-      cudaStreamSynchronize(asyncStream);
-    }
     pthread_mutex_unlock(&instance->mutex_manager); 
   }
 
@@ -611,18 +610,19 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate,
     
     this->manager_running = true; 
     this->immediate_allocate = immediate_allocate; 
+    
+    // Wake up the manager thread to perform virtual memory management
     pthread_cond_signal(&this->cond_manager); 
-    pthread_mutex_unlock(&this->mutex_manager);
 
     if(immediate_allocate) {
       // We will wait until the manager thread finishes its job
-      pthread_mutex_lock(&this->mutex_manager);
       while(this->manager_running) {
-        //fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
+        //fprintf(stderr, "immediate waiting for the virtual memory management in asyn mode\n"); 
         pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
-      } 
-      pthread_mutex_unlock(&this->mutex_manager); 
+      }
     }
+
+    pthread_mutex_unlock(&this->mutex_manager); 
 }
 
 // Release regions specified in the vector
@@ -635,6 +635,8 @@ void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
 
 // Swap out the caches listed in src_to_dests (from Device to Host)
 void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync) {
+  bool to_sync = false; 
+
   // Checking every item in swap_caches
   for(auto item: swap_caches) {
     int64_t region_id = item[0]; 
@@ -642,25 +644,15 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
     int64_t size = item[2]; 
 
     assert(this->active_regions_map.count(region_id) != 0);
+    to_sync = true; 
 
     kvCacheRegion * region = this->active_regions_map[region_id];
     CUdeviceptr src_ptr = region->getStartPtr(); 
 
-    if(is_sync) {
-      cuMemcpyDtoH(reinterpret_cast<void*>(dest_ptr), src_ptr, size); 
-    } else {
-      //fprintf(stderr, "asynchronously swaping out successfully\n");
-      CUresult result = cuMemcpyDtoHAsync(reinterpret_cast<void*>(dest_ptr), src_ptr, size, stream); 
-      if (result != CUDA_SUCCESS) {
-        const char* error_string;
-        cuGetErrorString(result, &error_string);
-        std::cerr << "CUDA error: " << error_string << std::endl;
-        exit(-1);
-      }
-    }
+    cuMemcpyDtoHAsync(reinterpret_cast<void*>(dest_ptr), src_ptr, size, stream); 
   }
 
-   
+  if(to_sync) {
     cudaError_t err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) {
       std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
@@ -669,18 +661,20 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
         std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
       } 
       exit(-1);
-    }
-    
-    
+    } 
+  }   
 }
 
 // Swap in the caches listed in swap_caches (from Host to Device)
 void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync) {
-    
+  bool to_sync = false; 
+ 
   for(auto item: swap_caches) {
     int64_t src_ptr = item[0]; 
     int64_t region_id = item[1]; 
     int64_t blocks = item[2]; 
+
+    to_sync = true; 
 
     // Allocate physical memory at first
     kvCacheRegion * region = this->active_regions_map[region_id];
@@ -691,12 +685,18 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
     
     CUdeviceptr dest_ptr = region->getStartPtr(); 
 
-    if(is_sync == true) {
-      cuMemcpyHtoD(dest_ptr, reinterpret_cast<const void*>(src_ptr), size);
-    }
-    else {
-      //fprintf(stderr, "asynchronously swaping in region-%ld, src-%p, dest-%p, size-%lx\n", region_id, src_ptr, dest_ptr, size);
-      cuMemcpyHtoDAsync(dest_ptr, reinterpret_cast<const void*>(src_ptr), size, stream);
+    cuMemcpyHtoDAsync(dest_ptr, reinterpret_cast<const void*>(src_ptr), size, stream);
+  }
+
+  if(to_sync) {
+    cudaError_t err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+      std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
+      err = cudaGetLastError();
+      if (err != cudaSuccess) {
+        std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
+      } 
+      exit(-1);
     }
   }
 }

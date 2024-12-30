@@ -91,7 +91,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Watermark indicates that the least amount of blocks should be free. 
         assert watermark >= 0.0
-        self.watermark_blocks = 2
+        self.watermark_blocks = 1
         #int(watermark * num_gpu_blocks)
         
         # Mapping from cache_id to the number of allocated blocks.
@@ -151,7 +151,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
     # This function is invoked only in the prefill phase
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
-        if (self.step_index & self.vmm_frequency_mask) and self.total_active_reqs != 0:
+        if (self.step_index & self.vmm_frequency_mask):
             return AllocStatus.LATER
     
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -188,9 +188,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.immediate_allocate = True 
         print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         cache_id = self._allocate_gpu_cache(need_blocks)
-
-        #if cache_id == 0:
-        #   print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr)  
         
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
@@ -285,22 +282,16 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             return True
 
         # Do not evict a request that have at least 16 slots to extend (at least we could do it next step)
-        cache_blocks, real_blocks = self._get_physical_blocks(seq_group)
-        if real_blocks < cache_blocks:
+        cache_blocks, tokens = self._get_blocks_tokens(seq_group)
+        if self._predict_n_blocks(tokens) <= cache_blocks:
             return True
 
-        to_allocate_reqs = self.total_active_reqs - self.allocated_active_reqs
-        if self.num_free_gpu_blocks < self.total_active_reqs and self.allocated_active_reqs > 0:
-            print(f"can_append_slots with allocated requests-{self.allocated_active_reqs}") 
         # Simple heuristic: at least one free block for each request.
         # Since we will perform the actual allocation in the next epoch (16 steps), where 
         # each request can allocate one block successfully, then there
         # is no need to preempt. Note that self.cache_free_gpu_blocks 
         # should be included as they will be allocated first in the next epoch 
-        #if self.num_free_gpu_blocks < self.total_active_reqs:
-        #    print(f"STOP now!!!!!!Cannot append slots for seq-{seq_group.request_id}, self.total_active_reqs:{self.total_active_reqs}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr) 
-        
-        return self.num_free_gpu_blocks >= to_allocate_reqs
+        return self.num_free_gpu_blocks > 1
         
     # FIXME: there is no handling on num_lookahead_slots, which should be handled.  
     def append_slots(
@@ -309,9 +300,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         num_lookahead_slots: int = 0,
     ) -> List[Tuple[int, int]]:
 
-        #if cache_id == 0 and self.step_index >= 700:
-        #    print(f"APPENDING checking seq_id:{seq.seq_id} cacheid-{cache_id} with tokens-{seq.get_len()} at step-{self.step_index}")
-        
         # We only need to check periodically, not each step
         if (self.step_index & self.vmm_frequency_mask):
             return []
@@ -321,12 +309,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # If the sequence is allocated, its cache_id must >= 0.
         assert cache_id >= 0
-        
+
         logical_blocks_num = self._predict_n_blocks(seq.get_len())
         allocated_block_num = self.allocated_gpu_blocks[cache_id]
-
-        #if cache_id == 0:
-        #print(f"Step-{self.step_index}, APPENDING seq_id:{seq.seq_id}, gpu_cache_id:{cache_id}", file=sys.stderr)
 
         # If we need to allocate a new physical block
         if allocated_block_num < logical_blocks_num:
@@ -354,20 +339,20 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         return []
 
     # Collect the number of physical blocks used by this sequence group 
-    def _get_physical_blocks(
+    def _get_blocks_tokens(
             self, seq_group: SequenceGroup):
         
         cache_blocks = 0
-        real_blocks = 0
+        tokens = 0
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 continue
 
             cache_id = seq.cache_id
             cache_blocks += self.allocated_gpu_blocks[cache_id]
-            real_blocks += self._get_n_blocks(seq.get_len())
+            tokens += seq.get_len()
         
-        return cache_blocks, real_blocks
+        return cache_blocks, tokens
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         raise NotImplementedError("Forking is not supported in BlockSpaceManagerDAttn now.")
@@ -382,9 +367,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         if (self.step_index & self.vmm_frequency_mask):
             return AllocStatus.LATER
 
-        # For those swapping requests, now it will return  
+        # For those swapping requests, now it will return OK 
         req_id = seq_group.request_id
-        #print(f"can_swap_in at step-{self.step_index} before checking req_id - {req_id}", file=sys.stderr)
         if req_id in self.swapping_reqs:
             return AllocStatus.OK
 
@@ -398,7 +382,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             need_blocks += self.swapped_out_caches[req_id].blocks
 
         # Make sure that the number of free blocks at least one block more
-        need_blocks += 1
+        #need_blocks += 1
         
         result = self._check_availability(need_blocks) 
 
@@ -439,10 +423,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         return to_swap_in_caches
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
-        cache_blocks, real_blocks = self._get_physical_blocks(seq_group)
-        if real_blocks > self.num_free_cpu_blocks:
-            print(f"req:{seq_group.request_id}, real_blocks:{real_blocks}, self.num_free_cpu_blocks:{self.num_free_cpu_blocks}", file=sys.stderr)
-        return real_blocks <= self.num_free_cpu_blocks
+        cache_blocks, tokens = self._get_blocks_tokens(seq_group)
+    
+        return cache_blocks <= self.num_free_cpu_blocks
 
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
     

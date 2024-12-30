@@ -532,9 +532,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
 
 
-        #import pdb
-        #pdb.set_trace()
-
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
         if seq_group.is_encoder_decoder():
@@ -543,9 +540,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         
-        #if self.num_free == 0 and num_free_blocks < 30:
-        #    return AllocStatus.LATER
-
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append_slot().

@@ -133,7 +133,9 @@ void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_mem
     // Allocate the initial blocks based on user's specification
     this->block_size = block_size; 
 
-    this->max_allowed_size = max_allowed_size; 
+    // Since there are some issues when block_size is not aligned with page_size, 
+    // let's have some buffer here. 
+    this->max_allowed_size = max_allowed_size + block_size * 40; 
     this->tofree_blocks_watermark = (this->incremental_size * 2)/block_size; 
     this->num_tofree_blocks = this->incremental_size/block_size;  
 
@@ -423,6 +425,7 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_bl
   }
   this->physical_block_size = physical_block_size; 
 
+  //fprintf(stderr, "cache_block_size-%lx, this->physical_block_size-%lx\n", cache_block_size, physical_block_size);
   // Initialize block manager
   // max_allowed_size should be related to num_blocks, initialized GPU memory, cache_block_size
   _block_manager.initialize(max_gpu_memory_size, to_allocate_memory, physical_block_size);
@@ -511,8 +514,6 @@ void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
   region->freeAllPhyMemory();
-  //fprintf(stderr, "after release region %ld, blocks %d\n", region_id, _block_manager.block_pool.size()); 
-  //fprintf(stderr, "release region %ld\n", region_id); 
 }
 
 
@@ -523,12 +524,10 @@ void kvCacheAllocator::updateBlocks(std::vector<std::vector<int64_t>> update_blo
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    //fprintf(stderr, "region-%ld allocates %ld blocks. free_blocks-%d\n", region_id, blocks, _block_manager.block_pool.size()); 
     assert(this->active_regions_map.count(region_id) > 0);
     kvCacheRegion * region = this->active_regions_map[region_id];
     region->updateBlocks(blocks);
     //fprintf(stderr, "after region-%ld allocates %ld blocks. free_blocks-%ld\n", region_id, blocks, _block_manager.block_pool.size()); 
-    //fprintf(stderr, "region-%ld allocates %ld blocks. physical block size:%lx\n", region_id, blocks, this->physical_block_size); 
   }
 
   //fprintf(stderr, "NNNNNN after updateBlocks, handling %ld request\n", update_blocks.size());
@@ -551,8 +550,7 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
   
   //at::cuda::OptionalCUDAGuard device_guard(device); 
   cudaStream_t asyncStream; cudaStreamCreate(&asyncStream);
-  cudaStream_t computeStream = at::cuda::getCurrentCUDAStream();
-
+  //cudaStream_t computeStream = at::cuda::getCurrentCUDAStream();
 
   while(true) {
     pthread_mutex_lock(&instance->mutex_manager); 
@@ -564,11 +562,11 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
     }
    
     // Perform memory management asynchronously
-    instance->swapOutCache(instance->swap_out_caches, asyncStream, instance->immediate_allocate);
+    instance->swapOutCache(instance->swap_out_caches, asyncStream);
     instance->updateBlocks(instance->update_blocks);
     // Swap in cache must be done after allocating cache blocks, as 
     // we may reuse an existing cache but with the expansion of its blocks 
-    instance->swapInCache(instance->swap_in_caches, asyncStream, instance->immediate_allocate);
+    instance->swapInCache(instance->swap_in_caches, asyncStream);
 
     //pthread_mutex_lock(&instance->mutex_manager); 
     instance->manager_running = false; 
@@ -588,7 +586,7 @@ void kvCacheAllocator::updateCacheBlocks(bool immediate_allocate,
     
     // If the manager has not finished, waiting on the condition 
     while(this->manager_running) {
-      //fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
+      fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
 
@@ -634,7 +632,7 @@ void kvCacheAllocator::releaseRegions(std::vector<int64_t> regions) {
 }
 
 // Swap out the caches listed in src_to_dests (from Device to Host)
-void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync) {
+void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
   bool to_sync = false; 
 
   // Checking every item in swap_caches
@@ -653,6 +651,8 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
   }
 
   if(to_sync) {
+    // We need to synchronize here, since partial pages can be munmaped (which can cause 
+    // issue if without synchronization)
     cudaError_t err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) {
       std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
@@ -666,7 +666,7 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
 }
 
 // Swap in the caches listed in swap_caches (from Host to Device)
-void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync) {
+void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream) {
   bool to_sync = false; 
  
   for(auto item: swap_caches) {
@@ -699,4 +699,5 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
       exit(-1);
     }
   }
+  //fprintf(stderr, "After SWPAIN, free blocks %ld\n", _block_manager.block_pool.size());
 }

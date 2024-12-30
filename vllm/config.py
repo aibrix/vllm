@@ -592,8 +592,8 @@ class CacheConfig:
         enable_prefix_caching: bool = False,
         use_dattn: bool = False,
         cpu_offload_gb: float = 0,
-        vmm_frequency: int = 16, 
-        num_cpu_caches: int = 40
+        vmm_frequency: int = 2, 
+        num_cpu_caches: int = 80
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization

@@ -138,8 +138,8 @@ public:
   void updateCacheBlocks(bool immediate_allocate,  std::vector<std::vector<int64_t>> to_update_blocks, 
                       std::vector<std::vector<int64_t>> to_swap_out, std::vector<std::vector<int64_t>> to_swap_in);
 
-  void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync); 
-  void swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream, bool is_sync); 
+  void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
+  void swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
 
 };
 

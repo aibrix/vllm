@@ -24,6 +24,70 @@ import torch
 
 logger = init_logger(__name__)
 
+# This needs to re-design
+class CPUCacheAllocator: 
+    def __init__(self, num_blocks: int): 
+        self.num_free_blocks = num_blocks
+        self.total_blocks = num_blocks
+        self.free_blocks =[(0, num_blocks-1)]
+        self.allocated_blocks = {}
+
+    def allocate(self, blocks: int):
+        for i, (start, end) in enumerate(self.free_blocks):
+            # Check if the range is large enough
+            if end - start + 1 >= num_blocks:  
+                allocated_start = start
+                allocated_end = start + num_blocks - 1
+
+                # Update free blocks
+                if allocated_end < end:
+                    self.free_blocks[i] = (allocated_end + 1, end)
+                else:
+                    self.free_blocks.pop(i)
+
+                # Track allocated blocks
+                self.allocated_blocks[allocated_start] = num_blocks
+                return allocated_start
+
+        # No sufficient free range found
+        return None
+
+    def free(self, start_block):
+        """
+        Free a previously allocated range of blocks.
+        :param start_block: Starting block of the range to free.
+        """
+        if start_block not in self.allocated_blocks:
+            raise ValueError("Invalid block range to free")
+
+        num_blocks = self.allocated_blocks.pop(start_block)
+        freed_range = (start_block, start_block + num_blocks - 1)
+
+        # Merge the freed range into free blocks
+        self.free_blocks.append(freed_range)
+        self.free_blocks = self._merge_free_blocks()
+
+    def _merge_free_blocks(self):
+        """
+        Merge contiguous ranges in the free blocks list.
+        :return: A merged list of free blocks.
+        """
+        if not self.free_blocks:
+            return []
+
+        # Sort the free blocks by start
+        self.free_blocks.sort()
+
+        merged_blocks = [self.free_blocks[0]]
+        for current_start, current_end in self.free_blocks[1:]:
+            last_start, last_end = merged_blocks[-1]
+            if current_start <= last_end + 1:  # Overlapping or contiguous ranges
+                merged_blocks[-1] = (last_start, max(last_end, current_end))
+            else:
+                merged_blocks.append((current_start, current_end))
+
+        return merged_blocks
+
 class CacheAllocator:
     def __init__(self, name: str, num_caches: int):
         self.num_caches = num_caches
@@ -50,8 +114,8 @@ class CacheAllocator:
         return len(self.kv_caches)
 
 class SwappedCPUCache:
-    def __init__(self, cache_id, blocks):
-        self.cache_id = cache_id
+    def __init__(self, start_block, blocks):
+        self.start_block = start_block
         self.blocks = blocks
 
 class BlockSpaceManagerDAttn(BlockSpaceManager):
@@ -67,7 +131,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         enable_caching: bool = False, # Not supported
         vmm_frequency: int = 8, 
         num_caches: int = 0,
-        num_cpu_caches: int = 40,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -82,12 +145,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.num_free_cpu_blocks = num_cpu_blocks
 
         num_gpu_caches = num_caches
-        num_cpu_caches = num_cpu_caches 
 
-        #print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}, num_cpu_caches:{num_cpu_caches}", file=sys.stderr)
+        print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}", file=sys.stderr)
         # use to alloc cache buffer id for seq
         self.gpu_allocator = CacheAllocator("cuda", num_gpu_caches)
-        self.cpu_allocator = CacheAllocator("cpu", num_cpu_caches)
+        self.cpu_allocator = CPUCacheAllocator(num_cpu_blocks)
 
         # Watermark indicates that the least amount of blocks should be free. 
         assert watermark >= 0.0
@@ -354,10 +416,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             cpu_cache = self.swapped_out_caches[seq.seq_id] 
 
             need_blocks = cpu_cache.blocks
-            cpu_cache_id = cpu_cache.cache_id
+            start_block = cpu_cache.start_block
 
             # Free cpu cache id and update the counter
-            self.cpu_allocator.free(cpu_cache_id)
+            self.cpu_allocator.free(start_block)
             self.num_free_cpu_blocks += need_blocks  
             
             # Allocate a gpu cache id, based on the need_blocks. 
@@ -369,7 +431,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
             # NOTE: we may not need the allocation, if gpu_cache_id 
             #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
-            to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
+            to_swap_in_caches.append([start_block, gpu_cache_id, need_blocks])
             
             # Delete this entry
             del self.swapped_out_caches[seq.seq_id]
@@ -399,8 +461,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             self._free_cache(cache_id=gpu_cache_id)
 
             # Allocate the cpu cache id
-            cpu_cache_id = self.cpu_allocator.allocate()
-            cpu_cache = SwappedCPUCache(cpu_cache_id, need_blocks) 
+            start_block = self.cpu_allocator.allocate(need_blocks)
+            cpu_cache = SwappedCPUCache(start_block, need_blocks) 
             self.swapped_out_caches[seq.seq_id] = cpu_cache
 
             # After the swapped out, num_free_cpu_blocks should be decremented 
@@ -408,7 +470,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             
             #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
             
-            to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, need_blocks]) 
+            to_swap_out_caches.append([gpu_cache_id, start_block, need_blocks]) 
 
         #print(f"to_swap_out_caches:{to_swap_out_caches}", file=sys.stderr)
         return to_swap_out_caches
@@ -515,8 +577,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         for cache_id, num_blocks in self.to_allocate_blocks.items():
             #print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
             to_update_blocks[cache_id] = num_blocks
-
-        
 
         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
         #if self.step_index >= 1600:

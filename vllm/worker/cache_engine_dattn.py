@@ -92,8 +92,6 @@ class CacheEngineDAttn:
         
         self.device_cache_allocator = dattn.kvCacheAllocator(max_gpu_memory_size, self.block_bytes_size, cache_space_per_req)
 
-        cpu_cache_num = cache_config.num_cpu_caches 
-
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             model_config.get_num_attention_heads(parallel_config),
@@ -111,10 +109,8 @@ class CacheEngineDAttn:
         self.kv_cache_ptrs = self._reserve_gpu_kv_cache(max_batch_size)
         self.gpu_cache = self._create_fake_kv_cache(self.num_layers)
         self.MADV_COLD = self._find_macro_value("MADV_COLD", "/usr/include/asm-generic/mman-common.h") 
-
-        self.cpu_cache = [None] * cpu_cache_num
-
-        self._reserve_cpu_kv_cache(cpu_cache_num, cache_space_per_req) 
+        
+        self._reserve_cpu_kv_cache(cache_config.num_cpu_blocks * self.block_bytes_size) 
 
     def _find_macro_value(self, macro_name, header_file):
         try:
@@ -162,8 +158,8 @@ class CacheEngineDAttn:
 
         return kv_cache_ptrs
 
-    def _reserve_cpu_kv_cache(self, cache_num: int, cache_space_per_req: int) -> List[int]:
-        self.cpu_cache = self.device_cache_allocator.alloc_cpu_caches(cache_num, cache_space_per_req) 
+    def _reserve_cpu_kv_cache(self, cpu_cache_space: int) -> List[int]:
+        self.cpu_cache = self.device_cache_allocator.alloc_cpu_cache(cpu_cache_space) 
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:
         to_swap_in_caches = []
@@ -171,12 +167,12 @@ class CacheEngineDAttn:
         for pair in src_to_dst:
             item = pair.flatten()
 
-            cpu_cache_id = item[0]
+            start_block = item[0]
             gpu_cache_id = item[1]
             blocks = item[2]
 
             gpu_cache_address = self.kv_cache_ptrs[gpu_cache_id]
-            cpu_cache_address = self.cpu_cache[cpu_cache_id]
+            cpu_cache_address = self.cpu_cache + start_block * self.block_bytes_size 
 
             size = blocks * self.block_bytes_size
             #print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
@@ -195,11 +191,11 @@ class CacheEngineDAttn:
             item = pair.flatten()
 
             gpu_cache_id = item[0]
-            cpu_cache_id = item[1]
+            start_block = item[1]
             blocks = item[2]
 
             gpu_cache_address = self.kv_cache_ptrs[gpu_cache_id]
-            cpu_cache_address = self.cpu_cache[cpu_cache_id]
+            cpu_cache_address = self.cpu_cache + + start_block * self.block_bytes_size
             size = blocks * self.block_bytes_size 
             
             #print(f"Engine swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)

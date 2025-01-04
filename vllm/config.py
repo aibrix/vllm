@@ -593,7 +593,6 @@ class CacheConfig:
         use_dattn: bool = False,
         cpu_offload_gb: float = 0,
         vmm_frequency: int = 2, 
-        num_cpu_caches: int = 80
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
@@ -613,7 +612,6 @@ class CacheConfig:
 
         # Initialization for dattn
         self.use_dattn = use_dattn
-        self.num_cpu_caches = num_cpu_caches 
         self.vmm_frequency = vmm_frequency
 
     def metrics_info(self):

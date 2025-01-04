@@ -486,7 +486,8 @@ class LLMEngine:
 
         # DEBUG: in order to trigger the swap faster
         print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
-        #num_gpu_blocks = 158 
+        #num_gpu_blocks = 158
+        #num_cpu_blocks = 800 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(

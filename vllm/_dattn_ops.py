@@ -66,9 +66,8 @@ class kvCacheAllocator:
         #return wrapDptr2Tensor()
         return ptr 
 
-    def alloc_cpu_caches(self, cache_num:int, cache_space_per_req: int):
-        caches = self._allocator.allocCPUCaches(cache_num, cache_space_per_req)
-        return caches
+    def alloc_cpu_cache(self, cpu_cache_space: int):
+        return self._allocator.allocCPUCache(cpu_cache_space)
 
     #def alloc_cache_ptr(self, ptr:CacheDevicePtr, page_num:int = 1, offset:int = 0):    
     #def free_cache_ptr(self, ptr:CacheDevicePtr):

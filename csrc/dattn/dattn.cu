@@ -483,20 +483,16 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
 // FIXME: ideally there is no need to allocate num_caches with the same 
 // size, but the management of CPU caches can be more complicated. 
 // Fixing this problem in the future if the CPU memory size is a problem 
-std::vector<int64_t> kvCacheAllocator::allocCPUCaches(int64_t num_caches, int64_t cache_size) {
-  std::vector<int64_t> cache_addresses; 
-  
-  for(int i = 0; i < num_caches; i++) {
-    void * address;  
-    cudaError_t err = cudaHostAlloc(&address, cache_size, cudaHostAllocDefault);
-    if (err != cudaSuccess) {
-        std::cerr << "cudaHostAlloc failed: " << cudaGetErrorString(err) << std::endl;
-        exit(-1);
-    }
-    cache_addresses.push_back((int64_t)address); 
+int64_t kvCacheAllocator::allocCPUCache(int64_t cache_size) {
+
+  void * address;  
+  cudaError_t err = cudaHostAlloc(&address, cache_size, cudaHostAllocDefault);
+  if (err != cudaSuccess) {
+    std::cerr << "cudaHostAlloc failed: " << cudaGetErrorString(err) << std::endl;
+    exit(-1);
   }
 
-  return cache_addresses; 
+  return (int64_t)address; 
 }
 
 // Release the region with the given region_id

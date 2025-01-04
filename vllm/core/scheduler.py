@@ -362,7 +362,6 @@ class Scheduler:
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching,
                 num_caches=self.scheduler_config.max_num_seqs,
-                num_cpu_caches=self.cache_config.num_cpu_caches,  
                 vmm_frequency = self.vmm_frequency, 
                 )
         # Sequence groups in the WAITING state.

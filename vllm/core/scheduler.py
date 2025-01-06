@@ -1587,6 +1587,7 @@ class Scheduler:
 
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
+            print(f"_preempt_by_recompute, request:{seq_group.request_id}")
         elif preemption_mode == PreemptionMode.SWAP:
             self._preempt_by_swap(seq_group, blocks_to_swap_out)
             #print(f"_preempt_by_swap, request:{seq_group.request_id}, blocks_to_swap_out:{len(blocks_to_swap_out)}")
@@ -1624,7 +1625,7 @@ class Scheduler:
         blocks_to_swap_in.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
-            print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
+            #print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 
     def _swap_in_async(
         self,
@@ -1635,7 +1636,7 @@ class Scheduler:
         blocks_to_swap_in.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.SWAPPING
-            print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
+            #print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
         self.swapping_in.append(seq_group)
         seq_group.swapping_step_index = self.step_index
 
@@ -1654,7 +1655,7 @@ class Scheduler:
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
-            print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
+            #print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 
     def _swap_out_async(
         self,
@@ -1671,7 +1672,7 @@ class Scheduler:
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPING
-            print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
+            #print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 
         seq_group.swapping_step_index = self.step_index
 

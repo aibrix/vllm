@@ -485,8 +485,8 @@ class LLMEngine:
             self.model_executor.determine_num_available_blocks())
 
         # DEBUG: in order to trigger the swap faster
+        #num_gpu_blocks = 600
         print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
-        #num_gpu_blocks = 158
         #num_cpu_blocks = 800 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override

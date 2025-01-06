@@ -651,11 +651,7 @@ void kvCacheAllocator::swapOutCache(std::vector<std::vector<int64_t>> swap_cache
     // issue if without synchronization)
     cudaError_t err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) {
-      std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
-      err = cudaGetLastError();
-      if (err != cudaSuccess) {
-        std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
-      } 
+      std::cerr << "swap_out stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
       exit(-1);
     } 
   }   
@@ -687,11 +683,7 @@ void kvCacheAllocator::swapInCache(std::vector<std::vector<int64_t>> swap_caches
   if(to_sync) {
     cudaError_t err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) {
-      std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
-      err = cudaGetLastError();
-      if (err != cudaSuccess) {
-        std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
-      } 
+      std::cerr << "Swap_in stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
       exit(-1);
     }
   }

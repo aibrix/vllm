@@ -324,7 +324,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             to_swap_out_caches, to_swap_in_caches = self.execute_worker_dattn(worker_input)
 
             # If any of these not zero
-            if (execute_model_req.to_update_blocks or to_swap_out_caches or to_swap_in_caches): 
+            if (execute_model_req.to_update_blocks or to_swap_out_caches or to_swap_in_caches or execute_model_req.immediate_alloc == True): 
                 # Perform the update cache blocks in a function. 
                 self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_update_blocks, to_swap_out_caches, to_swap_in_caches)
         else:

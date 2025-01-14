@@ -1,6 +1,6 @@
 diff -Nur orig/CMakeLists.txt dattn/CMakeLists.txt
 --- orig/CMakeLists.txt	2024-12-30 22:26:31.412992740 +0000
-+++ dattn/CMakeLists.txt	2024-12-30 22:27:03.162886978 +0000
++++ dattn/CMakeLists.txt	2025-01-14 23:39:07.769142648 +0000
 @@ -229,14 +229,32 @@
    # The CUTLASS kernels for Hopper require sm90a to be enabled.
    # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
@@ -51,9 +51,293 @@ diff -Nur orig/CMakeLists.txt dattn/CMakeLists.txt
    message(STATUS "Enabling moe extension.")
    add_dependencies(default _moe_C)
  endif()
+diff -Nur orig/a dattn/a
+--- orig/a	1970-01-01 00:00:00.000000000 +0000
++++ dattn/a	2025-01-14 23:39:07.769142648 +0000
+@@ -0,0 +1,280 @@
++diff --git a/evaluation/inference_long.py b/evaluation/inference_long.py
++index 0cf742f4..abd26fdb 100644
++--- a/evaluation/inference_long.py
+++++ b/evaluation/inference_long.py
++@@ -18,7 +18,8 @@ prompts = [
++ 
++ 
++ #prompts = prompts * 4
++-prompts = prompts * 10
+++#prompts = prompts * 10
+++prompts = prompts * 20
++ set_seed(32)
++ 
++ import os
++@@ -30,6 +31,7 @@ os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
++ #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
++ #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
++ #sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=2048)
+++#sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=1024)
++ sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=512)
++ 
++ # Create an LLM.
++@@ -38,10 +40,10 @@ sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=512)
++ #llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
++ #llm = LLM(model="Qwen/Qwen-7B", use_dattn=True, trust_remote_code=True, enforce_eager=True, preemption_mode="swap")
++ #llm = LLM(model="facebook/opt-2.7B", use_dattn=True, enforce_eager=True, preemption_mode="swap")
++-llm = LLM(model="facebook/opt-6.7b", use_dattn=True,  enforce_eager=True, preemption_mode="swap")
+++#llm = LLM(model="facebook/opt-6.7b", use_dattn=True,  enforce_eager=True, preemption_mode="swap")
++ #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
++ #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True, preemption_mode="swap")
++-#llm = LLM(model="facebook/opt-2.7b", enforce_eager=True, preemption_mode="swap")
+++llm = LLM(model="facebook/opt-2.7b", enforce_eager=True, preemption_mode="swap")
++ #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True, preemption_mode="swap")
++ #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
++ #llm = LLM(model="facebook/opt-1.3b", enforce_eager=True)
++diff --git a/vllm/config.py b/vllm/config.py
++index 324ffcd1..5272f897 100644
++--- a/vllm/config.py
+++++ b/vllm/config.py
++@@ -592,8 +592,8 @@ class CacheConfig:
++         enable_prefix_caching: bool = False,
++         use_dattn: bool = False,
++         cpu_offload_gb: float = 0,
++-        vmm_frequency: int = 16, 
++-        num_cpu_caches: int = 40
+++        vmm_frequency: int = 2, 
+++        num_cpu_caches: int = 80
++     ) -> None:
++         self.block_size = block_size
++         self.gpu_memory_utilization = gpu_memory_utilization
++diff --git a/vllm/core/block_manager_dattn.py b/vllm/core/block_manager_dattn.py
++index af9088d1..f687db1e 100644
++--- a/vllm/core/block_manager_dattn.py
+++++ b/vllm/core/block_manager_dattn.py
++@@ -65,7 +65,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++         watermark: float = 0.03,
++         sliding_window: Optional[int] = None, # Not supported
++         enable_caching: bool = False, # Not supported
++-        vmm_frequency: int = 16, 
+++        vmm_frequency: int = 8, 
++         num_caches: int = 0,
++         num_cpu_caches: int = 40,
++     ) -> None:
++@@ -116,11 +116,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++ 
++         # Maintain the mapping between seq.req_id and SwappedCPUCache (cache_id, blocks)
++         self.swapped_out_caches: Dict[int, SwappedCPUCache] = {}
++-        self.swapping_reqs: List[int] = []
++ 
++         # number of active requests (which will be used to improve the scheduler)
++         self.total_active_reqs = 0
++         self.allocated_active_reqs = 0
+++        self.blocks_per_active_reqs = 0
++ 
++         # Track the step information, used for periodical memory management
++         self.step_index = 0
++@@ -140,7 +140,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++         if (self.num_total_gpu_blocks - need_blocks < self.watermark_blocks):
++             return AllocStatus.NEVER
++         
++-        if self.num_free_gpu_blocks - need_blocks >= self.watermark_blocks:
+++        #if self.num_free_gpu_blocks - need_blocks >= self.watermark_blocks:
+++        if self.num_free_gpu_blocks > need_blocks:
++             # Make sure that we are not holding more than schedule_config.max_num_seqs
++             if self.gpu_allocator.get_free_caches() > 0 or len(self.to_free_gpu_caches) > 0:
++                 return AllocStatus.OK
++@@ -228,30 +229,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++             self.cached_free_gpu_blocks -= allocated_block_num
++             
++             print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, need_blocks:{need_blocks}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
++-            # If the cache has too many blocks, then we will release some blocks to other requests
++-            #if allocated_block_num == need_blocks:
++-            #    to_allocate = False
++-            """
++-            The following is to improve the performance, but it is disabled now
++-            if allocated_block_num > need_blocks + self.watermark_blocks:
++-
++-                # Now the current request will keep free_blocks_per_req blocks, while others 
++-                # are still need to be freed 
++-                need_blocks += self.watermark_blocks
++-                self.num_free_gpu_blocks -= self.watermark_blocks
++-                print(f"0-reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
++-
++-                # For this case, we will need to adjust the number of blocks
++-                # to_allocate = True 
++-            elif allocated_block_num > need_blocks:
++-                # when allocated_block_num <= need_blocks + self.watermark_blocks, no need to allocate
++-                to_allocate = False
++-                need_blocks = allocated_block_num 
++-                self.num_free_gpu_blocks -= (allocated_block_num-need_blocks)
++-                print(f"1-reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
++-            else:
++-                print(f"2-reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}", file=sys.stderr)
++-            """
++         else:
++             # Check whether the can_allocate or can_swap_in has a bug
++             if self.num_free_gpu_blocks < 0: 
++@@ -291,7 +268,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++         # each request can allocate one block successfully, then there
++         # is no need to preempt. Note that self.cache_free_gpu_blocks 
++         # should be included as they will be allocated first in the next epoch 
++-        return self.num_free_gpu_blocks > 1
+++        return self.num_free_gpu_blocks >= 1
++         
++     # FIXME: there is no handling on num_lookahead_slots, which should be handled.  
++     def append_slots(
++@@ -310,27 +287,48 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++         # If the sequence is allocated, its cache_id must >= 0.
++         assert cache_id >= 0
++ 
++-        logical_blocks_num = self._predict_n_blocks(seq.get_len())
++         allocated_block_num = self.allocated_gpu_blocks[cache_id]
+++        logical_blocks_num = self._predict_n_blocks(seq.get_len())
+++
+++        # Increase the number of blocks, if the number of free blocks is sufficient
+++        if self.allocated_active_reqs == 0:
+++            if self.num_free_gpu_blocks > self.total_active_reqs:
+++                self.blocks_per_active_reqs = int(self.num_free_gpu_blocks / self.total_active_reqs)
+++            else:
+++                self.blocks_per_active_reqs = 1
+++            #print(f"step-{self.step_index}: freeblocks:{self.num_free_gpu_blocks}, total_req:{self.total_active_reqs}, per_active_reqs:{self.blocks_per_active_reqs}")
++ 
++         # If we need to allocate a new physical block
++         if allocated_block_num < logical_blocks_num:
++             if allocated_block_num != logical_blocks_num - 1: 
++                 print(f"append_slots cache_id:{cache_id}, logical_blocks_num:{logical_blocks_num} - allocated_block_num:{allocated_block_num}, real tokens:{seq.get_len()}", file=sys.stderr) 
++-            
+++
++             # Currently this code only supports adding one physical block in the decoding phase
++             assert allocated_block_num == logical_blocks_num - 1
+++            
+++            """
+++            need_blocks = self.blocks_per_active_reqs
++ 
++-            self.num_free_gpu_blocks -= 1
+++            if self.num_free_gpu_blocks > (self.total_active_reqs - self.allocated_active_reqs) * need_blocks:
+++                need_blocks += 1
+++
+++            #print(f"step-{self.step_index}: allocated_block_num-{allocated_block_num}, self.allocated_active_reqs-{self.allocated_active_reqs}, need_blocks:{need_blocks}, free_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
+++            self.num_free_gpu_blocks -= need_blocks
+++            
++           
++             if self.num_free_gpu_blocks < 0:
++                 print(f"ERROR: append_slots for cache_id:{cache_id}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, cache_id:{cache_id}, logical_blocks_num:{logical_blocks_num}, allocated_block:{allocated_block_num}, self.cached_free_gpu_blocks:{self.cached_free_gpu_blocks}", file=sys.stderr)
+++                exit(-1)
++ 
++-            self.allocated_gpu_blocks[cache_id] = logical_blocks_num
+++            self.allocated_gpu_blocks[cache_id] = allocated_block_num + need_blocks 
++ 
++             # Note that to_allocate_blocks actually hold the logic blocks number, not a bug. 
++-            self.to_allocate_blocks[cache_id] = logical_blocks_num 
+++            self.to_allocate_blocks[cache_id] = allocated_block_num + need_blocks 
++ 
+++            """
+++            self.num_free_gpu_blocks -= 1
+++            self.allocated_gpu_blocks[cache_id] = logical_blocks_num
+++            self.to_allocate_blocks[cache_id] = logical_blocks_num 
++         # Update that one active request have already been allocated
++         self.allocated_active_reqs += 1
++ 
++@@ -362,16 +360,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++     def can_swap_in(self, seq_group: SequenceGroup,
++                     num_lookahead_slots: int) -> AllocStatus:
++         
++-        #if self.step_index >= 511:
++-            #print(f"can_swap_in at step-{self.step_index}", file=sys.stderr)
++         if (self.step_index & self.vmm_frequency_mask):
++             return AllocStatus.LATER
++ 
++-        # For those swapping requests, now it will return OK 
++-        req_id = seq_group.request_id
++-        if req_id in self.swapping_reqs:
++-            return AllocStatus.OK
++-
++         need_blocks = num_lookahead_slots
++         req_id = None
++         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
++@@ -411,15 +402,12 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++             seq.data.cache_id = gpu_cache_id
++ 
++             # NOTE: we may not need the allocation, if gpu_cache_id 
++-            #if gpu_cache_id == 0:
++-            #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, cpu_cache_id:{cpu_cache_id}, gpu_cache_id:{gpu_cache_id}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks} freeCPUBlocks:{self.num_free_cpu_blocks}, at step:{self.step_index}, active requests:{self.total_active_reqs}", file=sys.stderr)
++             #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
++             to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
++             
++             # Delete this entry
++             del self.swapped_out_caches[seq.seq_id]
++ 
++-        #print(f"in the end of swapin checking", file=sys.stderr)
++         return to_swap_in_caches
++ 
++     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
++@@ -437,7 +425,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++ 
++             # Since this cache may have more blocks than its necessity, we only record the 
++             # real_gpu_blocks here in order to reduce the overhead involved in copy in swapping
++-            real_gpu_blocks = self._get_n_blocks(seq.get_len())
+++            need_blocks = self._get_n_blocks(seq.get_len())
++ 
++             #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
++ 
++@@ -446,15 +434,15 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++ 
++             # Allocate the cpu cache id
++             cpu_cache_id = self.cpu_allocator.allocate()
++-            cpu_cache = SwappedCPUCache(cpu_cache_id, real_gpu_blocks) 
+++            cpu_cache = SwappedCPUCache(cpu_cache_id, need_blocks) 
++             self.swapped_out_caches[seq.seq_id] = cpu_cache
++ 
++             # After the swapped out, num_free_cpu_blocks should be decremented 
++-            self.num_free_cpu_blocks -= real_gpu_blocks
+++            self.num_free_cpu_blocks -= need_blocks
++             
++             #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
++             
++-            to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, real_gpu_blocks]) 
+++            to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, need_blocks]) 
++ 
++         #print(f"to_swap_out_caches:{to_swap_out_caches}", file=sys.stderr)
++         return to_swap_out_caches
++@@ -467,7 +455,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++ 
++         # Get blocks of this cache
++         free_blocks = self.allocated_gpu_blocks[cache_id]
++-        #if cache_id == 0:
++         #    print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
++        
++         # Note that we update self.total_active_reqs here, as free_cache() is invoked twice for every request
++@@ -566,6 +553,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++         
++ 
++         #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
+++        #if self.step_index >= 1600:
++         #print(f"step-{self.step_index}, to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
++ 
++         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
++@@ -574,7 +562,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
++         self.to_allocate_blocks.clear()
++         self.cached_free_gpu_blocks = 0
++         self.allocated_active_reqs = 0
+++        self.blocks_per_active_reqs = 1
++ 
+++        # Only update the step index for decoding steps
++         if immediate_allocate == False:
++             self.step_index += 1  
++ 
++diff --git a/vllm/entrypoints/llm.py b/vllm/entrypoints/llm.py
++index a98493f2..58a84059 100644
++--- a/vllm/entrypoints/llm.py
+++++ b/vllm/entrypoints/llm.py
++@@ -127,7 +127,7 @@ class LLM:
++         tokenizer_revision: Optional[str] = None,
++         seed: int = 0,
++         gpu_memory_utilization: float = 0.9,
++-        swap_space: float = 32,
+++        swap_space: float = 128,
++         cpu_offload_gb: float = 0,
++         enforce_eager: Optional[bool] = None,
++         max_context_len_to_capture: Optional[int] = None,
 diff -Nur orig/compile.sh dattn/compile.sh
 --- orig/compile.sh	2024-12-30 22:26:31.412992740 +0000
-+++ dattn/compile.sh	2024-12-30 22:27:03.162886978 +0000
++++ dattn/compile.sh	2025-01-14 23:39:07.769142648 +0000
 @@ -1,7 +1,9 @@
  export VERBOSE=1
 +export NVCC_THREADS=8
@@ -67,7 +351,7 @@ diff -Nur orig/compile.sh dattn/compile.sh
 +pip install -e . --no-build-isolation -vvv
 diff -Nur orig/compile_a100.sh dattn/compile_a100.sh
 --- orig/compile_a100.sh	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/compile_a100.sh	2024-12-30 22:27:03.162886978 +0000
++++ dattn/compile_a100.sh	2025-01-14 23:39:07.769142648 +0000
 @@ -0,0 +1,25 @@
 +export VERBOSE=1
 +#export NVCC_THREADS=8
@@ -96,7 +380,7 @@ diff -Nur orig/compile_a100.sh dattn/compile_a100.sh
 +#pip install -e . -vvv
 diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attention_kernels.cu
 --- orig/csrc/attention/attention_kernels.cu	2024-12-30 22:26:31.473992447 +0000
-+++ dattn/csrc/attention/attention_kernels.cu	2024-12-30 22:27:03.164886968 +0000
++++ dattn/csrc/attention/attention_kernels.cu	2025-01-14 23:39:07.771142639 +0000
 @@ -21,7 +21,9 @@
  #include <ATen/cuda/CUDAContext.h>
  #include <c10/cuda/CUDAGuard.h>
@@ -116,7 +400,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
  
  namespace vllm {
  
-@@ -81,6 +84,42 @@
+@@ -81,6 +84,39 @@
    return VLLM_SHFL_SYNC(sum, 0);
  }
  
@@ -153,13 +437,10 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +  return qk_max; 
 +}
 +
-+__device__ unsigned long long firstTime = 0, newTime = 0, secondTime = 0, thirdTime = 0, fourthTime = 0, fifthTime = 0, sixthTime = 0, seventhTime = 0, totalTime = 0; 
-+__device__ unsigned long myindex = 0; 
-+
  // TODO(woosuk): Merge the last two dimensions of the grid.
  // Grid: (num_heads, num_seqs, max_num_partitions).
  template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
-@@ -108,6 +147,7 @@
+@@ -108,6 +144,7 @@
      const float k_scale, const float v_scale, const int tp_rank,
      const int blocksparse_local_blocks, const int blocksparse_vert_stride,
      const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
@@ -167,7 +448,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    const int seq_idx = blockIdx.y;
    const int partition_idx = blockIdx.z;
    const int max_num_partitions = gridDim.z;
-@@ -181,13 +221,16 @@
+@@ -181,13 +218,16 @@
  #pragma unroll
    for (int i = thread_group_idx; i < NUM_VECS_PER_THREAD;
         i += NUM_THREAD_GROUPS) {
@@ -184,7 +465,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    // Memory planning.
    extern __shared__ char shared_mem[];
    // NOTE(woosuk): We use FP32 for the softmax logits for better accuracy.
-@@ -293,6 +336,7 @@
+@@ -293,6 +333,7 @@
        // This includes a reduction across the threads in the same thread group.
        float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                               q_vecs[thread_group_offset], k_vecs);
@@ -192,7 +473,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
        // Add the ALiBi bias if slopes are given.
        qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
  
-@@ -306,28 +350,8 @@
+@@ -306,28 +347,8 @@
        }
      }
    }
@@ -223,7 +504,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
  
    // Get the sum of the exp values.
    float exp_sum = 0.f;
-@@ -377,6 +401,7 @@
+@@ -377,6 +398,7 @@
  
    scalar_t zero_value;
    zero(zero_value);
@@ -231,7 +512,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
         block_idx += NUM_WARPS) {
      // NOTE(woosuk): The block number is stored in int32. However, we cast it to
-@@ -398,7 +423,7 @@
+@@ -398,7 +420,7 @@
      L_vec logits_vec;
      from_float(logits_vec, *reinterpret_cast<Float_L_vec*>(logits + token_idx -
                                                             start_token_idx));
@@ -240,7 +521,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
      const cache_t* v_ptr = v_cache + physical_block_number * kv_block_stride +
                             kv_head_idx * kv_head_stride;
  #pragma unroll
-@@ -474,6 +499,7 @@
+@@ -474,6 +496,7 @@
          const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
          if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
            accs[i] += src[row_idx];
@@ -248,7 +529,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
          }
        }
      }
-@@ -625,6 +651,13 @@
+@@ -625,6 +648,13 @@
      red_smem[warp_idx] = max_logit;
    }
    __syncthreads();
@@ -262,7 +543,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    // Reduce across warps.
    max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
  #pragma unroll
-@@ -668,6 +701,406 @@
+@@ -668,6 +698,421 @@
    }
  }
  
@@ -280,6 +561,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +  int max_seq_len,
 +  const int64_t* cache_row_mapping,  // [num_tokens]  record cache ptr for this token
 +  const int64_t* cache_col_mapping,  // [num_tokens]  record token index of the sequence
++  const float profiled_qk_max,
 +  const int* __restrict__ seq_lens,      // [num_seqs]
 +  const int q_stride, 
 +  const int num_kv_heads,               // [num_heads]
@@ -385,6 +667,8 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +  // Each thread group fetches x elements from the key at a time.
 +  constexpr int x = 16 / sizeof(cache_t);
 +  float qk_max = -FLT_MAX;
++  __shared__ bool to_sync;
++  to_sync = false;
 +
 +  // blocksparse specific vars
 +  int bs_block_offset;
@@ -478,6 +762,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +      float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
 +                             q_vecs[thread_group_offset], k_vecs);
 +
++
 +      // Add the ALiBi bias if slopes are given.
 +      qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
 +
@@ -485,15 +770,26 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +        // Store the partial reductions to shared memory.
 +        // NOTE(woosuk): It is required to zero out the masked logits.
 +        const bool mask = token_idx >= seq_len;
++
 +        logits[token_idx - start_token_idx] = mask ? 0.f : qk;
-+        // Update the max value.
 +        qk_max = mask ? qk_max : fmaxf(qk_max, qk);
++
++        if (((qk - profiled_qk_max) >= 88.72283f) ||((qk - profiled_qk_max) <= -87.33654f)) {
++          to_sync = true;
++        }
 +      }
 +    }
 +  }
 +  
-+  // Perform reduction across all threads in the same thread block
-+  qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
++  __syncthreads(); 
++  
++  if(to_sync || profiled_qk_max == -1.0) {
++    // Perform reduction across all threads in the same thread block
++    qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
++  }
++  else {
++    qk_max = profiled_qk_max;
++  }
 +
 +  // Get the sum of the exp values.
 +  float exp_sum = 0.f;
@@ -669,7 +965,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
  }  // namespace vllm
  
  #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
-@@ -735,6 +1168,7 @@
+@@ -735,6 +1180,7 @@
    dim3 block(NUM_THREADS);
    const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -677,7 +973,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    switch (head_size) {
      // NOTE(woosuk): To reduce the compilation time, we only compile for the
      // head sizes that we use in the model. However, we can easily extend this
-@@ -823,7 +1257,7 @@
+@@ -823,7 +1269,7 @@
      const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
      const int64_t blocksparse_head_sliding_step) {
    const bool is_block_sparse = (blocksparse_vert_stride > 1);
@@ -686,7 +982,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                               CALL_V1_LAUNCHER_BLOCK_SIZE)
  }
-@@ -892,6 +1326,7 @@
+@@ -892,6 +1338,7 @@
    // For paged attention v2 kernel.
    dim3 grid(num_heads, num_seqs, max_num_partitions);
    int shared_mem_size = std::max(logits_size, outputs_size);
@@ -694,7 +990,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
    // For paged attention v2 reduce kernel.
    dim3 reduce_grid(num_heads, num_seqs);
    int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
-@@ -996,6 +1431,256 @@
+@@ -996,6 +1443,260 @@
                               CALL_V2_LAUNCHER_BLOCK_SIZE)
  }
  
@@ -711,6 +1007,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +              whole_block_size, max_seq_len, \
 +              row_ptr, \
 +              col_ptr, \
++              profiled_qk_max, \
 +              seq_lens_ptr, \
 +              q_stride, num_kv_heads, scale,  \
 +              alibi_slopes_ptr, k_scale, v_scale,  \
@@ -735,6 +1032,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +              whole_block_size, max_seq_len, \
 +              row_ptr, \
 +              col_ptr, \
++              profiled_qk_max, \
 +              seq_lens_ptr, \
 +              q_stride, num_kv_heads, scale,  \
 +              alibi_slopes_ptr, k_scale, v_scale, \
@@ -757,7 +1055,8 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +  int max_seq_len, 
 +  torch::Tensor & seq_lens,
 +  torch::Tensor & cache_row_mapping, 
-+  torch::Tensor & cache_col_mapping,  
++  torch::Tensor & cache_col_mapping, 
++  double profiled_qk_max, 
 +  int num_kv_heads,
 +  double  scale,
 +  const c10::optional<torch::Tensor>&  alibi_slopes,
@@ -897,7 +1196,8 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +    int64_t max_seq_len, 
 +    torch::Tensor & seq_lens,
 +    torch::Tensor & cache_row_mapping, 
-+    torch::Tensor & cache_col_mapping,  
++    torch::Tensor & cache_col_mapping,
++    double profiled_qk_max,   
 +    const std::string& kv_cache_dtype,
 +    int64_t num_kv_heads,
 +    double scale,
@@ -912,14 +1212,14 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +    if (query.dtype() == at::ScalarType::Float) {               
 +      dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 16>( 
 +          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-+          seq_lens, cache_row_mapping, cache_col_mapping, 
++          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max,
 +          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
 +          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
 +          blocksparse_block_size, blocksparse_head_sliding_step);
 +    } else if (query.dtype() == at::ScalarType::Half) {
 +        dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 16>( 
 +          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-+          seq_lens, cache_row_mapping, cache_col_mapping, 
++          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max, 
 +          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
 +          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
 +          blocksparse_block_size, blocksparse_head_sliding_step); 
@@ -929,14 +1229,14 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
 +    if (query.dtype() == at::ScalarType::Float) {               
 +      dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 32>( 
 +          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-+          seq_lens, cache_row_mapping, cache_col_mapping, 
++          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max,
 +          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
 +          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
 +          blocksparse_block_size, blocksparse_head_sliding_step);
 +    } else if (query.dtype() == at::ScalarType::Half) {
 +        dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 32>( 
 +          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-+          seq_lens, cache_row_mapping, cache_col_mapping, 
++          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max,
 +          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
 +          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
 +          blocksparse_block_size, blocksparse_head_sliding_step); 
@@ -953,7 +1253,7 @@ diff -Nur orig/csrc/attention/attention_kernels.cu dattn/csrc/attention/attentio
  #undef MIN
 diff -Nur orig/csrc/cache.h dattn/csrc/cache.h
 --- orig/csrc/cache.h	2024-12-30 22:26:31.474992442 +0000
-+++ dattn/csrc/cache.h	2024-12-30 22:27:03.164886968 +0000
++++ dattn/csrc/cache.h	2025-01-14 23:39:07.771142639 +0000
 @@ -6,7 +6,7 @@
  #include <vector>
  
@@ -981,7 +1281,7 @@ diff -Nur orig/csrc/cache.h dattn/csrc/cache.h
 \ No newline at end of file
 diff -Nur orig/csrc/cache_kernels.cu dattn/csrc/cache_kernels.cu
 --- orig/csrc/cache_kernels.cu	2024-12-30 22:26:31.473992447 +0000
-+++ dattn/csrc/cache_kernels.cu	2024-12-30 22:27:03.164886968 +0000
++++ dattn/csrc/cache_kernels.cu	2025-01-14 23:39:07.771142639 +0000
 @@ -21,6 +21,7 @@
  typedef __hip_bfloat16 __nv_bfloat16;
  #endif
@@ -1159,8 +1459,8 @@ diff -Nur orig/csrc/cache_kernels.cu dattn/csrc/cache_kernels.cu
  template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 --- orig/csrc/dattn/dattn.cu	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/csrc/dattn/dattn.cu	2024-12-30 22:27:03.170886939 +0000
-@@ -0,0 +1,703 @@
++++ dattn/csrc/dattn/dattn.cu	2025-01-14 23:39:07.777142612 +0000
+@@ -0,0 +1,694 @@
 +/*
 + Copyright (c) ByteDance Inc.
 + Authors: 
@@ -1306,7 +1606,7 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +    int64_t to_allocate_memory = min(total_memory, max_allowed_size); 
 +    this->total_size = to_allocate_memory; 
 +    size_t num_blocks = to_allocate_memory / block_size;
-+    fprintf(stderr, "total_memory %lx, max_allowed_size %lx num_blocks-%ld\n", total_memory, max_allowed_size, num_blocks);
++    fprintf(stderr, "total_memory %lx, max_allowed_size-%lx num_blocks-%ld block_size-%ld\n", total_memory, max_allowed_size, num_blocks, block_size);
 +    _increase_blocks(num_blocks);
 +}
 +
@@ -1317,7 +1617,6 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +      // Keeping increase the memory if the GPU memory is sufficient
 +      int64_t allow_size = this->max_allowed_size - this->total_size;
 +      int64_t alloc_size; 
-+      //fprintf(stderr, "alloc_size %lx allow_size %lx total_size %lx\n", alloc_size, allow_size, this->total_size);
 +
 +      if(allow_size <= 0) {
 +        fprintf(stderr, "There is no sufficent GPU memory now. ");
@@ -1331,6 +1630,7 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +        // Less than the incremental_size. 
 +        alloc_size = roundup(allow_size, this->block_size);  
 +      }
++      //fprintf(stderr, "alloc_size %lx allow_size %lx total_size %lx\n", alloc_size, allow_size, this->total_size);
 +
 +      int64_t blocks = alloc_size/this->block_size; 
 +
@@ -1482,15 +1782,17 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +      PhysicalBlock block = _block_manager.allocate();
 +      if ((res = cuMemMap(reinterpret_cast<CUdeviceptr>(addr), size, 0ULL, block.handle, 0ULL)) == CUDA_SUCCESS) {
 +        if ((res = cuMemSetAccess(reinterpret_cast<CUdeviceptr>(addr), size, &_accessDescr, 1)) != CUDA_SUCCESS) {
-+          fprintf(stderr, "cuMemMap success,but cuMemSetAccess failed!, err code: %d\n", res);
++          fprintf(stderr, "cuMemMap success, but cuMemSetAccess failed!, err code: %d\n", res);
 +          cuMemUnmap(reinterpret_cast<CUdeviceptr>(addr), size);
 +          exit(-1);
 +        }
 +      }
 +      else {
++        fprintf(stderr, "Now i-%d: increaseBlocks newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx\n", i, newSize, addr, distance, blocks_num, this->mapped_size);
 +        const char* errorStr;
 +        cuGetErrorString(res, &errorStr);
-+        fprintf(stderr, "cuMemMap failed when deallocating ptr %p res %d with error %s\n", addr, res, errorStr);
++        fprintf(stderr, "cuMemMap failed when mapping ptr %p size %ld res %d with error %s\n", addr, size, res, errorStr);
++        exit(-1);
 +      }
 +
 +      _block_manager.record(addr, block); 
@@ -1628,6 +1930,7 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +  // Allocate the virtual address for this region
 +  CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
 +
++  //fprintf(stderr, "reserving region: 0x%llx -- 0x%llx\n", static_cast<unsigned long long>(ptr), static_cast<unsigned long long>(ptr) + this->region_size); 
 +  // Create a new region from the scratch
 +  region = new kvCacheRegion(this->cache_block_size, this->physical_block_size, ptr);
 +
@@ -1646,20 +1949,16 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +// FIXME: ideally there is no need to allocate num_caches with the same 
 +// size, but the management of CPU caches can be more complicated. 
 +// Fixing this problem in the future if the CPU memory size is a problem 
-+std::vector<int64_t> kvCacheAllocator::allocCPUCaches(int64_t num_caches, int64_t cache_size) {
-+  std::vector<int64_t> cache_addresses; 
-+  
-+  for(int i = 0; i < num_caches; i++) {
-+    void * address;  
-+    cudaError_t err = cudaHostAlloc(&address, cache_size, cudaHostAllocDefault);
-+    if (err != cudaSuccess) {
-+        std::cerr << "cudaHostAlloc failed: " << cudaGetErrorString(err) << std::endl;
-+        exit(-1);
-+    }
-+    cache_addresses.push_back((int64_t)address); 
++int64_t kvCacheAllocator::allocCPUCache(int64_t cache_size) {
++
++  void * address;  
++  cudaError_t err = cudaHostAlloc(&address, cache_size, cudaHostAllocDefault);
++  if (err != cudaSuccess) {
++    std::cerr << "cudaHostAlloc failed: " << cudaGetErrorString(err) << std::endl;
++    exit(-1);
 +  }
 +
-+  return cache_addresses; 
++  return (int64_t)address; 
 +}
 +
 +// Release the region with the given region_id
@@ -1818,11 +2117,7 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +    // issue if without synchronization)
 +    cudaError_t err = cudaStreamSynchronize(stream);
 +    if (err != cudaSuccess) {
-+      std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
-+      err = cudaGetLastError();
-+      if (err != cudaSuccess) {
-+        std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
-+      } 
++      std::cerr << "swap_out stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
 +      exit(-1);
 +    } 
 +  }   
@@ -1854,11 +2149,7 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 +  if(to_sync) {
 +    cudaError_t err = cudaStreamSynchronize(stream);
 +    if (err != cudaSuccess) {
-+      std::cerr << "Stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
-+      err = cudaGetLastError();
-+      if (err != cudaSuccess) {
-+        std::cerr << "CUDA error after synchronization: " << cudaGetErrorString(err) << std::endl;
-+      } 
++      std::cerr << "Swap_in stream synchronization failed: " << cudaGetErrorString(err) << std::endl;
 +      exit(-1);
 +    }
 +  }
@@ -1867,7 +2158,7 @@ diff -Nur orig/csrc/dattn/dattn.cu dattn/csrc/dattn/dattn.cu
 \ No newline at end of file
 diff -Nur orig/csrc/dattn/dattn.h dattn/csrc/dattn/dattn.h
 --- orig/csrc/dattn/dattn.h	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/csrc/dattn/dattn.h	2024-12-30 22:27:03.170886939 +0000
++++ dattn/csrc/dattn/dattn.h	2025-01-14 23:39:07.777142612 +0000
 @@ -0,0 +1,145 @@
 +#pragma once
 +/*
@@ -2001,7 +2292,7 @@ diff -Nur orig/csrc/dattn/dattn.h dattn/csrc/dattn/dattn.h
 +  // In particular, the regionSize == 2 * max_seq_length * layers_num * heads_num * head_size * dtype_size
 +  // "2" here is to allocate Key and Value cache together, which helps to reduce the fragmentation 
 +  int64_t reserveRegion(int64_t region_id);
-+  std::vector<int64_t> allocCPUCaches(int64_t num_caches, int64_t cache_size);
++  int64_t allocCPUCache(int64_t cache_size);
 +  void releaseRegions(std::vector<int64_t> regions);
 +  
 +  void updateBlocks(std::vector<std::vector<int64_t>> reqs_blocks);
@@ -2016,7 +2307,7 @@ diff -Nur orig/csrc/dattn/dattn.h dattn/csrc/dattn/dattn.h
 +
 diff -Nur orig/csrc/dattn/torch_bindings.cpp dattn/csrc/dattn/torch_bindings.cpp
 --- orig/csrc/dattn/torch_bindings.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/csrc/dattn/torch_bindings.cpp	2024-12-30 22:27:03.170886939 +0000
++++ dattn/csrc/dattn/torch_bindings.cpp	2025-01-14 23:39:07.777142612 +0000
 @@ -0,0 +1,21 @@
 +/*
 + Copyright (c) ByteDance Inc.
@@ -2033,7 +2324,7 @@ diff -Nur orig/csrc/dattn/torch_bindings.cpp dattn/csrc/dattn/torch_bindings.cpp
 +  m.class_<kvCacheAllocator>("kvCacheAllocator")
 +    .def(torch::init<int64_t, int64_t, int64_t>())
 +    .def("reserveRegion", &kvCacheAllocator::reserveRegion)
-+    .def("allocCPUCaches", &kvCacheAllocator::allocCPUCaches)
++    .def("allocCPUCache", &kvCacheAllocator::allocCPUCache)
 +    .def("releaseRegions", &kvCacheAllocator::releaseRegions)
 +    .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks);
 +}
@@ -2041,7 +2332,7 @@ diff -Nur orig/csrc/dattn/torch_bindings.cpp dattn/csrc/dattn/torch_bindings.cpp
 +REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
 diff -Nur orig/csrc/ops.h dattn/csrc/ops.h
 --- orig/csrc/ops.h	2024-12-30 22:26:31.473992447 +0000
-+++ dattn/csrc/ops.h	2024-12-30 22:27:03.170886939 +0000
++++ dattn/csrc/ops.h	2025-01-14 23:39:07.777142612 +0000
 @@ -1,7 +1,9 @@
  #pragma once
  
@@ -2052,7 +2343,7 @@ diff -Nur orig/csrc/ops.h dattn/csrc/ops.h
  
  #include "core/scalar_type.hpp"
  
-@@ -26,6 +28,30 @@
+@@ -26,6 +28,31 @@
      const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
      const int64_t blocksparse_head_sliding_step);
  
@@ -2069,7 +2360,8 @@ diff -Nur orig/csrc/ops.h dattn/csrc/ops.h
 +    int64_t max_seq_len, 
 +    torch::Tensor & seq_lens,
 +    torch::Tensor & cache_row_mapping, 
-+    torch::Tensor & cache_col_mapping,  
++    torch::Tensor & cache_col_mapping,
++    double profiled_qk_max,   
 +    const std::string& kv_cache_dtype,
 +    int64_t num_kv_heads,
 +    double  scale,
@@ -2085,7 +2377,7 @@ diff -Nur orig/csrc/ops.h dattn/csrc/ops.h
  
 diff -Nur orig/csrc/torch_bindings.cpp dattn/csrc/torch_bindings.cpp
 --- orig/csrc/torch_bindings.cpp	2024-12-30 22:26:31.473992447 +0000
-+++ dattn/csrc/torch_bindings.cpp	2024-12-30 22:27:03.170886939 +0000
++++ dattn/csrc/torch_bindings.cpp	2025-01-14 23:39:07.777142612 +0000
 @@ -47,6 +47,19 @@
        "    int blocksparse_head_sliding_step) -> ()");
    ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
@@ -2095,7 +2387,7 @@ diff -Nur orig/csrc/torch_bindings.cpp dattn/csrc/torch_bindings.cpp
 +      "    Tensor! output, Tensor exp_sums, Tensor max_logits,"
 +      "    Tensor tmp_out, Tensor query, bool use_reduce,"
 +      "    int layer_idx, int num_layers, int block_size, int max_seq_len,"
-+      "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping,"
++      "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping, float profiled_qk_max,"
 +      "    str kv_cache_dtype, int num_kv_heads, float scale,"
 +      "    Tensor? alibi_slopes, float kscale, float v_scale,"
 +      "    int tp_rank, int blocksparse_local_blocks,"
@@ -2150,9 +2442,26 @@ diff -Nur orig/csrc/torch_bindings.cpp dattn/csrc/torch_bindings.cpp
    // Convert the key and value cache to fp8 data type.
    cache_ops.def(
        "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
+diff -Nur orig/new.sh dattn/new.sh
+--- orig/new.sh	1970-01-01 00:00:00.000000000 +0000
++++ dattn/new.sh	2025-01-14 23:39:07.769142648 +0000
+@@ -0,0 +1,13 @@
++cd /workspace/user/vllm/build/temp.linux-x86_64-3.10
++#/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -D_C_EXPORTS --options-file CMakeFiles/_C.dir/includes_CUDA.rsp -DONNX_NAMESPACE=onnx_c2 -std=c++17 "--generate-code=arch=compute_60,code=[sm_60]" -Xcompiler=-fPIC --expt-relaxed-constexpr -DENABLE_FP8 --threads=4 -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/cache_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/cache_kernels.cu.o.d -x cu -c /workspace/user/vllm/csrc/cache_kernels.cu -o CMakeFiles/_C.dir/csrc/cache_kernels.cu.o
++/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DCUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1 -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -D_C_EXPORTS -I/workspace/user/vllm/csrc -I/workspace/user/vllm/build/temp.linux-x86_64-3.10/_deps/cutlass-src/include -isystem /usr/include/python3.10 -isystem /usr/local/lib/python3.10/dist-packages/torch/include -isystem /usr/local/lib/python3.10/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -Xcudafe -DNDEBUG -std=c++17 "--generate-code=arch=compute_60,code=[sm_60]" -Xcompiler=-fPIC --threads=8 -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o.d -x cu -c /workspace/user/vllm/csrc/attention/attention_kernels.cu -o CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o
++export VERBOSE=1
++export NVCC_THREADS=8
++export CUDA_HOME=/usr/local/cuda-12
++export TORCH_CUDA_ARCH_LIST="6.0"
++export CUDACXX=/usr/local/cuda/bin/nvcc 
++export PATH=/usr/local/cuda/bin:$PATH
++export PYTHONPATH=/usr/local/lib/python3.10/dist-packages/:$PYTHONPATH
++
++cd /workspace/user/vllm
++pip install -e . --no-build-isolation -vvv
 diff -Nur orig/setup.py dattn/setup.py
 --- orig/setup.py	2024-12-30 22:26:31.413992736 +0000
-+++ dattn/setup.py	2024-12-30 22:27:03.089887329 +0000
++++ dattn/setup.py	2025-01-14 23:39:07.713142897 +0000
 @@ -68,7 +68,7 @@
          "so vLLM may not be able to run correctly", sys.platform)
      VLLM_TARGET_DEVICE = "empty"
@@ -2238,7 +2547,7 @@ Binary files orig/vllm/_C.abi3.so and dattn/vllm/_C.abi3.so differ
 Binary files orig/vllm/_core_C.abi3.so and dattn/vllm/_core_C.abi3.so differ
 diff -Nur orig/vllm/_custom_ops.py dattn/vllm/_custom_ops.py
 --- orig/vllm/_custom_ops.py	2024-12-30 22:26:31.413992736 +0000
-+++ dattn/vllm/_custom_ops.py	2024-12-30 22:27:03.214886727 +0000
++++ dattn/vllm/_custom_ops.py	2025-01-14 23:39:07.821142416 +0000
 @@ -97,7 +97,6 @@
          blocksparse_vert_stride, blocksparse_block_size,
          blocksparse_head_sliding_step)
@@ -2247,7 +2556,7 @@ diff -Nur orig/vllm/_custom_ops.py dattn/vllm/_custom_ops.py
  def paged_attention_v2(
      out: torch.Tensor,
      exp_sum: torch.Tensor,
-@@ -129,6 +128,60 @@
+@@ -129,6 +128,62 @@
          blocksparse_local_blocks, blocksparse_vert_stride,
          blocksparse_block_size, blocksparse_head_sliding_step)
  
@@ -2265,7 +2574,8 @@ diff -Nur orig/vllm/_custom_ops.py dattn/vllm/_custom_ops.py
 +    max_seq_len: int, 
 +    seq_lens: torch.Tensor,
 +    cache_row_mapping: torch.Tensor, 
-+    cache_col_mapping: torch.Tensor,  
++    cache_col_mapping: torch.Tensor, 
++    profiled_qk_max: float,  
 +    kv_cache_dtype: str,
 +    num_kv_heads: int,
 +    scale: float,
@@ -2292,7 +2602,8 @@ diff -Nur orig/vllm/_custom_ops.py dattn/vllm/_custom_ops.py
 +            max_seq_len, 
 +            seq_lens,
 +            cache_row_mapping, 
-+            cache_col_mapping,  
++            cache_col_mapping, 
++            profiled_qk_max,  
 +            kv_cache_dtype,
 +            num_kv_heads,
 +            scale,
@@ -2308,7 +2619,7 @@ diff -Nur orig/vllm/_custom_ops.py dattn/vllm/_custom_ops.py
  
  def paged_attention_rocm(
      out: torch.Tensor,
-@@ -842,6 +895,24 @@
+@@ -842,6 +897,24 @@
                                                     v_scale)
  
  
@@ -2336,8 +2647,8 @@ diff -Nur orig/vllm/_custom_ops.py dattn/vllm/_custom_ops.py
 Binary files orig/vllm/_dattn_C.abi3.so and dattn/vllm/_dattn_C.abi3.so differ
 diff -Nur orig/vllm/_dattn_ops.py dattn/vllm/_dattn_ops.py
 --- orig/vllm/_dattn_ops.py	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/vllm/_dattn_ops.py	2024-12-30 22:27:03.214886727 +0000
-@@ -0,0 +1,88 @@
++++ dattn/vllm/_dattn_ops.py	2025-01-14 23:39:07.821142416 +0000
+@@ -0,0 +1,87 @@
 +'''
 + Copyright (c) ByteDance Inc.
 + Authors: 
@@ -2406,9 +2717,8 @@ diff -Nur orig/vllm/_dattn_ops.py dattn/vllm/_dattn_ops.py
 +        #return wrapDptr2Tensor()
 +        return ptr 
 +
-+    def alloc_cpu_caches(self, cache_num:int, cache_space_per_req: int):
-+        caches = self._allocator.allocCPUCaches(cache_num, cache_space_per_req)
-+        return caches
++    def alloc_cpu_cache(self, cpu_cache_space: int):
++        return self._allocator.allocCPUCache(cpu_cache_space)
 +
 +    #def alloc_cache_ptr(self, ptr:CacheDevicePtr, page_num:int = 1, offset:int = 0):    
 +    #def free_cache_ptr(self, ptr:CacheDevicePtr):
@@ -2430,7 +2740,7 @@ diff -Nur orig/vllm/_dattn_ops.py dattn/vllm/_dattn_ops.py
 Binary files orig/vllm/_moe_C.abi3.so and dattn/vllm/_moe_C.abi3.so differ
 diff -Nur orig/vllm/attention/backends/utils.py dattn/vllm/attention/backends/utils.py
 --- orig/vllm/attention/backends/utils.py	2024-12-30 22:26:31.415992726 +0000
-+++ dattn/vllm/attention/backends/utils.py	2024-12-30 22:27:03.187886857 +0000
++++ dattn/vllm/attention/backends/utils.py	2025-01-14 23:39:07.794142536 +0000
 @@ -143,7 +143,7 @@
  
      def _add_seq_group(
@@ -2549,7 +2859,7 @@ diff -Nur orig/vllm/attention/backends/utils.py dattn/vllm/attention/backends/ut
              # Assert the same.
 diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends/xformers.py
 --- orig/vllm/attention/backends/xformers.py	2024-12-30 22:26:31.415992726 +0000
-+++ dattn/vllm/attention/backends/xformers.py	2024-12-30 22:27:03.187886857 +0000
++++ dattn/vllm/attention/backends/xformers.py	2025-01-14 23:39:07.794142536 +0000
 @@ -16,9 +16,10 @@
  from vllm.attention.ops.paged_attn import (PagedAttention,
                                             PagedAttentionMetadata)
@@ -2563,7 +2873,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
  
  class XFormersBackend(AttentionBackend):
  
-@@ -144,6 +145,14 @@
+@@ -144,6 +145,15 @@
      cross_slot_mapping: Optional[torch.Tensor] = None
      cross_block_tables: Optional[torch.Tensor] = None
  
@@ -2574,11 +2884,12 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
 +    cache_batch_idx: Optional[torch.Tensor] = None # (batch_size, ) the index of batch in cache
 +    cache_row_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which seq row in cache
 +    cache_col_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which token col in cache
++    profiled_qk_max: float = -1.0
 +
      def __post_init__(self):
          # Set during the execution of the first attention op.
          # It is a list because it is needed to set per prompt
-@@ -192,16 +201,21 @@
+@@ -192,16 +202,22 @@
          # Compute some attn_metadata fields which default to None
          query_start_loc = (None if self.query_start_loc is None else
                             self.query_start_loc[:self.num_prefills + 1])
@@ -2601,10 +2912,11 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
 +        else: 
 +            block_tables = None
 +            slot_mapping = None 
++
  
          # Construct & cache prefill-phase attention metadata structure
          self._cached_prefill_metadata = XFormersMetadata(
-@@ -218,6 +232,13 @@
+@@ -218,6 +234,14 @@
              context_lens_tensor=context_lens_tensor,
              block_tables=block_tables,
              use_cuda_graph=False,
@@ -2614,11 +2926,12 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
 +            block_size=self.block_size,
 +            cache_batch_idx=self.cache_batch_idx,
 +            cache_row_mapping=self.cache_row_mapping,
-+            cache_col_mapping=self.cache_col_mapping,            
++            cache_col_mapping=self.cache_col_mapping,
++            profiled_qk_max=self.profiled_qk_max,             
              # Begin encoder & cross attn fields below...
              encoder_seq_lens=self.encoder_seq_lens,
              encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
-@@ -239,12 +260,16 @@
+@@ -239,12 +263,16 @@
                  or (self.encoder_seq_lens_tensor is not None))
  
          # Compute some attn_metadata fields which default to None
@@ -2639,7 +2952,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
  
          # Construct & cache decode-phase attention metadata structure
          self._cached_decode_metadata = XFormersMetadata(
-@@ -257,6 +282,13 @@
+@@ -257,6 +285,14 @@
              max_decode_seq_len=self.max_decode_seq_len,
              block_tables=block_tables,
              use_cuda_graph=self.use_cuda_graph,
@@ -2649,11 +2962,12 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
 +            block_size=self.block_size, 
 +            cache_batch_idx=self.cache_batch_idx,
 +            cache_row_mapping=self.cache_row_mapping,
-+            cache_col_mapping=self.seq_lens_tensor[self.num_prefills:],   
++            cache_col_mapping=self.seq_lens_tensor[self.num_prefills:], 
++            profiled_qk_max=self.profiled_qk_max,  
              # Begin encoder & cross attn fields below...
              encoder_seq_lens=self.encoder_seq_lens,
              encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
-@@ -433,7 +465,19 @@
+@@ -433,7 +469,19 @@
  
          assert self.num_heads % self.num_kv_heads == 0
          self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -2673,7 +2987,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
          suppored_head_sizes = PagedAttention.get_supported_head_sizes()
          if head_size not in suppored_head_sizes:
              raise ValueError(
-@@ -510,6 +554,7 @@
+@@ -510,6 +558,7 @@
                                   "requires setting cross-attention "
                                   "metadata attributes.")
  
@@ -2681,7 +2995,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
          query = query.view(-1, self.num_heads, self.head_size)
          if key is not None:
              assert value is not None
-@@ -518,41 +563,86 @@
+@@ -518,41 +567,86 @@
          else:
              assert value is None
  
@@ -2794,7 +3108,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
  
          if attn_type != AttentionType.ENCODER:
              # Decoder self-attention supports chunked prefill.
-@@ -585,10 +675,12 @@
+@@ -585,10 +679,12 @@
  
          assert query.shape[0] == num_prefill_tokens
          assert decode_query.shape[0] == num_decode_tokens
@@ -2808,7 +3122,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
                  # normal attention.
                  # block tables are empty if the prompt does not have a cached
                  # prefix.
-@@ -626,30 +718,81 @@
+@@ -626,30 +722,84 @@
                  output[:num_prefill_tokens] = out
  
          if decode_meta := attn_metadata.decode_metadata:
@@ -2859,6 +3173,8 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
 +                assert attn_metadata.use_dattn == True
 +                layer_idx = kv_cache.item()
 +
++                #print(f"decode_meta.profiled_qk_max: {decode_meta.profiled_qk_max}", file=sys.stderr)
++
 +                #print(f"max_seq_len_arg:{decode_meta.max_decode_seq_len}", file=sys.stderr)
 +                #print(f"decoding: layer_idx:{layer_idx} after printing\n", file=sys.stderr)
 +                #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}, decode_meta.block_size:{decode_meta.block_size}, decode_meta.cache_row_mapping:{decode_meta.cache_row_mapping.shape}, decode_meta.cache_col_mapping:{decode_meta.cache_col_mapping}")
@@ -2874,6 +3190,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
 +                    decode_meta.seq_lens_tensor, 
 +                    decode_meta.cache_row_mapping, 
 +                    decode_meta.cache_col_mapping,
++                    decode_meta.profiled_qk_max,
 +                    self.kv_cache_dtype,
 +                    self.num_kv_heads,
 +                    self.scale,
@@ -2910,7 +3227,7 @@ diff -Nur orig/vllm/attention/backends/xformers.py dattn/vllm/attention/backends
          self,
 diff -Nur orig/vllm/attention/ops/paged_attn.py dattn/vllm/attention/ops/paged_attn.py
 --- orig/vllm/attention/ops/paged_attn.py	2024-12-30 22:26:31.415992726 +0000
-+++ dattn/vllm/attention/ops/paged_attn.py	2024-12-30 22:27:03.188886852 +0000
++++ dattn/vllm/attention/ops/paged_attn.py	2025-01-14 23:39:07.795142532 +0000
 @@ -84,6 +84,28 @@
          )
  
@@ -2950,7 +3267,7 @@ diff -Nur orig/vllm/attention/ops/paged_attn.py dattn/vllm/attention/ops/paged_a
          if use_v1:
              # Run PagedAttention V1.
              ops.paged_attention_v1(
-@@ -190,6 +215,75 @@
+@@ -190,6 +215,77 @@
          return output
  
      @staticmethod
@@ -2963,7 +3280,8 @@ diff -Nur orig/vllm/attention/ops/paged_attn.py dattn/vllm/attention/ops/paged_a
 +        max_seq_len: int, 
 +        seq_lens: torch.Tensor,
 +        cache_row_mapping: torch.Tensor, 
-+        cache_col_mapping: torch.Tensor,  
++        cache_col_mapping: torch.Tensor, 
++        profiled_qk_max: float,  
 +        kv_cache_dtype: str,
 +        num_kv_heads: int,
 +        scale: float,
@@ -3011,7 +3329,8 @@ diff -Nur orig/vllm/attention/ops/paged_attn.py dattn/vllm/attention/ops/paged_a
 +            max_seq_len, 
 +            seq_lens,
 +            cache_row_mapping, 
-+            cache_col_mapping,  
++            cache_col_mapping, 
++            profiled_qk_max,  
 +            kv_cache_dtype,
 +            num_kv_heads,
 +            scale,
@@ -3026,19 +3345,19 @@ diff -Nur orig/vllm/attention/ops/paged_attn.py dattn/vllm/attention/ops/paged_a
      def forward_prefix(
          query: torch.Tensor,
          key: torch.Tensor,
-@@ -251,3 +345,4 @@
+@@ -251,3 +347,4 @@
          key_caches = [kv_cache[0] for kv_cache in kv_caches]
          value_caches = [kv_cache[1] for kv_cache in kv_caches]
          ops.copy_blocks(key_caches, value_caches, src_to_dists)
 +
 diff -Nur orig/vllm/commit_id.py dattn/vllm/commit_id.py
 --- orig/vllm/commit_id.py	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/vllm/commit_id.py	2024-12-30 22:27:03.191886838 +0000
++++ dattn/vllm/commit_id.py	2025-01-14 23:39:07.798142518 +0000
 @@ -0,0 +1 @@
-+__commit__ = "c631cf3108836d5f77ec5be533f5a505557f45f3"
++__commit__ = "006d3da8bf9339fdc870239d297cc206cdcf360d"
 diff -Nur orig/vllm/config.py dattn/vllm/config.py
 --- orig/vllm/config.py	2024-12-30 22:26:31.413992736 +0000
-+++ dattn/vllm/config.py	2024-12-30 22:27:03.186886862 +0000
++++ dattn/vllm/config.py	2025-01-14 23:39:07.793142541 +0000
 @@ -30,6 +30,7 @@
  
  logger = init_logger(__name__)
@@ -3047,24 +3366,48 @@ diff -Nur orig/vllm/config.py dattn/vllm/config.py
  _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
  _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 4096
  
-@@ -589,7 +590,10 @@
+@@ -122,6 +123,8 @@
+             can not be gathered from the vllm arguments. 
+         config_format: The config format which shall be loaded.
+             Defaults to 'auto' which defaults to 'hf'.
++        profiled_qk_max: The qk_max value based on the profiling results. This flag will be utilized 
++            to accelerate the attention computation by avoiding synchronizations of qk_max  
+     """
+ 
+     def __init__(self,
+@@ -141,6 +144,7 @@
+                  quantization: Optional[str] = None,
+                  quantization_param_path: Optional[str] = None,
+                  enforce_eager: Optional[bool] = None,
++                 profiled_qk_max: Optional[float] = -1, 
+                  max_context_len_to_capture: Optional[int] = None,
+                  max_seq_len_to_capture: Optional[int] = None,
+                  max_logprobs: int = 20,
+@@ -185,6 +189,8 @@
+         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
+         self.use_async_output_proc = use_async_output_proc
+ 
++        self.profiled_qk_max = profiled_qk_max
++
+         # Set enforce_eager to False if the value is unset.
+         if self.enforce_eager is None:
+             self.enforce_eager = False
+@@ -589,7 +595,9 @@
          num_gpu_blocks_override: Optional[int] = None,
          sliding_window: Optional[int] = None,
          enable_prefix_caching: bool = False,
 +        use_dattn: bool = False,
          cpu_offload_gb: float = 0,
-+        vmm_frequency: int = 2, 
-+        num_cpu_caches: int = 80
++        vmm_frequency: int = 8, 
      ) -> None:
          self.block_size = block_size
          self.gpu_memory_utilization = gpu_memory_utilization
-@@ -607,6 +611,11 @@
+@@ -607,6 +615,10 @@
          self.num_gpu_blocks = None
          self.num_cpu_blocks = None
  
 +        # Initialization for dattn
 +        self.use_dattn = use_dattn
-+        self.num_cpu_caches = num_cpu_caches 
 +        self.vmm_frequency = vmm_frequency
 +
      def metrics_info(self):
@@ -3072,8 +3415,8 @@ diff -Nur orig/vllm/config.py dattn/vllm/config.py
          # metrics info
 diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_dattn.py
 --- orig/vllm/core/block_manager_dattn.py	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/vllm/core/block_manager_dattn.py	2024-12-30 22:27:03.189886848 +0000
-@@ -0,0 +1,538 @@
++++ dattn/vllm/core/block_manager_dattn.py	2025-01-14 23:39:07.796142527 +0000
+@@ -0,0 +1,618 @@
 +'''
 + Copyright (c) ByteDance Inc.
 + Authors: 
@@ -3099,6 +3442,70 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +import torch
 +
 +logger = init_logger(__name__)
++
++# This needs to re-design
++class CPUCacheAllocator: 
++    def __init__(self, num_blocks: int): 
++        self.num_free_blocks = num_blocks
++        self.total_blocks = num_blocks
++        self.free_blocks =[(0, num_blocks-1)]
++        self.allocated_blocks = {}
++
++    def allocate(self, num_blocks: int):
++        for i, (start, end) in enumerate(self.free_blocks):
++            # Check if the range is large enough
++            if end - start + 1 >= num_blocks:  
++                allocated_start = start
++                allocated_end = start + num_blocks - 1
++
++                # Update free blocks
++                if allocated_end < end:
++                    self.free_blocks[i] = (allocated_end + 1, end)
++                else:
++                    self.free_blocks.pop(i)
++
++                # Track allocated blocks
++                self.allocated_blocks[allocated_start] = num_blocks
++                return allocated_start
++
++        # No sufficient free range found
++        return None
++
++    def free(self, start_block):
++        """
++        Free a previously allocated range of blocks.
++        :param start_block: Starting block of the range to free.
++        """
++        if start_block not in self.allocated_blocks:
++            raise ValueError("Invalid block range to free")
++
++        num_blocks = self.allocated_blocks.pop(start_block)
++        freed_range = (start_block, start_block + num_blocks - 1)
++
++        # Merge the freed range into free blocks
++        self.free_blocks.append(freed_range)
++        self.free_blocks = self._merge_free_blocks()
++
++    def _merge_free_blocks(self):
++        """
++        Merge contiguous ranges in the free blocks list.
++        :return: A merged list of free blocks.
++        """
++        if not self.free_blocks:
++            return []
++
++        # Sort the free blocks by start
++        self.free_blocks.sort()
++
++        merged_blocks = [self.free_blocks[0]]
++        for current_start, current_end in self.free_blocks[1:]:
++            last_start, last_end = merged_blocks[-1]
++            if current_start <= last_end + 1:  # Overlapping or contiguous ranges
++                merged_blocks[-1] = (last_start, max(last_end, current_end))
++            else:
++                merged_blocks.append((current_start, current_end))
++
++        return merged_blocks
 +
 +class CacheAllocator:
 +    def __init__(self, name: str, num_caches: int):
@@ -3126,8 +3533,8 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +        return len(self.kv_caches)
 +
 +class SwappedCPUCache:
-+    def __init__(self, cache_id, blocks):
-+        self.cache_id = cache_id
++    def __init__(self, start_block, blocks):
++        self.start_block = start_block
 +        self.blocks = blocks
 +
 +class BlockSpaceManagerDAttn(BlockSpaceManager):
@@ -3143,7 +3550,6 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +        enable_caching: bool = False, # Not supported
 +        vmm_frequency: int = 8, 
 +        num_caches: int = 0,
-+        num_cpu_caches: int = 40,
 +    ) -> None:
 +        self.block_size = block_size
 +        self.num_total_gpu_blocks = num_gpu_blocks
@@ -3158,12 +3564,11 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +        self.num_free_cpu_blocks = num_cpu_blocks
 +
 +        num_gpu_caches = num_caches
-+        num_cpu_caches = num_cpu_caches 
 +
-+        #print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}, num_cpu_caches:{num_cpu_caches}", file=sys.stderr)
++        print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}, vmm_frequency-{vmm_frequency}", file=sys.stderr)
 +        # use to alloc cache buffer id for seq
 +        self.gpu_allocator = CacheAllocator("cuda", num_gpu_caches)
-+        self.cpu_allocator = CacheAllocator("cpu", num_cpu_caches)
++        self.cpu_allocator = CPUCacheAllocator(num_cpu_blocks)
 +
 +        # Watermark indicates that the least amount of blocks should be free. 
 +        assert watermark >= 0.0
@@ -3203,7 +3608,9 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +        if tokens == 0:
 +            return 0
 +        
-+        return (tokens + self.vmm_frequency + self.block_size - 1) // self.block_size 
++        # when tokens is 14 blocks and self.vmm_frequency is 2, then 
++        # we will need to allocate a new block immediately due to the asynchronous commnication 
++        return (tokens + self.vmm_frequency + self.block_size + 1) // self.block_size 
 +
 +    def _get_n_blocks(self, tokens: int) -> int:
 +        return (tokens + self.block_size - 1) // self.block_size 
@@ -3261,7 +3668,7 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +        need_blocks = self._predict_n_blocks(tokens=seq.get_len())
 +
 +        self.immediate_allocate = True 
-+        print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
++        #print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
 +        cache_id = self._allocate_gpu_cache(need_blocks)
 +        
 +        seq.cache_id = cache_id
@@ -3302,7 +3709,7 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +            del self.to_free_gpu_caches[cache_id]
 +            self.cached_free_gpu_blocks -= allocated_block_num
 +            
-+            print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, need_blocks:{need_blocks}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
++            #print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, need_blocks:{need_blocks}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
 +        else:
 +            # Check whether the can_allocate or can_swap_in has a bug
 +            if self.num_free_gpu_blocks < 0: 
@@ -3334,8 +3741,11 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +
 +        # Do not evict a request that have at least 16 slots to extend (at least we could do it next step)
 +        cache_blocks, tokens = self._get_blocks_tokens(seq_group)
++        #if self.step_index > 88 and  self.step_index <= 92:
++        #    print(f"step-{self.step_index} cache_id:{seq_group.request_id} real blocks:{cache_blocks}, tokens:{tokens}, freeblocks:{self.num_free_gpu_blocks}, allocate:{self._predict_n_blocks(tokens) > cache_blocks}", file=sys.stderr) 
 +        if self._predict_n_blocks(tokens) <= cache_blocks:
 +            return True
++
 +
 +        # Simple heuristic: at least one free block for each request.
 +        # Since we will perform the actual allocation in the next epoch (16 steps), where 
@@ -3364,11 +3774,15 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +        allocated_block_num = self.allocated_gpu_blocks[cache_id]
 +        logical_blocks_num = self._predict_n_blocks(seq.get_len())
 +
++        #if self.step_index > 88 and  self.step_index < 92:
++        #    print(f"step-{self.step_index} check block: cache_id:{cache_id}, logical_blocks_num:{logical_blocks_num}, allocated_block_num:{allocated_block_num}, real tokens:{seq.get_len()}, self.vmm_frequency:{self.vmm_frequency}, freeblocks:{self.num_free_gpu_blocks}", file=sys.stderr) 
++        
 +        # If we need to allocate a new physical block
 +        if allocated_block_num < logical_blocks_num:
 +            if allocated_block_num != logical_blocks_num - 1: 
 +                print(f"append_slots cache_id:{cache_id}, logical_blocks_num:{logical_blocks_num} - allocated_block_num:{allocated_block_num}, real tokens:{seq.get_len()}", file=sys.stderr) 
 +
++            #print(f"step-{self.step_index} increase one block: cache_id:{cache_id}, allocated_block_num:{allocated_block_num}, real tokens:{seq.get_len()}, free blocks:{self.num_free_gpu_blocks} before updating", file=sys.stderr) 
 +            # Currently this code only supports adding one physical block in the decoding phase
 +            assert allocated_block_num == logical_blocks_num - 1
 +
@@ -3430,10 +3844,10 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +            cpu_cache = self.swapped_out_caches[seq.seq_id] 
 +
 +            need_blocks = cpu_cache.blocks
-+            cpu_cache_id = cpu_cache.cache_id
++            start_block = cpu_cache.start_block
 +
 +            # Free cpu cache id and update the counter
-+            self.cpu_allocator.free(cpu_cache_id)
++            self.cpu_allocator.free(start_block)
 +            self.num_free_cpu_blocks += need_blocks  
 +            
 +            # Allocate a gpu cache id, based on the need_blocks. 
@@ -3444,8 +3858,8 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +            seq.data.cache_id = gpu_cache_id
 +
 +            # NOTE: we may not need the allocation, if gpu_cache_id 
-+            #print(f"SWAPIN seq_id:{seq.seq_id} with tokens:{seq.get_len()}, need_blocks:{need_blocks}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
-+            to_swap_in_caches.append([cpu_cache_id, gpu_cache_id, need_blocks])
++            print(f"SWAPIN seq_id:{seq.seq_id} to cache_id:{gpu_cache_id} with tokens:{seq.get_len()}, need_blocks:{need_blocks+1}, allocated_blocks:{self.allocated_gpu_blocks[gpu_cache_id]}, free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
++            to_swap_in_caches.append([start_block, gpu_cache_id, need_blocks])
 +            
 +            # Delete this entry
 +            del self.swapped_out_caches[seq.seq_id]
@@ -3469,22 +3883,22 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +            # real_gpu_blocks here in order to reduce the overhead involved in copy in swapping
 +            need_blocks = self._get_n_blocks(seq.get_len())
 +
-+            #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
++            #print(f"SWAPOUT request-{seq.seq_id} with blocks-{need_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
 +
 +            # Free the cache related to gpu_cache_id
 +            self._free_cache(cache_id=gpu_cache_id)
 +
 +            # Allocate the cpu cache id
-+            cpu_cache_id = self.cpu_allocator.allocate()
-+            cpu_cache = SwappedCPUCache(cpu_cache_id, need_blocks) 
++            start_block = self.cpu_allocator.allocate(need_blocks)
++            cpu_cache = SwappedCPUCache(start_block, need_blocks) 
 +            self.swapped_out_caches[seq.seq_id] = cpu_cache
 +
 +            # After the swapped out, num_free_cpu_blocks should be decremented 
 +            self.num_free_cpu_blocks -= need_blocks
 +            
-+            #print(f"SWAPOUT request-{seq.seq_id} with blocks-{real_gpu_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
++            print(f"SWAPOUT request-{seq.seq_id} with blocks-{need_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
 +            
-+            to_swap_out_caches.append([gpu_cache_id, cpu_cache_id, need_blocks]) 
++            to_swap_out_caches.append([gpu_cache_id, start_block, need_blocks]) 
 +
 +        #print(f"to_swap_out_caches:{to_swap_out_caches}", file=sys.stderr)
 +        return to_swap_out_caches
@@ -3497,7 +3911,7 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +
 +        # Get blocks of this cache
 +        free_blocks = self.allocated_gpu_blocks[cache_id]
-+        #    print(f"FREE gpu cache_id:{cache_id}, free_blocks:{free_blocks}, step:{self.step_index}", file=sys.stderr)
++        #print(f"FREE gpu cache_id:{cache_id}, to_free_blocks:{free_blocks}, total free blocks before free:{self.num_free_gpu_blocks}, step:{self.step_index}", file=sys.stderr)
 +       
 +        # Note that we update self.total_active_reqs here, as free_cache() is invoked twice for every request
 +        self.total_active_reqs -=1
@@ -3512,11 +3926,13 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +    Initially, we did this inside the memory management library. Maybe we should do it here as well. 
 +    """
 +    def free(self, seq: Sequence) -> None:
-+        #print(f"free sequence:{seq.seq_id}, cache_id:{seq.cache_id}, data_cache_id:{seq.data.cache_id}", file=sys.stderr)
++
++        #if seq.cache_id in self.to_free_gpu_caches:
++        #    return
++
++        #print(f"step-{self.step_index}, FREE sequence:{seq.seq_id}, cache_id:{seq.cache_id}, free_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
 +        self._free_cache(cache_id=seq.cache_id)
 +        
-+        #print(f"After free, self.total_active_reqs: {self.total_active_reqs}", file=sys.stderr)
-+
 +    def reset(self) -> None:
 +        # Free decoder block tables
 +        self.allocated_gpu_blocks.clear()
@@ -3564,18 +3980,19 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +
 +        #print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
 +        # We will perform virtual memory management once for every self.vmm_frequency 
-+        if ((self.step_index & self.vmm_frequency_mask) != 0) and (immediate_allocate != True):
++        if ((self.step_index & self.vmm_frequency_mask)) and (immediate_allocate != True):
 +            # No need to invoke virtual memory management
-+            #print(f"step-{self.step_index} no need to do memory management", file=sys.stderr) 
 +            self.step_index += 1
++            #print(f"step-{self.step_index}, no need to do updates, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr) 
 +            return to_update_blocks, immediate_allocate
 +
++        #immediate_allocate = True
 +        # In the following, we place to_free_blocks in the header of to_update_blocks, which 
 +        # ensures that allocation can be performed without any issue. 
-+    
 +        to_free_blocks = 0
 +        # First, place all to_free_gpu_caches at first. 
 +        for cache_id, num_blocks in self.to_free_gpu_caches.items():
++            #if self.step_index == 4684:
 +            #print(f"step-{self.step_index} free cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
 +            # Freeing all blocks of this cache
 +            to_update_blocks[cache_id] = 0
@@ -3584,19 +4001,25 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 +
 +        # Second, place all to_free_blocks (caused by reusing a freed cache)
 +        for cache_id, num_blocks in self.to_free_blocks.items():
++            #if self.step_index == 4684:
 +            #print(f"step-{self.step_index} tofree cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
 +            to_update_blocks[cache_id] = num_blocks
++            to_free_blocks += num_blocks
 +
 +        # Third, place the caches that need to increase their blocks
 +        for cache_id, num_blocks in self.to_allocate_blocks.items():
 +            #print(f"step-{self.step_index} toallocate cache_id:{cache_id}, num_blocks:{num_blocks}", file=sys.stderr)
 +            to_update_blocks[cache_id] = num_blocks
 +
-+        
-+
-+        #if len(to_allocate_blocks) > 0 or len(to_free_gpu_caches) > 0:         
-+        #if self.step_index >= 1600:
-+        #print(f"step-{self.step_index}, to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, requests:{self.total_active_reqs}, swapped requests:{len(self.swapped_out_caches)}", file=sys.stderr)
++        if self.to_free_gpu_caches or self.to_free_blocks or self.to_allocate_blocks:
++            # Force the next epoch to wait for the memory management
++            self.immediate_allocate = True
++            #print(f"step-{self.step_index}, to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.to_allocate_blocks:{len(self.to_allocate_blocks)}, self.to_free_gpu_caches:{len(self.to_free_gpu_caches)}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
++            if self.num_free_gpu_blocks < 0:
++                print(f"step-{self.step_index} ERROR: to_allocate_blocks:{len(to_update_blocks)}, freeing ({to_free_blocks} blocks), self.to_allocate_blocks:{len(self.to_allocate_blocks)}, self.to_free_gpu_caches:{len(self.to_free_gpu_caches)}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
++                exit(-1)
++        #else:
++           #print(f"step-{self.step_index}, no need to do updates, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr) 
 +
 +        # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
 +        self.to_free_gpu_caches.clear()
@@ -3615,7 +4038,7 @@ diff -Nur orig/vllm/core/block_manager_dattn.py dattn/vllm/core/block_manager_da
 \ No newline at end of file
 diff -Nur orig/vllm/core/block_manager_v1.py dattn/vllm/core/block_manager_v1.py
 --- orig/vllm/core/block_manager_v1.py	2024-12-30 22:26:31.416992721 +0000
-+++ dattn/vllm/core/block_manager_v1.py	2024-12-30 22:27:03.189886848 +0000
++++ dattn/vllm/core/block_manager_v1.py	2025-01-14 23:39:07.796142527 +0000
 @@ -277,6 +277,8 @@
          # Note that each SequenceGroup has a unique
          # request ID
@@ -3673,7 +4096,7 @@ diff -Nur orig/vllm/core/block_manager_v1.py dattn/vllm/core/block_manager_v1.py
          del self.block_tables[seq.seq_id]
 diff -Nur orig/vllm/core/interfaces.py dattn/vllm/core/interfaces.py
 --- orig/vllm/core/interfaces.py	2024-12-30 22:26:31.416992721 +0000
-+++ dattn/vllm/core/interfaces.py	2024-12-30 22:27:03.188886852 +0000
++++ dattn/vllm/core/interfaces.py	2025-01-14 23:39:07.795142532 +0000
 @@ -1,3 +1,4 @@
 +
  import enum
@@ -3693,7 +4116,7 @@ diff -Nur orig/vllm/core/interfaces.py dattn/vllm/core/interfaces.py
      @abstractmethod
 diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
 --- orig/vllm/core/scheduler.py	2024-12-30 22:26:31.416992721 +0000
-+++ dattn/vllm/core/scheduler.py	2024-12-30 22:27:03.189886848 +0000
++++ dattn/vllm/core/scheduler.py	2025-01-14 23:39:07.796142527 +0000
 @@ -1,4 +1,5 @@
  import enum
 +import sys
@@ -3754,7 +4177,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
  
          BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
              version)
-@@ -329,13 +347,24 @@
+@@ -329,13 +347,23 @@
              num_cpu_blocks //= pipeline_parallel_size
  
          # Create the block space manager.
@@ -3780,13 +4203,12 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
 +                sliding_window=self.cache_config.sliding_window,
 +                enable_caching=self.cache_config.enable_prefix_caching,
 +                num_caches=self.scheduler_config.max_num_seqs,
-+                num_cpu_caches=self.cache_config.num_cpu_caches,  
 +                vmm_frequency = self.vmm_frequency, 
 +                )
          # Sequence groups in the WAITING state.
          # Contain new prefill or preempted requests.
          self.waiting: Deque[SequenceGroup] = deque()
-@@ -345,6 +374,14 @@
+@@ -345,6 +373,14 @@
          # Sequence groups in the SWAPPED state.
          # Contain decode requests that are swapped out.
          self.swapped: Deque[SequenceGroup] = deque()
@@ -3801,7 +4223,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          # Sequence groups finished requests ids since last step iteration.
          # It lets the model know that any state associated with these requests
          # can and must be released after the current step.
-@@ -359,6 +396,7 @@
+@@ -359,6 +395,7 @@
          # preemption mode, RECOMPUTE or SWAP
          self.user_specified_preemption_mode = scheduler_config.preemption_mode
  
@@ -3809,7 +4231,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          # The following field is test-only. It is used to inject artificial
          # preemption.
          self.enable_artificial_preemption = ENABLE_ARTIFICIAL_PREEMPT
-@@ -458,6 +496,7 @@
+@@ -458,6 +495,7 @@
                      if seq.is_finished():
                          continue
                      seq.status = SequenceStatus.FINISHED_ABORTED
@@ -3817,7 +4239,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
                      self.free_seq(seq)
  
                  self._free_seq_group_cross_attn_blocks(aborted_group)
-@@ -474,8 +513,15 @@
+@@ -474,8 +512,15 @@
              self.block_manager.free_cross(seq_group)
  
      def has_unfinished_seqs(self) -> bool:
@@ -3835,7 +4257,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
  
      def get_prefix_cache_hit_rate(self, device: Device) -> float:
          return self.block_manager.get_prefix_cache_hit_rate(device)
-@@ -539,6 +585,7 @@
+@@ -539,6 +584,7 @@
  
          running_queue = self.running
          assert len(self._async_stopped) == 0
@@ -3843,7 +4265,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          while running_queue:
              seq_group = running_queue[0]
              num_running_tokens = self._get_num_new_tokens(
-@@ -606,7 +653,10 @@
+@@ -606,7 +652,10 @@
                      if preempted_mode == PreemptionMode.RECOMPUTE:
                          preempted.append(victim_seq_group)
                      else:
@@ -3855,7 +4277,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
  
                  if not cont_loop:
                      break
-@@ -638,6 +688,8 @@
+@@ -638,6 +687,8 @@
                  if curr_loras is not None and seq_group.lora_int_id > 0:
                      curr_loras.add(seq_group.lora_int_id)
  
@@ -3864,7 +4286,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          self._scheduler_running_outputs_cache[self.next_cache_id].reset()
          self._scheduled_seq_group_cache[self.next_cache_id].reset()
  
-@@ -751,6 +803,135 @@
+@@ -751,6 +802,135 @@
              infeasible_seq_groups=infeasible_seq_groups,
          )
  
@@ -4000,7 +4422,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
      def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
          if self.scheduler_config.chunked_prefill_enabled:
              prompt_limit = self.scheduler_config.max_model_len
-@@ -795,6 +976,9 @@
+@@ -795,6 +975,9 @@
          Returns:
              SchedulerPrefillOutputs.
          """
@@ -4010,7 +4432,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          ignored_seq_groups: List[SequenceGroup] = []
          seq_groups: List[ScheduledSequenceGroup] = []
  
-@@ -826,8 +1010,10 @@
+@@ -826,8 +1009,10 @@
                  waiting_queue.popleft()
                  continue
  
@@ -4021,7 +4443,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
              if can_allocate == AllocStatus.LATER:
                  break
              elif can_allocate == AllocStatus.NEVER:
-@@ -924,13 +1110,17 @@
+@@ -924,13 +1109,17 @@
              running_scheduled = self._schedule_running(budget,
                                                         curr_loras,
                                                         enable_chunking=False)
@@ -4041,7 +4463,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          assert (budget.num_batched_tokens <=
                  self.scheduler_config.max_num_batched_tokens)
          assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
-@@ -972,6 +1162,8 @@
+@@ -972,6 +1161,8 @@
          ignored_seq_groups = prefills.ignored_seq_groups
          ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
  
@@ -4050,7 +4472,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          return SchedulerOutputs(
              scheduled_seq_groups=scheduled_seq_groups,
              num_prefill_groups=num_prefill_groups,
-@@ -1017,7 +1209,11 @@
+@@ -1017,7 +1208,11 @@
          # If preemption happens, it means we don't have space for swap-in.
          if len(running_scheduled.preempted) + len(
                  running_scheduled.swapped_out) == 0:
@@ -4063,7 +4485,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
  
          # Schedule new prefills.
          prefills = self._schedule_prefills(budget,
-@@ -1072,7 +1268,10 @@
+@@ -1072,7 +1267,10 @@
      def _schedule(self) -> SchedulerOutputs:
          """Schedule queued requests."""
          if self.scheduler_config.chunked_prefill_enabled:
@@ -4075,7 +4497,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          else:
              return self._schedule_default()
  
-@@ -1111,6 +1310,16 @@
+@@ -1111,6 +1309,16 @@
  
          scheduler_outputs = self._schedule()
          now = time.time()
@@ -4092,7 +4514,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
  
          if not self.cache_config.enable_prefix_caching:
              common_computed_block_nums = []
-@@ -1151,9 +1360,11 @@
+@@ -1151,9 +1359,11 @@
              for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                  seq_id = seq.seq_id
                  seq_data[seq_id] = seq.data
@@ -4106,7 +4528,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
              if self.cache_config.enable_prefix_caching:
                  common_computed_block_nums = (
                      self.block_manager.get_common_computed_block_ids(
-@@ -1165,6 +1376,7 @@
+@@ -1165,6 +1375,7 @@
              # is sent. Subsequent requests could be chunked prefill or decode.
              is_first_prefill = False
              if is_prompt:
@@ -4114,7 +4536,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
                  seqs = seq_group.get_seqs()
                  # Prefill has only 1 sequence.
                  assert len(seqs) == 1
-@@ -1250,6 +1462,10 @@
+@@ -1250,6 +1461,10 @@
          # Move to next cache (if exists)
          self.cache_id = self.next_cache_id
  
@@ -4125,7 +4547,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          # Return results
          return (seq_group_metadata_list, scheduler_outputs,
                  allow_async_output_proc)
-@@ -1259,12 +1475,14 @@
+@@ -1259,12 +1474,14 @@
  
      def free_seq(self, seq: Sequence) -> None:
          """Free a sequence from a block table."""
@@ -4140,8 +4562,11 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
                  self.free_seq(seq)
  
      def _free_finished_seq_group(self, seq_group: SequenceGroup) -> None:
-@@ -1372,6 +1590,7 @@
+@@ -1370,8 +1587,10 @@
+ 
+         if preemption_mode == PreemptionMode.RECOMPUTE:
              self._preempt_by_recompute(seq_group)
++            print(f"_preempt_by_recompute, request:{seq_group.request_id}")
          elif preemption_mode == PreemptionMode.SWAP:
              self._preempt_by_swap(seq_group, blocks_to_swap_out)
 +            #print(f"_preempt_by_swap, request:{seq_group.request_id}, blocks_to_swap_out:{len(blocks_to_swap_out)}")
@@ -4164,7 +4589,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          blocks_to_swap_in.extend(mapping)
          for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
              seq.status = SequenceStatus.RUNNING
-+            print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
++            #print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 +
 +    def _swap_in_async(
 +        self,
@@ -4175,7 +4600,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
 +        blocks_to_swap_in.extend(mapping)
 +        for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
 +            seq.status = SequenceStatus.SWAPPING
-+            print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
++            #print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 +        self.swapping_in.append(seq_group)
 +        seq_group.swapping_step_index = self.step_index
  
@@ -4185,7 +4610,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          blocks_to_swap_out.extend(mapping)
          for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
              seq.status = SequenceStatus.SWAPPED
-+            print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
++            #print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 +
 +    def _swap_out_async(
 +        self,
@@ -4202,7 +4627,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
 +        blocks_to_swap_out.extend(mapping)
 +        for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
 +            seq.status = SequenceStatus.SWAPPING
-+            print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
++            #print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 +
 +        seq_group.swapping_step_index = self.step_index
  
@@ -4210,7 +4635,7 @@ diff -Nur orig/vllm/core/scheduler.py dattn/vllm/core/scheduler.py
          if self.prev_prompt:
 diff -Nur orig/vllm/distributed/parallel_state.py dattn/vllm/distributed/parallel_state.py
 --- orig/vllm/distributed/parallel_state.py	2024-12-30 22:26:31.417992716 +0000
-+++ dattn/vllm/distributed/parallel_state.py	2024-12-30 22:27:03.190886843 +0000
++++ dattn/vllm/distributed/parallel_state.py	2025-01-14 23:39:07.797142523 +0000
 @@ -47,7 +47,8 @@
  
  
@@ -4237,7 +4662,7 @@ diff -Nur orig/vllm/distributed/parallel_state.py dattn/vllm/distributed/paralle
      return metadata_list, tensor_list
 diff -Nur orig/vllm/engine/arg_utils.py dattn/vllm/engine/arg_utils.py
 --- orig/vllm/engine/arg_utils.py	2024-12-30 22:26:31.417992716 +0000
-+++ dattn/vllm/engine/arg_utils.py	2024-12-30 22:27:03.536885177 +0000
++++ dattn/vllm/engine/arg_utils.py	2025-01-14 23:39:08.120141084 +0000
 @@ -17,11 +17,11 @@
  from vllm.logger import init_logger
  from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -4268,7 +4693,23 @@ diff -Nur orig/vllm/engine/arg_utils.py dattn/vllm/engine/arg_utils.py
      cpu_offload_gb: float = 0  # GiB
      gpu_memory_utilization: float = 0.90
      max_num_batched_tokens: Optional[int] = None
-@@ -867,6 +871,14 @@
+@@ -152,6 +156,7 @@
+     ignore_patterns: Optional[Union[str, List[str]]] = None
+     preemption_mode: Optional[str] = None
+ 
++    profiled_qk_max: float = -1.0
+     scheduler_delay_factor: float = 0.0
+     enable_chunked_prefill: Optional[bool] = None
+ 
+@@ -822,6 +827,7 @@
+             use_async_output_proc=not self.disable_async_output_proc,
+             override_neuron_config=self.override_neuron_config,
+             config_format=self.config_format,
++            profiled_qk_max=self.profiled_qk_max,
+         )
+ 
+     def create_load_config(self) -> LoadConfig:
+@@ -867,6 +873,14 @@
                      "supported for multimodal models and has been disabled.")
              self.enable_prefix_caching = False
  
@@ -4283,7 +4724,7 @@ diff -Nur orig/vllm/engine/arg_utils.py dattn/vllm/engine/arg_utils.py
          cache_config = CacheConfig(
              block_size=self.block_size if self.device != "neuron" else
              self.max_model_len,  # neuron needs block_size = max_model_len
-@@ -877,7 +889,9 @@
+@@ -877,7 +891,9 @@
              sliding_window=model_config.get_sliding_window(),
              enable_prefix_caching=self.enable_prefix_caching,
              cpu_offload_gb=self.cpu_offload_gb,
@@ -4293,7 +4734,7 @@ diff -Nur orig/vllm/engine/arg_utils.py dattn/vllm/engine/arg_utils.py
          parallel_config = ParallelConfig(
              pipeline_parallel_size=self.pipeline_parallel_size,
              tensor_parallel_size=self.tensor_parallel_size,
-@@ -892,6 +906,7 @@
+@@ -892,6 +908,7 @@
              ray_workers_use_nsight=self.ray_workers_use_nsight,
              distributed_executor_backend=self.distributed_executor_backend)
  
@@ -4303,7 +4744,7 @@ diff -Nur orig/vllm/engine/arg_utils.py dattn/vllm/engine/arg_utils.py
          if self.enable_chunked_prefill is None:
 diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
 --- orig/vllm/engine/llm_engine.py	2024-12-30 22:26:31.417992716 +0000
-+++ dattn/vllm/engine/llm_engine.py	2024-12-30 22:27:03.537885172 +0000
++++ dattn/vllm/engine/llm_engine.py	2025-01-14 23:39:08.120141084 +0000
 @@ -53,6 +53,8 @@
                                    usage_message)
  from vllm.utils import Counter, Device, weak_bind
@@ -4359,17 +4800,18 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
  
          self.tracer = None
          if self.observability_config.otlp_traces_endpoint:
-@@ -464,6 +484,9 @@
+@@ -464,6 +484,10 @@
          num_gpu_blocks, num_cpu_blocks = (
              self.model_executor.determine_num_available_blocks())
  
 +        # DEBUG: in order to trigger the swap faster
++        #num_gpu_blocks = 600
 +        print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
-+        #num_gpu_blocks = 158 
++        #num_cpu_blocks = 800 
          if self.cache_config.num_gpu_blocks_override is not None:
              num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
              logger.info(
-@@ -558,6 +581,7 @@
+@@ -558,6 +582,7 @@
              log_stats=not engine_args.disable_log_stats,
              usage_context=usage_context,
              stat_loggers=stat_loggers,
@@ -4377,7 +4819,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
          )
  
          return engine
-@@ -631,6 +655,7 @@
+@@ -631,6 +656,7 @@
  
          seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
                         lora_request, prompt_adapter_request)
@@ -4385,7 +4827,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
  
          encoder_seq = None
          if 'encoder_prompt_token_ids' in processed_inputs:
-@@ -1155,6 +1180,12 @@
+@@ -1155,6 +1181,12 @@
                  "Pipeline parallelism is only supported through AsyncLLMEngine "
                  "as performance will be severely degraded otherwise.")
  
@@ -4398,7 +4840,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
          # For llm_engine, there is no pipeline parallel support, so the engine
          # used is always 0.
          virtual_engine = 0
-@@ -1171,7 +1202,7 @@
+@@ -1171,7 +1203,7 @@
          # Clear outputs for each new scheduler iteration
          ctx.request_outputs.clear()
  
@@ -4407,7 +4849,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
          # This ensures that the scheduler is only called again when the current
          # batch has completed.
          if not self._has_remaining_steps(seq_group_metadata_list):
-@@ -1198,6 +1229,9 @@
+@@ -1198,6 +1230,9 @@
          assert seq_group_metadata_list is not None
          assert scheduler_outputs is not None
  
@@ -4417,7 +4859,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
          if not scheduler_outputs.is_empty():
              finished_requests_ids = self.scheduler[
                  virtual_engine].get_and_reset_finished_requests_ids()
-@@ -1209,6 +1243,7 @@
+@@ -1209,6 +1244,7 @@
              last_sampled_token_ids = \
                  self._get_last_sampled_token_ids(virtual_engine)
  
@@ -4425,7 +4867,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
              execute_model_req = ExecuteModelRequest(
                  seq_group_metadata_list=seq_group_metadata_list,
                  blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
-@@ -1219,15 +1254,25 @@
+@@ -1219,15 +1255,25 @@
                  finished_requests_ids=finished_requests_ids,
                  # We use ExecuteModelRequest to pass the last sampled_token_ids
                  # to each of the non-last PP stages for in-place prepare_input.
@@ -4452,7 +4894,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
              # We need to do this here so that last step's sampled_token_ids can
              # be passed to the next iteration for PP.
              if self.scheduler_config.is_multi_step:
-@@ -1240,13 +1285,16 @@
+@@ -1240,13 +1286,16 @@
              # No outputs in this case
              outputs = []
  
@@ -4470,7 +4912,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
              if self.scheduler_config.is_multi_step:
                  self.cached_scheduler_outputs[0] = SchedulerOutputState()
  
-@@ -1274,9 +1322,13 @@
+@@ -1274,9 +1323,13 @@
  
                  # Tracing
                  self.do_tracing(scheduler_outputs)
@@ -4484,7 +4926,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
  
          if not self.has_unfinished_requests():
              # Drain async postprocessor (if exists)
-@@ -1291,7 +1343,24 @@
+@@ -1291,7 +1344,24 @@
              # queued control plane messages, such as add/remove lora adapters.
              logger.debug("Stopping remote worker execution loop.")
              self.model_executor.stop_remote_worker_execution_loop()
@@ -4509,7 +4951,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
          return ctx.request_outputs
  
      def _has_remaining_steps(
-@@ -1302,7 +1371,7 @@
+@@ -1302,7 +1372,7 @@
              return False
  
          # TODO(will) this is a sanity check for nowto make sure that all the
@@ -4518,7 +4960,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
          # dynamic scheduling when doing multi-step decoding.
          ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
          if any([
-@@ -1310,7 +1379,7 @@
+@@ -1310,7 +1380,7 @@
                  for seq_group in seq_group_metadata_list[1:]
          ]):
              raise AssertionError(("All running sequence groups should "
@@ -4529,7 +4971,7 @@ diff -Nur orig/vllm/engine/llm_engine.py dattn/vllm/engine/llm_engine.py
  
 diff -Nur orig/vllm/engine/output_processor/single_step.py dattn/vllm/engine/output_processor/single_step.py
 --- orig/vllm/engine/output_processor/single_step.py	2024-12-30 22:26:31.418992711 +0000
-+++ dattn/vllm/engine/output_processor/single_step.py	2024-12-30 22:27:03.536885177 +0000
++++ dattn/vllm/engine/output_processor/single_step.py	2025-01-14 23:39:08.119141088 +0000
 @@ -11,6 +11,7 @@
                             SequenceOutput, SequenceStatus)
  from vllm.transformers_utils.detokenizer import Detokenizer
@@ -4558,19 +5000,19 @@ diff -Nur orig/vllm/engine/output_processor/single_step.py dattn/vllm/engine/out
              return
 diff -Nur orig/vllm/entrypoints/llm.py dattn/vllm/entrypoints/llm.py
 --- orig/vllm/entrypoints/llm.py	2024-12-30 22:26:31.418992711 +0000
-+++ dattn/vllm/entrypoints/llm.py	2024-12-30 22:27:03.537885172 +0000
++++ dattn/vllm/entrypoints/llm.py	2025-01-14 23:39:08.120141084 +0000
 @@ -127,7 +127,7 @@
          tokenizer_revision: Optional[str] = None,
          seed: int = 0,
          gpu_memory_utilization: float = 0.9,
 -        swap_space: float = 4,
-+        swap_space: float = 128,
++        swap_space: float = 64,
          cpu_offload_gb: float = 0,
          enforce_eager: Optional[bool] = None,
          max_context_len_to_capture: Optional[int] = None,
 diff -Nur orig/vllm/executor/gpu_executor.py dattn/vllm/executor/gpu_executor.py
 --- orig/vllm/executor/gpu_executor.py	2024-12-30 22:26:31.419992706 +0000
-+++ dattn/vllm/executor/gpu_executor.py	2024-12-30 22:27:03.539885162 +0000
++++ dattn/vllm/executor/gpu_executor.py	2025-01-14 23:39:08.122141075 +0000
 @@ -34,7 +34,6 @@
          """
          assert self.parallel_config.world_size == 1, (
@@ -4601,7 +5043,7 @@ diff -Nur orig/vllm/executor/gpu_executor.py dattn/vllm/executor/gpu_executor.py
  
 diff -Nur orig/vllm/model_executor/models/opt.py dattn/vllm/model_executor/models/opt.py
 --- orig/vllm/model_executor/models/opt.py	2024-12-30 22:26:31.429992659 +0000
-+++ dattn/vllm/model_executor/models/opt.py	2024-12-30 22:27:03.551885105 +0000
++++ dattn/vllm/model_executor/models/opt.py	2025-01-14 23:39:08.134141021 +0000
 @@ -19,6 +19,9 @@
  """Inference-only OPT model compatible with HuggingFace weights."""
  from typing import Iterable, List, Optional, Tuple
@@ -4763,7 +5205,7 @@ diff -Nur orig/vllm/model_executor/models/opt.py dattn/vllm/model_executor/model
  
 diff -Nur orig/vllm/sequence.py dattn/vllm/sequence.py
 --- orig/vllm/sequence.py	2024-12-30 22:26:31.413992736 +0000
-+++ dattn/vllm/sequence.py	2024-12-30 22:27:03.191886838 +0000
++++ dattn/vllm/sequence.py	2025-01-14 23:39:07.798142518 +0000
 @@ -55,7 +55,8 @@
      WAITING = 0
      RUNNING = 1
@@ -4852,7 +5294,7 @@ diff -Nur orig/vllm/sequence.py dattn/vllm/sequence.py
      def is_first_multi_step(self) -> bool:
 diff -Nur orig/vllm/worker/cache_engine.py dattn/vllm/worker/cache_engine.py
 --- orig/vllm/worker/cache_engine.py	2024-12-30 22:26:31.434992635 +0000
-+++ dattn/vllm/worker/cache_engine.py	2024-12-30 22:27:03.556885080 +0000
++++ dattn/vllm/worker/cache_engine.py	2025-01-14 23:39:08.139140999 +0000
 @@ -77,6 +77,7 @@
              num_blocks, self.block_size, self.num_kv_heads, self.head_size)
          pin_memory = is_pin_memory_available() if device == "cpu" else False
@@ -4863,8 +5305,8 @@ diff -Nur orig/vllm/worker/cache_engine.py dattn/vllm/worker/cache_engine.py
              # block to be zeroed-out.
 diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_dattn.py
 --- orig/vllm/worker/cache_engine_dattn.py	1970-01-01 00:00:00.000000000 +0000
-+++ dattn/vllm/worker/cache_engine_dattn.py	2024-12-30 22:27:03.557885076 +0000
-@@ -0,0 +1,251 @@
++++ dattn/vllm/worker/cache_engine_dattn.py	2025-01-14 23:39:08.140140995 +0000
+@@ -0,0 +1,247 @@
 +'''
 + Copyright (c) ByteDance Inc.
 + Authors: 
@@ -4939,7 +5381,7 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +        cache_space_bytes_size = cache_space_size * 2
 +
 +        # reserve size for both K/V cache
-+        cache_space_per_req = sequence_buffer_bytes_size * self.num_layers * 2
++        cache_space_per_req = (sequence_buffer_bytes_size * self.num_layers * 2 + self.block_bytes_size * 20) 
 +        if (cache_space_bytes_size) % self.block_bytes_size != 0:
 +            print(f"cache_space_bytes_size:{cache_space_bytes_size}, self.block_bytes_size:{self.block_bytes_size}", file=sys.stderr) 
 +            assert (cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"
@@ -4959,8 +5401,6 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +        
 +        self.device_cache_allocator = dattn.kvCacheAllocator(max_gpu_memory_size, self.block_bytes_size, cache_space_per_req)
 +
-+        cpu_cache_num = cache_config.num_cpu_caches 
-+
 +        # Get attention backend.
 +        self.attn_backend = get_attn_backend(
 +            model_config.get_num_attention_heads(parallel_config),
@@ -4978,10 +5418,8 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +        self.kv_cache_ptrs = self._reserve_gpu_kv_cache(max_batch_size)
 +        self.gpu_cache = self._create_fake_kv_cache(self.num_layers)
 +        self.MADV_COLD = self._find_macro_value("MADV_COLD", "/usr/include/asm-generic/mman-common.h") 
-+
-+        self.cpu_cache = [None] * cpu_cache_num
-+
-+        self._reserve_cpu_kv_cache(cpu_cache_num, cache_space_per_req) 
++        
++        self._reserve_cpu_kv_cache(cache_config.num_cpu_blocks * self.block_bytes_size) 
 +
 +    def _find_macro_value(self, macro_name, header_file):
 +        try:
@@ -5029,8 +5467,8 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +
 +        return kv_cache_ptrs
 +
-+    def _reserve_cpu_kv_cache(self, cache_num: int, cache_space_per_req: int) -> List[int]:
-+        self.cpu_cache = self.device_cache_allocator.alloc_cpu_caches(cache_num, cache_space_per_req) 
++    def _reserve_cpu_kv_cache(self, cpu_cache_space: int) -> List[int]:
++        self.cpu_cache = self.device_cache_allocator.alloc_cpu_cache(cpu_cache_space) 
 +
 +    def swap_in(self, src_to_dst: torch.Tensor) -> None:
 +        to_swap_in_caches = []
@@ -5038,12 +5476,12 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +        for pair in src_to_dst:
 +            item = pair.flatten()
 +
-+            cpu_cache_id = item[0]
++            start_block = item[0]
 +            gpu_cache_id = item[1]
 +            blocks = item[2]
 +
 +            gpu_cache_address = self.kv_cache_ptrs[gpu_cache_id]
-+            cpu_cache_address = self.cpu_cache[cpu_cache_id]
++            cpu_cache_address = self.cpu_cache + start_block * self.block_bytes_size 
 +
 +            size = blocks * self.block_bytes_size
 +            #print(f"swapin src:{cpu_cache_id} - address:{hex(cpu_cache_address)}, dest:{gpu_cache_id} - address:{hex(gpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
@@ -5062,11 +5500,11 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +            item = pair.flatten()
 +
 +            gpu_cache_id = item[0]
-+            cpu_cache_id = item[1]
++            start_block = item[1]
 +            blocks = item[2]
 +
 +            gpu_cache_address = self.kv_cache_ptrs[gpu_cache_id]
-+            cpu_cache_address = self.cpu_cache[cpu_cache_id]
++            cpu_cache_address = self.cpu_cache + + start_block * self.block_bytes_size
 +            size = blocks * self.block_bytes_size 
 +            
 +            #print(f"Engine swapout src:{gpu_cache_id} - address:{hex(gpu_cache_address)}, dest:{cpu_cache_id} - address:{hex(cpu_cache_address)}, blocks:{blocks}, size:{hex(size)}", file=sys.stderr)
@@ -5118,7 +5556,7 @@ diff -Nur orig/vllm/worker/cache_engine_dattn.py dattn/vllm/worker/cache_engine_
 +    return torch.tensor([], dtype=dtype).element_size()
 diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
 --- orig/vllm/worker/model_runner.py	2024-12-30 22:26:31.434992635 +0000
-+++ dattn/vllm/worker/model_runner.py	2024-12-30 22:27:03.557885076 +0000
++++ dattn/vllm/worker/model_runner.py	2025-01-14 23:39:08.140140995 +0000
 @@ -13,6 +13,8 @@
  import torch
  import torch.distributed
@@ -5203,13 +5641,13 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
      def _use_captured_graph(self,
                              batch_size: int,
                              max_decode_seq_len: int,
-@@ -838,7 +861,25 @@
+@@ -838,8 +861,27 @@
  
          # Attention metadata.
          attn_metadata = self.attn_metadata_builder.build(
 -            seq_lens, query_lens, cuda_graph_pad_size, batch_size)
 +            seq_lens, query_lens, cuda_graph_pad_size, batch_size, self.use_dattn)
-+
+ 
 +        # support for dAttention
 +        if self.use_dattn:
 +            cache_batch_idx_tensor = torch.tensor(self.cache_batch_idx,
@@ -5226,11 +5664,13 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
 +            attn_metadata.cache_col_mapping = cache_col_mapping_tensor
 +            attn_metadata.use_dattn = True
 +            attn_metadata.block_size = self.runner.block_size
-+            attn_metadata.num_layers = self.runner.num_layers  
- 
++            attn_metadata.num_layers = self.runner.num_layers 
++            attn_metadata.profiled_qk_max = self.runner.profiled_qk_max 
++    
          # LoRA data.
          lora_requests = set()
-@@ -996,6 +1037,7 @@
+         lora_mapping = None
+@@ -996,6 +1038,7 @@
              .create_input_mapper(model_config)
          self.mm_registry.init_mm_limits_per_prompt(self.model_config)
  
@@ -5238,12 +5678,14 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          # Lazy initialization
          self.model: nn.Module  # Set after load_model
          # Set after load_model.
-@@ -1010,6 +1052,34 @@
+@@ -1010,6 +1053,36 @@
          self.sampling_metadata_cache: SamplingMetadataCache = \
              SamplingMetadataCache()
  
 +        # Add dAttention support
 +        self.use_dattn = cache_config.use_dattn
++        self.profiled_qk_max = model_config.profiled_qk_max
++  
 +        if self.use_dattn:
 +            if self.lora_config:
 +                #TODO:
@@ -5273,7 +5715,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
      def load_model(self) -> None:
          logger.info("Starting to load model %s...", self.model_config.model)
          with CudaMemoryProfiler() as m:
-@@ -1120,7 +1190,7 @@
+@@ -1120,7 +1193,7 @@
      def _prepare_model_input_tensors(
          self,
          seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -5282,7 +5724,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
      ) -> TModelInputForGPU:
          """Helper method to prepare the model input based on a given sequence
          group. Prepares metadata needed for the base model forward pass but not
-@@ -1138,10 +1208,12 @@
+@@ -1138,10 +1211,12 @@
          """
          builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
          for seq_group_metadata in seq_group_metadata_list:
@@ -5297,7 +5739,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          return builder.build()  # type: ignore
  
      @torch.inference_mode()
-@@ -1335,14 +1407,17 @@
+@@ -1335,14 +1410,17 @@
                      "`gpu_memory_utilization` or enforcing eager mode. "
                      "You can also reduce the `max_num_seqs` as needed "
                      "to decrease memory usage.")
@@ -5316,7 +5758,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          # Prepare dummy previous_hidden_states only if needed by the model.
          # This is used by draft models such as EAGLE.
          previous_hidden_states = None
-@@ -1378,13 +1453,35 @@
+@@ -1378,13 +1456,35 @@
              # memory usage of CUDA graph.
              for virtual_engine in range(
                      self.parallel_config.pipeline_parallel_size):
@@ -5352,7 +5794,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
                      if self.lora_config:
                          lora_mapping = LoRAMapping(
                              **dict(index_mapping=[0] * batch_size,
-@@ -1399,6 +1496,7 @@
+@@ -1399,6 +1499,7 @@
                          )
                          self.set_active_prompt_adapters(
                              set(), prompt_adapter_mapping)
@@ -5360,7 +5802,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
                      graph_runner = CUDAGraphRunner(
                          self.model, self.attn_backend.get_name(),
                          self.attn_state.graph_clone(batch_size),
-@@ -1486,6 +1584,24 @@
+@@ -1486,6 +1587,24 @@
          ModelInputForGPUWithSamplingMetadata)
      _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
  
@@ -5385,7 +5827,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
      def make_model_input_from_broadcasted_tensor_dict(
          self,
          tensor_dict: Dict[str, Any],
-@@ -1516,6 +1632,9 @@
+@@ -1516,6 +1635,9 @@
  
          If cuda graph is required, this API automatically pads inputs.
          """
@@ -5395,7 +5837,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          model_input = self._prepare_model_input_tensors(
              seq_group_metadata_list, finished_requests_ids)
          if get_pp_group().is_last_rank:
-@@ -1529,11 +1648,17 @@
+@@ -1529,11 +1651,17 @@
              sampling_metadata = None
          is_prompt = (seq_group_metadata_list[0].is_prompt
                       if seq_group_metadata_list else None)
@@ -5414,7 +5856,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
      @torch.inference_mode()
      @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
      def execute_model(
-@@ -1546,6 +1671,11 @@
+@@ -1546,6 +1674,11 @@
          if num_steps > 1:
              raise ValueError("num_steps > 1 is not supported in ModelRunner")
  
@@ -5426,7 +5868,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          if self.lora_config:
              assert model_input.lora_requests is not None
              assert model_input.lora_mapping is not None
-@@ -1587,6 +1717,11 @@
+@@ -1587,6 +1720,11 @@
              model_forward_end = torch.cuda.Event(enable_timing=True)
              model_forward_start.record()
  
@@ -5438,7 +5880,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          hidden_or_intermediate_states = model_executable(
              input_ids=model_input.input_tokens,
              positions=model_input.input_positions,
-@@ -1620,15 +1755,27 @@
+@@ -1620,15 +1758,27 @@
                      torch.tensor(model_forward_time + orig_model_forward_time))
              return hidden_or_intermediate_states
  
@@ -5467,7 +5909,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          # Sample the next token.
          output: SamplerOutput = self.model.sample(
              logits=logits,
-@@ -1666,6 +1813,24 @@
+@@ -1666,6 +1816,24 @@
  
              output.hidden_states = hidden_states
  
@@ -5492,7 +5934,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          return [output]
  
  
-@@ -1702,6 +1867,7 @@
+@@ -1702,6 +1870,7 @@
          **kwargs,
      ) -> Union[torch.Tensor, IntermediateTensors]:
          assert self._graph is None
@@ -5500,7 +5942,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
          # Run the model a few times without capturing the graph.
          # This is to make sure that the captured graph does not include the
          # kernel launches for initial benchmarking (e.g., Triton autotune).
-@@ -1784,7 +1950,8 @@
+@@ -1784,7 +1953,8 @@
          # Copy the input tensors to the input buffers.
          self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
          self.input_buffers["positions"].copy_(positions, non_blocking=True)
@@ -5512,7 +5954,7 @@ diff -Nur orig/vllm/worker/model_runner.py dattn/vllm/worker/model_runner.py
              self.input_buffers, attn_metadata, self._is_encoder_decoder_model)
 diff -Nur orig/vllm/worker/worker.py dattn/vllm/worker/worker.py
 --- orig/vllm/worker/worker.py	2024-12-30 22:26:31.434992635 +0000
-+++ dattn/vllm/worker/worker.py	2024-12-30 22:27:03.556885080 +0000
++++ dattn/vllm/worker/worker.py	2025-01-14 23:39:08.140140995 +0000
 @@ -1,6 +1,7 @@
  """A GPU worker class."""
  import gc
@@ -5694,7 +6136,7 @@ diff -Nur orig/vllm/worker/worker.py dattn/vllm/worker/worker.py
  
 diff -Nur orig/vllm/worker/worker_base.py dattn/vllm/worker/worker_base.py
 --- orig/vllm/worker/worker_base.py	2024-12-30 22:26:31.434992635 +0000
-+++ dattn/vllm/worker/worker_base.py	2024-12-30 22:27:03.557885076 +0000
++++ dattn/vllm/worker/worker_base.py	2025-01-14 23:39:08.140140995 +0000
 @@ -20,6 +20,10 @@
                                             ModelRunnerBase,
                                             ModelRunnerInputBase)
@@ -5746,7 +6188,7 @@ diff -Nur orig/vllm/worker/worker_base.py dattn/vllm/worker/worker_base.py
  
 -        self.execute_worker(worker_input)
 +            # If any of these not zero
-+            if (execute_model_req.to_update_blocks or to_swap_out_caches or to_swap_in_caches): 
++            if (execute_model_req.to_update_blocks or to_swap_out_caches or to_swap_in_caches or execute_model_req.immediate_alloc == True): 
 +                # Perform the update cache blocks in a function. 
 +                self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_update_blocks, to_swap_out_caches, to_swap_in_caches)
 +        else:

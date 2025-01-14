@@ -175,7 +175,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # to_free_gpu_caches keeps the requests that are freed in the current step
         self.to_free_gpu_caches: Dict[int, int] = {}
         self.immediate_allocate = False
-        self.to_check_allocate = False
 
         # Maintain the mapping between seq.req_id and SwappedCPUCache (cache_id, blocks)
         self.swapped_out_caches: Dict[int, SwappedCPUCache] = {}
@@ -291,7 +290,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             del self.to_free_gpu_caches[cache_id]
             self.cached_free_gpu_blocks -= allocated_block_num
             
-            print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, need_blocks:{need_blocks}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
+            #print(f"reuse cache-{cache_id}: allocated_blocks-{allocated_block_num}, need_blocks:{need_blocks}, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr)
         else:
             # Check whether the can_allocate or can_swap_in has a bug
             if self.num_free_gpu_blocks < 0: 

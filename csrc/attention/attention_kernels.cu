@@ -117,9 +117,6 @@ inline __device__ float propogate_qk_max(float* red_smem, float qk_max) {
   return qk_max; 
 }
 
-__device__ unsigned long long firstTime = 0, newTime = 0, secondTime = 0, thirdTime = 0, fourthTime = 0, fifthTime = 0, sixthTime = 0, seventhTime = 0, totalTime = 0; 
-__device__ unsigned long myindex = 0; 
-
 // TODO(woosuk): Merge the last two dimensions of the grid.
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
@@ -715,6 +712,7 @@ __global__ void dattention_kernel(
   int max_seq_len,
   const int64_t* cache_row_mapping,  // [num_tokens]  record cache ptr for this token
   const int64_t* cache_col_mapping,  // [num_tokens]  record token index of the sequence
+  const float profiled_qk_max,
   const int* __restrict__ seq_lens,      // [num_seqs]
   const int q_stride, 
   const int num_kv_heads,               // [num_heads]
@@ -820,6 +818,8 @@ __global__ void dattention_kernel(
   // Each thread group fetches x elements from the key at a time.
   constexpr int x = 16 / sizeof(cache_t);
   float qk_max = -FLT_MAX;
+  __shared__ bool to_sync;
+  to_sync = false;
 
   // blocksparse specific vars
   int bs_block_offset;
@@ -913,6 +913,7 @@ __global__ void dattention_kernel(
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                              q_vecs[thread_group_offset], k_vecs);
 
+
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
 
@@ -920,15 +921,26 @@ __global__ void dattention_kernel(
         // Store the partial reductions to shared memory.
         // NOTE(woosuk): It is required to zero out the masked logits.
         const bool mask = token_idx >= seq_len;
+
         logits[token_idx - start_token_idx] = mask ? 0.f : qk;
-        // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
+
+        if (((qk - profiled_qk_max) >= 88.72283f) ||((qk - profiled_qk_max) <= -87.33654f)) {
+          to_sync = true;
+        }
       }
     }
   }
   
-  // Perform reduction across all threads in the same thread block
-  qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
+  __syncthreads(); 
+  
+  if(to_sync || profiled_qk_max == -1.0) {
+    // Perform reduction across all threads in the same thread block
+    qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
+  }
+  else {
+    qk_max = profiled_qk_max;
+  }
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -1444,6 +1456,7 @@ void paged_attention_v2(
               whole_block_size, max_seq_len, \
               row_ptr, \
               col_ptr, \
+              profiled_qk_max, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
               alibi_slopes_ptr, k_scale, v_scale,  \
@@ -1468,6 +1481,7 @@ void paged_attention_v2(
               whole_block_size, max_seq_len, \
               row_ptr, \
               col_ptr, \
+              profiled_qk_max, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
               alibi_slopes_ptr, k_scale, v_scale, \
@@ -1490,7 +1504,8 @@ void dattention_launcher(
   int max_seq_len, 
   torch::Tensor & seq_lens,
   torch::Tensor & cache_row_mapping, 
-  torch::Tensor & cache_col_mapping,  
+  torch::Tensor & cache_col_mapping, 
+  double profiled_qk_max, 
   int num_kv_heads,
   double  scale,
   const c10::optional<torch::Tensor>&  alibi_slopes,
@@ -1630,7 +1645,8 @@ void dattention(
     int64_t max_seq_len, 
     torch::Tensor & seq_lens,
     torch::Tensor & cache_row_mapping, 
-    torch::Tensor & cache_col_mapping,  
+    torch::Tensor & cache_col_mapping,
+    double profiled_qk_max,   
     const std::string& kv_cache_dtype,
     int64_t num_kv_heads,
     double scale,
@@ -1645,14 +1661,14 @@ void dattention(
     if (query.dtype() == at::ScalarType::Float) {               
       dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 16>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-          seq_lens, cache_row_mapping, cache_col_mapping, 
+          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max,
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
           tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
           blocksparse_block_size, blocksparse_head_sliding_step);
     } else if (query.dtype() == at::ScalarType::Half) {
         dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 16>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-          seq_lens, cache_row_mapping, cache_col_mapping, 
+          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max, 
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
           tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
           blocksparse_block_size, blocksparse_head_sliding_step); 
@@ -1662,14 +1678,14 @@ void dattention(
     if (query.dtype() == at::ScalarType::Float) {               
       dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 32>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-          seq_lens, cache_row_mapping, cache_col_mapping, 
+          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max,
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
           tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
           blocksparse_block_size, blocksparse_head_sliding_step);
     } else if (query.dtype() == at::ScalarType::Half) {
         dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 32>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
-          seq_lens, cache_row_mapping, cache_col_mapping, 
+          seq_lens, cache_row_mapping, cache_col_mapping, profiled_qk_max,
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
           tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
           blocksparse_block_size, blocksparse_head_sliding_step); 

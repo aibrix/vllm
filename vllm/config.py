@@ -123,6 +123,8 @@ class ModelConfig:
             can not be gathered from the vllm arguments. 
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        profiled_qk_max: The qk_max value based on the profiling results. This flag will be utilized 
+            to accelerate the attention computation by avoiding synchronizations of qk_max  
     """
 
     def __init__(self,
@@ -142,6 +144,7 @@ class ModelConfig:
                  quantization: Optional[str] = None,
                  quantization_param_path: Optional[str] = None,
                  enforce_eager: Optional[bool] = None,
+                 profiled_qk_max: Optional[float] = -1, 
                  max_context_len_to_capture: Optional[int] = None,
                  max_seq_len_to_capture: Optional[int] = None,
                  max_logprobs: int = 20,
@@ -185,6 +188,8 @@ class ModelConfig:
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
+
+        self.profiled_qk_max = profiled_qk_max
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:

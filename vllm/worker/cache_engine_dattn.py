@@ -72,7 +72,7 @@ class CacheEngineDAttn:
         cache_space_bytes_size = cache_space_size * 2
 
         # reserve size for both K/V cache
-        cache_space_per_req = sequence_buffer_bytes_size * self.num_layers * 2
+        cache_space_per_req = (sequence_buffer_bytes_size * self.num_layers * 2 + self.block_bytes_size * 20) 
         if (cache_space_bytes_size) % self.block_bytes_size != 0:
             print(f"cache_space_bytes_size:{cache_space_bytes_size}, self.block_bytes_size:{self.block_bytes_size}", file=sys.stderr) 
             assert (cache_space_bytes_size) % self.block_bytes_size == 0, "cache_space_bytes_size must be divisible by block_bytes_size"

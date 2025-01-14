@@ -52,7 +52,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor! output, Tensor exp_sums, Tensor max_logits,"
       "    Tensor tmp_out, Tensor query, bool use_reduce,"
       "    int layer_idx, int num_layers, int block_size, int max_seq_len,"
-      "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping,"
+      "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping, float profiled_qk_max,"
       "    str kv_cache_dtype, int num_kv_heads, float scale,"
       "    Tensor? alibi_slopes, float kscale, float v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"

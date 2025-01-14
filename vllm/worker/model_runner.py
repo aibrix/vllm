@@ -879,8 +879,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             attn_metadata.cache_col_mapping = cache_col_mapping_tensor
             attn_metadata.use_dattn = True
             attn_metadata.block_size = self.runner.block_size
-            attn_metadata.num_layers = self.runner.num_layers  
-
+            attn_metadata.num_layers = self.runner.num_layers 
+            attn_metadata.profiled_qk_max = self.runner.profiled_qk_max 
+    
         # LoRA data.
         lora_requests = set()
         lora_mapping = None
@@ -1054,6 +1055,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         # Add dAttention support
         self.use_dattn = cache_config.use_dattn
+        self.profiled_qk_max = model_config.profiled_qk_max
+  
         if self.use_dattn:
             if self.lora_config:
                 #TODO:

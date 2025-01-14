@@ -152,6 +152,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     cache_batch_idx: Optional[torch.Tensor] = None # (batch_size, ) the index of batch in cache
     cache_row_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which seq row in cache
     cache_col_mapping: Optional[torch.Tensor] = None  # (num_tokens,)  record key/value write to which token col in cache
+    profiled_qk_max: float = -1.0
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -217,6 +218,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_tables = None
             slot_mapping = None 
 
+
         # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = XFormersMetadata(
             num_prefills=self.num_prefills,
@@ -238,7 +240,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_size=self.block_size,
             cache_batch_idx=self.cache_batch_idx,
             cache_row_mapping=self.cache_row_mapping,
-            cache_col_mapping=self.cache_col_mapping,            
+            cache_col_mapping=self.cache_col_mapping,
+            profiled_qk_max=self.profiled_qk_max,             
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -288,7 +291,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_size=self.block_size, 
             cache_batch_idx=self.cache_batch_idx,
             cache_row_mapping=self.cache_row_mapping,
-            cache_col_mapping=self.seq_lens_tensor[self.num_prefills:],   
+            cache_col_mapping=self.seq_lens_tensor[self.num_prefills:], 
+            profiled_qk_max=self.profiled_qk_max,  
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -748,6 +752,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert attn_metadata.use_dattn == True
                 layer_idx = kv_cache.item()
 
+                #print(f"decode_meta.profiled_qk_max: {decode_meta.profiled_qk_max}", file=sys.stderr)
+
                 #print(f"max_seq_len_arg:{decode_meta.max_decode_seq_len}", file=sys.stderr)
                 #print(f"decoding: layer_idx:{layer_idx} after printing\n", file=sys.stderr)
                 #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}, decode_meta.block_size:{decode_meta.block_size}, decode_meta.cache_row_mapping:{decode_meta.cache_row_mapping.shape}, decode_meta.cache_col_mapping:{decode_meta.cache_col_mapping}")
@@ -763,6 +769,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     decode_meta.seq_lens_tensor, 
                     decode_meta.cache_row_mapping, 
                     decode_meta.cache_col_mapping,
+                    decode_meta.profiled_qk_max,
                     self.kv_cache_dtype,
                     self.num_kv_heads,
                     self.scale,

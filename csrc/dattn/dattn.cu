@@ -143,7 +143,7 @@ void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_mem
     int64_t to_allocate_memory = min(total_memory, max_allowed_size); 
     this->total_size = to_allocate_memory; 
     size_t num_blocks = to_allocate_memory / block_size;
-    fprintf(stderr, "total_memory %lx, max_allowed_size %lx num_blocks-%ld\n", total_memory, max_allowed_size, num_blocks);
+    fprintf(stderr, "total_memory %lx, max_allowed_size-%lx num_blocks-%ld block_size-%ld\n", total_memory, max_allowed_size, num_blocks, block_size);
     _increase_blocks(num_blocks);
 }
 
@@ -154,7 +154,6 @@ PhysicalBlock PhysicalBlocksManager::allocate(void) {
       // Keeping increase the memory if the GPU memory is sufficient
       int64_t allow_size = this->max_allowed_size - this->total_size;
       int64_t alloc_size; 
-      //fprintf(stderr, "alloc_size %lx allow_size %lx total_size %lx\n", alloc_size, allow_size, this->total_size);
 
       if(allow_size <= 0) {
         fprintf(stderr, "There is no sufficent GPU memory now. ");
@@ -168,6 +167,7 @@ PhysicalBlock PhysicalBlocksManager::allocate(void) {
         // Less than the incremental_size. 
         alloc_size = roundup(allow_size, this->block_size);  
       }
+      //fprintf(stderr, "alloc_size %lx allow_size %lx total_size %lx\n", alloc_size, allow_size, this->total_size);
 
       int64_t blocks = alloc_size/this->block_size; 
 
@@ -319,15 +319,17 @@ void kvCacheRegion::updateBlocks(uint64_t blocks) {
       PhysicalBlock block = _block_manager.allocate();
       if ((res = cuMemMap(reinterpret_cast<CUdeviceptr>(addr), size, 0ULL, block.handle, 0ULL)) == CUDA_SUCCESS) {
         if ((res = cuMemSetAccess(reinterpret_cast<CUdeviceptr>(addr), size, &_accessDescr, 1)) != CUDA_SUCCESS) {
-          fprintf(stderr, "cuMemMap success,but cuMemSetAccess failed!, err code: %d\n", res);
+          fprintf(stderr, "cuMemMap success, but cuMemSetAccess failed!, err code: %d\n", res);
           cuMemUnmap(reinterpret_cast<CUdeviceptr>(addr), size);
           exit(-1);
         }
       }
       else {
+        fprintf(stderr, "Now i-%d: increaseBlocks newSize: %lx, addr: %p, distance-%lx, blocks %ld, this->mapped_size: %lx\n", i, newSize, addr, distance, blocks_num, this->mapped_size);
         const char* errorStr;
         cuGetErrorString(res, &errorStr);
-        fprintf(stderr, "cuMemMap failed when deallocating ptr %p res %d with error %s\n", addr, res, errorStr);
+        fprintf(stderr, "cuMemMap failed when mapping ptr %p size %ld res %d with error %s\n", addr, size, res, errorStr);
+        exit(-1);
       }
 
       _block_manager.record(addr, block); 
@@ -465,6 +467,7 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
   // Allocate the virtual address for this region
   CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
 
+  //fprintf(stderr, "reserving region: 0x%llx -- 0x%llx\n", static_cast<unsigned long long>(ptr), static_cast<unsigned long long>(ptr) + this->region_size); 
   // Create a new region from the scratch
   region = new kvCacheRegion(this->cache_block_size, this->physical_block_size, ptr);
 

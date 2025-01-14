@@ -156,6 +156,7 @@ class EngineArgs:
     ignore_patterns: Optional[Union[str, List[str]]] = None
     preemption_mode: Optional[str] = None
 
+    profiled_qk_max: float = -1.0
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: Optional[bool] = None
 
@@ -826,6 +827,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
+            profiled_qk_max=self.profiled_qk_max,
         )
 
     def create_load_config(self) -> LoadConfig:

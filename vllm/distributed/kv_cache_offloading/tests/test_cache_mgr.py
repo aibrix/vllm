@@ -1,0 +1,308 @@
+import asyncio
+import copy
+import os
+import pytest
+import random
+import shutil
+import torch
+
+from typing import Tuple
+
+from .. import (
+    BaseKVCacheManager,
+    KVCacheBlockLayout,
+    KVCacheBlockSpec,
+    KVCacheConfig,
+    KVCacheLayerSpec,
+    KVCacheRetentionType,
+    KVCacheTensorSpec,
+)
+
+TEMP_ROOT = os.path.join(os.path.expanduser("."), ".test_rocksdb")
+
+
+def get_block_spec(shape: Tuple[int, ...], dtype: torch.dtype):
+    return KVCacheBlockSpec(
+        block_ntokens=shape[0],
+        block_dtype=dtype,
+        block_layout=KVCacheBlockLayout.NLD,
+        tensor_spec=KVCacheTensorSpec(
+            heads=[1, 2],
+            layers=list(range(shape[1])),
+            layer_specs=[
+                KVCacheLayerSpec(size=shape[2]) for _ in range(shape[1])
+            ],
+        ),
+    )
+
+
+def discard_all_vllm_envs():
+    # Find all environment variables that start with "VLLM_"
+    vllm_keys = [key for key in os.environ if key.startswith("VLLM_")]
+
+    # Remove them from the environment
+    for key in vllm_keys:
+        del os.environ[key]
+
+
+@pytest.fixture(params=["l1", "l2_sync", "l2_async", "l1_l2_sync"],
+                scope="function")
+def cache_mgr(request):
+    discard_all_vllm_envs()
+
+    if request.param == "l1":
+        # enable l1 and disable l2
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "1"
+        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = ""
+
+        # let allocator use host memory
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_DEVICE"] = "cpu"
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_PIN_MEMORY"] = "0"
+    elif request.param == "l2_sync":
+        # enable l2 and disable l1
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "0"
+
+        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
+        os.environ[
+            "VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS"] = "0"
+
+        # rocksdb envs
+        os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+    elif request.param == "l2_async":
+        # enable l2 and disable l1
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "0"
+        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
+
+        # rocksdb envs
+        os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+
+    elif request.param == "l1_l2_sync":
+        # enable both l1 and l2
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "1"
+        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
+
+        # let allocator use host memory
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_DEVICE"] = "cpu"
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_PIN_MEMORY"] = "0"
+        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "0.01"
+
+        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_TYPE"] = "EVICTED"
+        os.environ[
+            "VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS"] = "0"
+        # always use double get
+        os.environ["VLLM_KV_CACHE_OL_DOUBLE_GET_THRESHOLD"] = "0"
+
+        # rocksdb envs
+        os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+
+    if os.path.exists(TEMP_ROOT):
+        shutil.rmtree(TEMP_ROOT, ignore_errors=True)
+
+    shape = (16, 8, 64)
+    dtype = torch.bfloat16
+
+    cache = None
+    try:
+        config = KVCacheConfig(
+            block_spec=get_block_spec(shape, dtype),
+            retention_type=KVCacheRetentionType.CACHING,
+        )
+        cache = BaseKVCacheManager(config=config)
+        setattr(cache, "__test_request_param__", request.param)
+        yield cache
+    finally:
+        if cache is not None:
+            cache.__del__()
+        if os.path.exists(TEMP_ROOT):
+            shutil.rmtree(TEMP_ROOT, ignore_errors=True)
+
+
+def test_cache_initialization(cache_mgr):
+    request_param = getattr(cache_mgr, "__test_request_param__", "")
+    if "l1" in request_param:
+        assert cache_mgr._l1_cache is not None
+    if "l2" in request_param:
+        assert cache_mgr._l2_cache is not None
+
+
+def test_put_and_get_aligned(cache_mgr):
+    tokens = [i for i in range(32)]
+    origin_tokens = copy.deepcopy(tokens)
+    kv_tensors = torch.randn(32, 8, 64, dtype=torch.bfloat16)
+
+    put_status = cache_mgr.put(None, tokens, kv_tensors)
+    assert tokens == origin_tokens
+    assert put_status.is_ok()
+
+    if getattr(cache_mgr, "__test_request_param__", "").endswith("async"):
+        cache_mgr.flush()
+
+    get_status = cache_mgr.get(None, tokens)
+    assert tokens == origin_tokens
+    assert get_status.is_ok()
+    assert get_status.value[0] == 32
+    assert torch.equal(get_status.value[1], kv_tensors)
+
+
+def test_put_and_get_unaligned(cache_mgr):
+    tokens = [i for i in range(35)]
+    kv_tensors = torch.randn(len(tokens), 8, 64, dtype=torch.bfloat16)
+
+    put_status = cache_mgr.put(None, tokens, kv_tensors)
+    assert put_status.is_ok()
+
+    if getattr(cache_mgr, "__test_request_param__", "").endswith("async"):
+        cache_mgr.flush()
+
+    get_status = cache_mgr.get(None, tokens)
+    assert get_status.is_ok()
+    assert get_status.value[0] == 32
+    assert torch.equal(get_status.value[1], kv_tensors[0:32])
+
+
+def test_put_and_get_with_prefix(cache_mgr):
+    tokens0 = [i for i in range(32)]
+    kv_tensors0 = torch.randn(len(tokens0), 8, 64, dtype=torch.bfloat16)
+
+    put_status = cache_mgr.put(None, tokens0, kv_tensors0)
+    assert put_status.is_ok()
+
+    tokens1 = [i for i in range(100, 135)]
+    kv_tensors1 = torch.randn(len(tokens1), 8, 64, dtype=torch.bfloat16)
+
+    put_status = cache_mgr.put(tokens0, tokens1, kv_tensors1)
+    assert put_status.is_ok()
+
+    if getattr(cache_mgr, "__test_request_param__", "").endswith("async"):
+        cache_mgr.flush()
+
+    get_status = cache_mgr.get(None, tokens0)
+    assert get_status.is_ok()
+    assert torch.equal(get_status.value[1], kv_tensors0)
+
+    get_status = cache_mgr.get(tokens0, tokens1)
+    assert get_status.is_ok()
+    assert torch.equal(get_status.value[1], kv_tensors1[0:32])
+
+    get_status = cache_mgr.get(None, tokens0 + tokens1)
+    assert get_status.is_ok()
+    chunks = torch.chunk(get_status.value[1], 2)
+    assert torch.equal(chunks[0], kv_tensors0)
+    assert torch.equal(chunks[1], kv_tensors1[0:32])
+
+
+def test_duplicated_puts(cache_mgr):
+    for _ in range(10):
+        tokens = [i for i in range(32)]
+        kv_tensors = torch.randn(32, 8, 64, dtype=torch.bfloat16)
+
+        put_status = cache_mgr.put(None, tokens, kv_tensors)
+        assert put_status.is_ok()
+
+        if getattr(cache_mgr, "__test_request_param__", "").endswith("async"):
+            cache_mgr.flush()
+
+        get_status = cache_mgr.get(None, tokens)
+        assert get_status.is_ok()
+        assert torch.equal(get_status.value[1], kv_tensors)
+
+
+def test_delete(cache_mgr):
+    tokens = [i for i in range(32)]
+    origin_tokens = copy.deepcopy(tokens)
+    kv_tensors = torch.randn(32, 8, 64, dtype=torch.bfloat16)
+
+    put_status = cache_mgr.put(None, tokens, kv_tensors)
+    assert tokens == origin_tokens
+    assert put_status.is_ok()
+    assert put_status.value == kv_tensors.shape[0]
+
+    if getattr(cache_mgr, "__test_request_param__", "").endswith("async"):
+        cache_mgr.flush()
+
+    del_status = cache_mgr.delete(tokens[:16], tokens[16:])
+    assert del_status.is_ok()
+
+    get_status = cache_mgr.get(None, tokens[:16])
+    assert get_status.is_ok()
+    assert get_status.value[0] == 16
+    assert torch.equal(get_status.value[1], kv_tensors[:16])
+
+    get_status = cache_mgr.get(tokens[:16], tokens[16:])
+    assert get_status.is_not_found()
+
+
+def test_stress_cache(cache_mgr):
+    query = {}
+    for i in range(200):
+        num_prefix_blocks = random.randint(0, 30)
+        prefix_tokens = [j for j in range(num_prefix_blocks * 16)]
+        prefix_kv_tensors = torch.randn(len(prefix_tokens),
+                                        8,
+                                        64,
+                                        dtype=torch.bfloat16)
+        put_status = cache_mgr.put(None, prefix_tokens, prefix_kv_tensors)
+        if put_status.is_out_of_memory() or put_status.is_denied():
+            continue
+
+        assert put_status.is_ok()
+        cache_mgr.get(None, prefix_tokens)
+
+        ntokens = random.randint(128, 1024)
+        tokens = [j for j in range(ntokens)]
+        random.shuffle(tokens)
+        kv_tensors = torch.randn(len(tokens), 8, 64, dtype=torch.bfloat16)
+        put_status = cache_mgr.put(prefix_tokens, tokens, kv_tensors)
+        if put_status.is_out_of_memory() or put_status.is_denied():
+            continue
+
+        assert put_status.is_ok()
+        cache_mgr.get(prefix_tokens, tokens)
+        query[i] = (prefix_tokens, tokens, kv_tensors)
+
+    if getattr(cache_mgr, "__test_request_param__", "").endswith("async"):
+        cache_mgr.flush()
+
+    results = []
+    for i in range(200):
+        if i not in query:
+            continue
+
+        prefix_tokens, tokens, kv_tensors = query[i]
+        j = 0
+        while j < len(tokens):
+            length = (random.randint(1, (len(tokens) - j) // 16) *
+                      16 if len(tokens) - j > 16 else 16)
+
+            if cache_mgr._l1_cache is not None and cache_mgr._l2_cache is not None:
+                l1_get_status = cache_mgr._l1_cache.get(
+                    prefix_tokens, tokens[j:j + length])
+                l1_got = len(
+                    l1_get_status.value) if l1_get_status.is_ok() else 0
+                l2_get_status = asyncio.run_coroutine_threadsafe(
+                    cache_mgr._l2_cache.get(prefix_tokens,
+                                            tokens[j:j + length]),
+                    cache_mgr._event_loop).result()
+                l2_got = len(
+                    l2_get_status.value) if l2_get_status.is_ok() else 0
+                get_status = cache_mgr.get(prefix_tokens, tokens[j:j + length])
+                if l1_got + l2_got > 0:
+                    assert get_status.is_ok() and get_status.value[0] == max(
+                        l1_got, l2_got
+                    ) * 16, f"l1_got={l1_got}, l2_got={l2_got}, get_status={get_status}"
+            else:
+                get_status = cache_mgr.get(prefix_tokens, tokens[j:j + length])
+
+            if get_status.is_ok():
+                assert get_status.value[0] > 0 and get_status.value[
+                    0] <= length, f"{get_status.value[0]} vs {length}"
+                assert torch.equal(get_status.value[1],
+                                   kv_tensors[j:j + get_status.value[0]])
+                results.append(1)
+            else:
+                results.append(0)
+            prefix_tokens += tokens[j:j + length]
+            j += length
+
+    num_oks = sum(results)
+    assert num_oks > 50

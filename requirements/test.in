@@ -6,6 +6,7 @@ pytest-asyncio
 pytest-rerunfailures
 pytest-shard
 pytest-timeout
+pytest-benchmark
 
 # testing utils
 awscli

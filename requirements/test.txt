@@ -521,6 +521,8 @@ pytest-subtests==0.14.1
     # via schemathesis
 pytest-timeout==2.3.1
     # via -r requirements/test.in
+pytest-benchmark==5.0.0
+    # via -r requirements/test.in
 python-dateutil==2.9.0.post0
     # via
     #   arrow

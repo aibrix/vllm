@@ -25,6 +25,8 @@ from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer import get_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_transfer_metadata import (
+    KVTransferMetadata, KVTransferMetadataCache)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              graph_capture)
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -56,8 +58,10 @@ from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
 from vllm.worker.model_runner_base import (
     InputProcessingError, ModelRunnerBase, ModelRunnerInputBase,
     ModelRunnerInputBuilderBase, _add_attn_metadata_broadcastable_dict,
+    _add_kv_transfer_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
+    _init_kv_transfer_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
 if TYPE_CHECKING:
@@ -101,6 +105,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
     previous_hidden_states: Optional[torch.Tensor] = None
+    kv_transfer_metadata: Optional[KVTransferMetadata] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -116,6 +121,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
             "finished_requests_ids": self.finished_requests_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_kv_transfer_metadata_broadcastable_dict(tensor_dict,
+                                                     self.kv_transfer_metadata)
         return tensor_dict
 
     @classmethod
@@ -127,6 +134,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
+        _init_kv_transfer_metadata_from_tensor_dict(tensor_dict)
         return cls(**tensor_dict)
 
     # Exclude `async_callback` to be able to pickle this object
@@ -166,6 +174,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
             "finished_requests_ids": self.finished_requests_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
+        _add_kv_transfer_metadata_broadcastable_dict(tensor_dict,
+                                                     self.kv_transfer_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
                                                   self.sampling_metadata)
         return tensor_dict
@@ -180,6 +190,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
+        _init_kv_transfer_metadata_from_tensor_dict(tensor_dict)
         return cls(**tensor_dict)
 
 
@@ -1100,6 +1111,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
+        self.kv_transfer_metadata_cache: KVTransferMetadataCache = (
+            KVTransferMetadataCache()
+            if self.vllm_config.kv_transfer_config is not None else None)
+
         if hasattr(self, "_builder_cls"):
             # multi-step model runner does not have `_builder_cls`
             self.builder = self._builder_cls(weakref.proxy(self))
@@ -1668,8 +1683,23 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
+
+        if self.vllm_config.kv_transfer_config is not None:
+            kv_transfer_metadata = KVTransferMetadata.prepare(
+                seq_group_metadata_list,
+                model_input.seq_lens,
+                model_input.query_lens,
+                self.kv_transfer_metadata_cache,
+            )
+            # attach seq_group_metadata_list for rebuilding model_input
+            # on the driver side
+            kv_transfer_metadata.seq_group_metadata_list = \
+                seq_group_metadata_list
+        else:
+            kv_transfer_metadata = None
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
+                                   kv_transfer_metadata=kv_transfer_metadata,
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
 
@@ -1734,6 +1764,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
         if self.need_recv_kv(model_input, kv_caches):
+            # attach runner for rebuilding model_input
+            model_input.kv_transfer_metadata.runner = weakref.proxy(self)
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
                 get_kv_transfer_group().recv_kv_caches_and_hidden_states(
                     # model is used to know which layer the current worker

@@ -19,6 +19,9 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+    from ..kv_transfer_metrics import (KVTransferMetrics,
+                                       KVTransferMetricsExporter)
+
 
 class KVConnectorBase(ABC):
     """
@@ -49,6 +52,21 @@ class KVConnectorBase(ABC):
             NotImplementedError: This method must be implemented in subclasses.
         """
         raise NotImplementedError
+
+    @property
+    def metrics(self) -> 'KVTransferMetrics':
+        """
+        Get the metrics object associated with the connector.
+        Returns:
+            KVTransferMetrics: The metrics object.
+        """
+        return None
+
+    def get_metrics_exporter_cls(self) -> 'KVTransferMetricsExporter':
+        """
+        Get the metrics exporter class associated with the connector.
+        """
+        return None
 
     @abstractmethod
     def send_kv_caches_and_hidden_states(

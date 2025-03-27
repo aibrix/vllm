@@ -20,6 +20,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
                          VllmConfig)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
+from vllm.distributed import get_kv_transfer_group
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
@@ -1845,6 +1846,12 @@ class LLMEngine:
         else:
             spec_decode_metrics = None
 
+        if (self.vllm_config.kv_transfer_config is not None and
+                self.vllm_config.kv_transfer_config.is_kv_transfer_instance):
+            kv_transfer_metrics = get_kv_transfer_group().metrics
+        else:
+            kv_transfer_metrics = None
+
         return Stats(
             now=now,
             # System stats
@@ -1867,6 +1874,7 @@ class LLMEngine:
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
             num_preemption_iter=num_preemption_iter,
+            kv_transfer_metrics=kv_transfer_metrics,
 
             # Request stats
             #   Latency

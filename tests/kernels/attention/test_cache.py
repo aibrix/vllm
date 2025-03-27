@@ -8,6 +8,7 @@ import torch
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils import get_kv_cache_torch_dtype
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -347,6 +348,296 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache_compact, cloned_key_cache)
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_layers", [8])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES[:2])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES[:1])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS[:1])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize("offload_layout", ["LCND", "NCLD"])
+@torch.inference_mode()
+def test_reshape_and_cache_multi_layer(
+    kv_cache_factory_flashinfer,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+    offload_layout: str,
+) -> None:
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+
+    # Create a random slot mapping.
+    num_slots = block_size * num_blocks
+    num_tokens = num_slots
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+
+    embed_dim = num_heads * head_size
+    offload_kv_cache_blocks = []
+    if offload_layout == "LCND":
+        for _ in range(num_blocks):
+            offload_kv_cache_block = torch.randn(
+                num_layers,
+                2,
+                block_size,
+                embed_dim,
+                dtype=get_kv_cache_torch_dtype(kv_cache_dtype, dtype),
+                device="cpu",
+                pin_memory=True,
+            )
+            offload_kv_cache_blocks.append(offload_kv_cache_block)
+    else:  # offload_layout == "NCLD"
+        for _ in range(num_blocks):
+            offload_kv_cache_block = torch.randn(
+                block_size,
+                2,
+                num_layers,
+                embed_dim,
+                dtype=get_kv_cache_torch_dtype(kv_cache_dtype, dtype),
+                device="cpu",
+                pin_memory=True,
+            )
+            offload_kv_cache_blocks.append(offload_kv_cache_block)
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory_flashinfer(
+        num_blocks,
+        block_size,
+        num_layers,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        device=device,
+    )
+    kv_caches = [
+        torch.stack((key_caches[i], value_caches[i]))
+        for i in range(num_layers)
+    ]
+
+    scale = max(block.amax() for block in offload_kv_cache_blocks)
+    scale = (scale / 64.0).to(torch.float32).to(device)
+    scales = [scale] * num_layers
+
+    # Clone the KV caches.
+    cloned_kv_caches = [kv_cache.clone() for kv_cache in kv_caches]
+
+    # opcheck(
+    #     torch.ops._C_cache_ops.reshape_and_cache_multi_layer,
+    #     (
+    #         offload_kv_cache_blocks,
+    #         kv_caches,
+    #         slot_mapping,
+    #         block_size,
+    #         kv_cache_dtype,
+    #         scales,
+    #         scales,
+    #         offload_layout,
+    #     ),
+    #     cond=(head_size == HEAD_SIZES[0]),
+    # )
+
+    ops.reshape_and_cache_multi_layer(
+        offload_kv_cache_blocks,
+        kv_caches,
+        slot_mapping,
+        block_size,
+        kv_cache_dtype,
+        scales,
+        scales,
+        offload_layout,
+    )
+
+    # Run the reference implementation.
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_indicies_lst = block_indicies.cpu().tolist()
+    block_offsets = slot_mapping % block_size
+    block_offsets_lst = block_offsets.cpu().tolist()
+    for i in range(num_layers):
+        for j in range(num_tokens):
+            block_idx = block_indicies_lst[j]
+            block_offset = block_offsets_lst[j]
+            ol_block_idx = j // block_size
+            ol_block_offset = j % block_size
+            if offload_layout == "LCND":
+                cloned_kv_caches[i][0, block_idx, block_offset, :] = (
+                    offload_kv_cache_blocks[ol_block_idx][
+                        i, 0, ol_block_offset].view(num_heads, head_size))
+                cloned_kv_caches[i][1, block_idx, block_offset, :] = (
+                    offload_kv_cache_blocks[ol_block_idx][
+                        i, 1, ol_block_offset].view(num_heads, head_size))
+            else:
+                cloned_kv_caches[i][0, block_idx, block_offset, :] = (
+                    offload_kv_cache_blocks[ol_block_idx][ol_block_offset, 0,
+                                                          i].view(
+                                                              num_heads,
+                                                              head_size))
+                cloned_kv_caches[i][1, block_idx, block_offset, :] = (
+                    offload_kv_cache_blocks[ol_block_idx][ol_block_offset, 1,
+                                                          i].view(
+                                                              num_heads,
+                                                              head_size))
+
+    for i in range(num_layers):
+        torch.testing.assert_close(kv_caches[i], cloned_kv_caches[i])
+
+
+@pytest.mark.parametrize("num_layers", [8])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES[:2])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES[:1])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS[:1])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto"])
+@pytest.mark.parametrize("offload_layout", ["LCND", "NCLD"])
+@torch.inference_mode()
+def test_reshape_and_offload_multi_layer(
+    kv_cache_factory_flashinfer,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    block_size: int,
+    num_blocks: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+    offload_layout: str,
+) -> None:
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
+
+    # Create a random slot mapping.
+    num_slots = block_size * num_blocks
+    num_tokens = num_slots
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
+
+    embed_dim = num_heads * head_size
+    offload_kv_cache_blocks = []
+    if offload_layout == "LCND":
+        for _ in range(num_blocks):
+            offload_kv_cache_blocks.append(
+                torch.randn(
+                    num_layers,
+                    2,
+                    block_size,
+                    embed_dim,
+                    dtype=get_kv_cache_torch_dtype(kv_cache_dtype, dtype),
+                    device="cpu",
+                    pin_memory=True,
+                ))
+    else:  # offload_layout == "NCLD"
+        for _ in range(num_blocks):
+            offload_kv_cache_blocks.append(
+                torch.randn(
+                    block_size,
+                    2,
+                    num_layers,
+                    embed_dim,
+                    dtype=get_kv_cache_torch_dtype(kv_cache_dtype, dtype),
+                    device="cpu",
+                    pin_memory=True,
+                ))
+
+    # Create the KV caches.
+    key_caches, value_caches = kv_cache_factory_flashinfer(
+        num_blocks,
+        block_size,
+        num_layers,
+        num_heads,
+        head_size,
+        kv_cache_dtype,
+        dtype,
+        device=device,
+    )
+    kv_caches = [
+        torch.stack((key_caches[i], value_caches[i]))
+        for i in range(num_layers)
+    ]
+
+    scales = [kv_cache.amax() for kv_cache in kv_caches]
+    scales = [(scale / 64.0).to(torch.float32) for scale in scales]
+
+    # Clone the offload kc cache blocks.
+    cloned_offload_kv_cache_blocks = [
+        block.clone() for block in offload_kv_cache_blocks
+    ]
+
+    # opcheck(
+    #     torch.ops._C_cache_ops.reshape_and_offload_multi_layer,
+    #     (
+    #         offload_kv_cache_blocks,
+    #         kv_caches,
+    #         slot_mapping,
+    #         block_size,
+    #         kv_cache_dtype,
+    #         scales,
+    #         scales,
+    #         offload_layout,
+    #     ),
+    #     cond=(head_size == HEAD_SIZES[0]),
+    # )
+
+    ops.reshape_and_offload_multi_layer(
+        offload_kv_cache_blocks,
+        kv_caches,
+        slot_mapping,
+        block_size,
+        kv_cache_dtype,
+        scales,
+        scales,
+        offload_layout,
+    )
+
+    # Run the reference implementation.
+    block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
+    block_indicies_lst = block_indicies.cpu().tolist()
+    block_offsets = slot_mapping % block_size
+    block_offsets_lst = block_offsets.cpu().tolist()
+    for i in range(num_layers):
+        for j in range(num_tokens):
+            block_idx = block_indicies_lst[j]
+            block_offset = block_offsets_lst[j]
+            ol_block_idx = j // block_size
+            ol_block_offset = j % block_size
+            if offload_layout == "LCND":
+                cloned_offload_kv_cache_blocks[ol_block_idx][
+                    i, 0, ol_block_offset] = kv_caches[i][
+                        0, block_idx, block_offset, :].view(embed_dim)
+                cloned_offload_kv_cache_blocks[ol_block_idx][
+                    i, 1, ol_block_offset] = kv_caches[i][
+                        1, block_idx, block_offset, :].view(embed_dim)
+            else:
+                cloned_offload_kv_cache_blocks[ol_block_idx][
+                    ol_block_offset, 0,
+                    i] = kv_caches[i][0, block_idx,
+                                      block_offset, :].view(embed_dim)
+                cloned_offload_kv_cache_blocks[ol_block_idx][
+                    ol_block_offset, 1,
+                    i] = kv_caches[i][1, block_idx,
+                                      block_offset, :].view(embed_dim)
+
+    for i in range(num_blocks):
+        torch.testing.assert_close(offload_kv_cache_blocks[i],
+                                   cloned_offload_kv_cache_blocks[i])
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)

@@ -9,6 +9,7 @@ import numpy as np
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed import get_kv_transfer_group
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
@@ -292,8 +293,20 @@ class Metrics:
             documentation="Number of emitted tokens.",
             labelnames=labelnames))
 
+        self.kv_transfer_metrics_exporter = None
+        if (vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.is_kv_transfer_instance):
+            exporter_cls = get_kv_transfer_group().get_metrics_exporter_cls()
+            if exporter_cls is not None:
+                self.kv_transfer_metrics_exporter = exporter_cls(
+                    prefix="vllm:",
+                    labelnames=labelnames,
+                    gauge_cls=self._gauge_cls,
+                    counter_cls=self._counter_cls,
+                    histogram_cls=self._histogram_cls,
+                )
 
-# end-metrics-definitions
+    # end-metrics-definitions
 
     def _unregister_vllm_metrics(self) -> None:
         for collector in list(prometheus_client.REGISTRY._collector_to_names):
@@ -509,6 +522,9 @@ class LoggingStatLogger(StatLoggerBase):
                     self._format_spec_decode_metrics_str(
                         self.spec_decode_metrics))
 
+            if stats.kv_transfer_metrics is not None:
+                log_fn(str(stats.kv_transfer_metrics))
+
             self._reset(stats, prompt_throughput, generation_throughput)
 
     def _reset(self, stats, prompt_throughput, generation_throughput) -> None:
@@ -519,6 +535,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.spec_decode_metrics = None
         self.last_prompt_throughput = prompt_throughput
         self.last_generation_throughput = generation_throughput
+        if stats.kv_transfer_metrics is not None:
+            stats.kv_transfer_metrics.reset()
 
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
@@ -657,6 +675,12 @@ class PrometheusStatLogger(StatLoggerBase):
             stats.max_num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_max_tokens_request,
                             stats.max_tokens_requests)
+        if (stats.kv_transfer_metrics is not None
+                and self.metrics.kv_transfer_metrics_exporter is not None):
+            self.metrics.kv_transfer_metrics_exporter.export(
+                metrics=stats.kv_transfer_metrics,
+                labels=self.labels,
+            )
 
     def log(self, stats: Stats):
         """Logs to prometheus and tracked stats every iteration."""
@@ -694,6 +718,8 @@ class PrometheusStatLogger(StatLoggerBase):
             self.num_generation_tokens = []
             self.last_local_log = stats.now
             self.spec_decode_metrics = None
+            if stats.kv_transfer_metrics is not None:
+                stats.kv_transfer_metrics.reset()
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         # Info type metrics are syntactic sugar for a gauge permanently set to 1

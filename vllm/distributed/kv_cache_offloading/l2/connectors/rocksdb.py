@@ -1,24 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from concurrent.futures import Executor
-from typing import TypeVar
 
 import rocksdict
+import torch
 
 from ... import envs
 from ...common import AsyncBase
 from ...status import Status, StatusCodes
-from ...utils import ensure_dir_exist
+from ...utils import bytes_to_tensor, ensure_dir_exist, tensor_to_bytes
 from . import Connector, ConnectorFeature
-
-V = TypeVar("V")
 
 
 @AsyncBase.async_wrap(exists="_exists",
                       get="_get",
                       put="_put",
                       delete="_delete")
-class RocksDBConnector(Connector[bytes, V], AsyncBase):
+class RocksDBConnector(Connector[bytes, torch.Tensor], AsyncBase):
     """RocksDB connector."""
 
     def __init__(
@@ -93,17 +91,19 @@ class RocksDBConnector(Connector[bytes, V], AsyncBase):
         return Status(StatusCodes.NOT_FOUND)
 
     @Status.capture_exception
-    def _get(self, key: bytes) -> Status[V]:
+    def _get(self, key: bytes) -> Status[torch.Tensor]:
         """Get a value."""
         val = self.store.get(key)
         if val is None:
             return Status(StatusCodes.NOT_FOUND)
-        return Status(value=val)
+        tensor = bytes_to_tensor(val)
+        return Status(value=tensor)
 
     @Status.capture_exception
-    def _put(self, key: bytes, value: V) -> Status:
+    def _put(self, key: bytes, value: torch.Tensor) -> Status:
         """Put a key value pair"""
-        self.store.put(key, value)
+        val = tensor_to_bytes(value)
+        self.store.put(key, val)
         return Status(StatusCodes.OK)
 
     @Status.capture_exception

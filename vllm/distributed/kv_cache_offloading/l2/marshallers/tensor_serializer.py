@@ -21,14 +21,14 @@ class TensorSerializer(BaseMarshaller):
         if isinstance(obj, torch.Tensor):
             # 0 indicates no indices
             buffer.write(struct.pack("i", 0))
-            buffer.write(tensor_to_bytes(obj.view(torch.uint8)))
+            buffer.write(tensor_to_bytes(obj))
         else:
             indices, tensor = obj
             # non-zero indicates we have indices before tensor bytes
             buffer.write(struct.pack("i", len(indices)))
             for index in indices:
                 buffer.write(struct.pack("i", index))
-            buffer.write(tensor_to_bytes(tensor.view(torch.uint8)))
+            buffer.write(tensor_to_bytes(tensor))
         return buffer.getvalue()
 
     def _unmarshal(

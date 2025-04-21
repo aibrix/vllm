@@ -67,9 +67,10 @@ class L1Cache(MeasurableBase):
         )
 
         assert (
-            self.allocator.capacity_nbytes == self.capacity * self.block_nbytes
-        ), (f"Allocator capacity {self.allocator.capacity_nbytes} is not "
-            f"equal to cache capacity {self.capacity * self.block_nbytes}.")
+            self.allocator.capacity_nbytes >= self.capacity * self.block_nbytes
+        ), (f"Allocator capacity {self.allocator.capacity_nbytes} should not "
+            f"be less than cache capacity {self.capacity * self.block_nbytes}."
+            )
 
         logger.info("%s is initialized.", str(self))
 
@@ -125,23 +126,7 @@ class L1Cache(MeasurableBase):
         if num_blocks == 0:
             return Status(StatusCodes.OUT_OF_MEMORY)
 
-        status = self.allocator.alloc(self.block_nbytes * num_blocks)
-        if status.is_ok():
-            return Status(
-                value=MemoryRegion.split(status.value, self.block_nbytes))
-        else:
-            # failed to allocate one MR for all the blocks due to fragmentation,
-            # try to allocate one MR for each block
-            block_mrs = []
-            for _ in range(num_blocks):
-                status = self.allocator.alloc(self.block_nbytes)
-                if status.is_ok():
-                    block_mrs.append(status.value)
-                else:
-                    break
-            if len(block_mrs) == 0:
-                return Status(StatusCodes.OUT_OF_MEMORY)
-            return Status(value=block_mrs)
+        return self.allocator.alloc(self.block_nbytes * num_blocks)
 
     @nvtx_range("exists", "kv_cache_ol.L1Cache")
     @MeasurableBase.measure(MetricRecorder.OP.EXISTS)

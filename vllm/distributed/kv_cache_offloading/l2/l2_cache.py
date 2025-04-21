@@ -6,7 +6,7 @@ from typing import Iterable, Iterator, Tuple
 
 import torch
 
-from ..cache_handle import KVCacheHandle
+from ..cache_handle import KVCacheHandle, MemoryRegionKVCacheHandle
 from ..common import nvtx_range
 from ..common.absl_logging import getLogger
 from ..memory import MemoryRegion
@@ -14,8 +14,7 @@ from ..metrics import L2CacheMetrics, MeasurableBase, MetricRecorder
 from ..spec import KVCacheBlockLayout, KVCacheBlockSpec
 from ..status import Status, StatusCodes
 from .connectors import Connector
-from .key_builders import KeyBuilder, MD5Hasher, RollingHashKeyBuilder
-from .marshallers import Marshaller, StringSerializer, TensorSerializer
+from .key_builders import KeyBuilder, RawKeyBuilder
 
 logger = getLogger(__name__)
 
@@ -28,9 +27,6 @@ class L2Cache(MeasurableBase):
         namespace: str,
         block_spec: KVCacheBlockSpec,
         executor: Executor,
-        key_builder: KeyBuilder | None = None,
-        key_serializer: Marshaller | None = None,
-        tensor_serializer: Marshaller | None = None,
         op_batch: int = 8,
         metrics: L2CacheMetrics | None = None,
     ) -> None:
@@ -40,10 +36,8 @@ class L2Cache(MeasurableBase):
             namespace (str): Namespace.
             block_spec (KVCacheBlockSpec): The block spec.
             executor (Executor): The executor.
-            key_builder (KeyBuilder | None): Key builder for cache blocks.
-            key_serializer (Marshaller | None): Key serializer
-            tensor_serializer (Marshaller | None): Tensor serializer
             op_batch (int): The number of ops in a batch.
+            metrics (L2CacheMetrics): metrics recorder.
         """
         super().__init__(metrics)
         self.block_spec: KVCacheBlockSpec = block_spec
@@ -52,9 +46,7 @@ class L2Cache(MeasurableBase):
         self.block_dtype: torch.dtype = self.block_spec.block_dtype
         self.block_ntokens: int = self.block_spec.block_ntokens
         self.block_shape_token_dim: int = self.block_spec.block_shape_token_dim
-        self.key_builder: KeyBuilder = key_builder
-        self.key_serializer: Marshaller = key_serializer
-        self.tensor_serializer: Marshaller = tensor_serializer
+        self.key_builder: KeyBuilder = RawKeyBuilder(self.block_ntokens)
         self.op_batch: int = op_batch
         self._backend: Connector = None
         self._executor: Executor = executor
@@ -70,14 +62,7 @@ class L2Cache(MeasurableBase):
         partition_id = f"h{cat_head_ids}_l{cat_layer_ids}"
         self._backend = Connector.create(backend_name, namespace, partition_id,
                                          executor)
-
-        if self.key_builder is None:
-            self.key_builder = RollingHashKeyBuilder(MD5Hasher(),
-                                                     self.block_ntokens)
-        if self.key_serializer is None:
-            self.key_serializer = StringSerializer()
-        if self.tensor_serializer is None:
-            self.tensor_serializer = TensorSerializer()
+        self._register_descs = []
 
         logger.info("%s is initialized. Using partition_id=%s.", str(self),
                     partition_id)
@@ -99,8 +84,18 @@ class L2Cache(MeasurableBase):
     def close(self) -> Status:
         """Close the cache."""
         if self._backend is not None:
+            for desc in self._register_descs:
+                self._backend.deregister_mr(desc)
             return self._backend.close()
         return Status(StatusCodes.OK)
+
+    def register_mr(self, addr: int, length: int) -> Status:
+        if not self._backend.feature.rdma:
+            raise NotImplementedError
+        status = self._backend.register_mr(addr, length)
+        if not status.is_ok():
+            return status
+        self._register_descs.append(status.value)
 
     @nvtx_range("prefetch", "kv_cache_ol.L2Cache")
     async def prefetch(
@@ -129,8 +124,7 @@ class L2Cache(MeasurableBase):
         return Status(StatusCodes.OK)
 
     async def _prefetch_impl(self, cache_key: str) -> Status:
-        return await self._backend.prefetch(
-            self.key_serializer.marshal(cache_key))
+        return await self._backend.prefetch(cache_key)
 
     @nvtx_range("exists", "kv_cache_ol.L2Cache")
     @MeasurableBase.measure(MetricRecorder.OP.EXISTS)
@@ -155,7 +149,7 @@ class L2Cache(MeasurableBase):
             async with asyncio.TaskGroup() as tg:
                 for real_key, cache_key in key_batch:
                     tasks.append(
-                        tg.create_task(self._exists_impl(real_key, cache_key)))
+                        tg.create_task(self._backend.exists(cache_key)))
 
             if len(tasks) == 0:
                 break
@@ -174,19 +168,6 @@ class L2Cache(MeasurableBase):
             return Status(StatusCodes.NOT_FOUND)
 
         return Status(value=total)
-
-    async def _exists_impl(self, real_key: Iterable[int],
-                           cache_key: str) -> Status:
-        """Check if kv tensors exist in the cache.
-        Args:
-            real_key (Iterable[int]): The key of the kv tensors.
-            cache_key (str): The cache key of the kv tensors.
-        Returns:
-            The kv tensors corresponding to the key.
-        """
-        # NOTE: It might be false positive since we don't use its real key.
-        key = self.key_serializer.marshal(cache_key)
-        return await self._backend.exists(key)
 
     @nvtx_range("put", "kv_cache_ol.L2Cache")
     @MeasurableBase.measure(MetricRecorder.OP.PUT)
@@ -246,13 +227,15 @@ class L2Cache(MeasurableBase):
                      f"number of tokens in key tensors "
                      f"{len(blocks) * self.block_ntokens}."),
                 )
+            if isinstance(kv_tensors, MemoryRegionKVCacheHandle) \
+                and self._backend.feature.gather_scatter:
+                return await self._scatter(prefix, tokens, kv_tensors._mrs)
         else:
             raise ValueError("Unsupported kv tensors type")
 
         # TODO: use mput if backend's mput_mget feature is enabled.
         num_processed_blocks = 0
         block_idx = 0
-        ev = asyncio.get_running_loop()
         for key_batch in self._cache_block_key_batchs(prefix, tokens):
             tasks = []
             num_blocks_in_batch = len(key_batch)
@@ -261,8 +244,7 @@ class L2Cache(MeasurableBase):
                     block = blocks[block_idx]
                     block_idx += 1
                     tasks.append(
-                        tg.create_task(
-                            self._put_impl(real_key, cache_key, block, ev)))
+                        tg.create_task(self._backend.put(cache_key, block)))
 
             if len(tasks) == 0:
                 return Status(StatusCodes.ERROR)
@@ -273,19 +255,10 @@ class L2Cache(MeasurableBase):
             elif num_processed_blocks > 0:
                 # current batch is not the first one.
                 # at least one batch is done successfully, return success.
-
-                # delete current batch
-                for _, cache_key in key_batch:
-                    await self._delete_impl(cache_key)
                 return Status(StatusCodes.OK, num_processed_blocks)
             else:
                 # this is the first batch and at least one block in
                 # current batch is failed, return error.
-
-                # delete current batch
-                for _, cache_key in key_batch:
-                    await self._delete_impl(cache_key)
-
                 failures = [
                     task for task in tasks
                     if task.done() and not task.result().is_ok()
@@ -296,27 +269,49 @@ class L2Cache(MeasurableBase):
 
         return Status(StatusCodes.OK, num_processed_blocks)
 
-    async def _put_impl(
+    async def _scatter(
         self,
-        real_key: Iterable[int],
-        cache_key: str,
-        value: torch.Tensor,
-        ev: asyncio.AbstractEventLoop,
-    ) -> Status:
-        """Put kv tensors to the cache.
-        Args:
-            real_key (Iterable[int]): The key of the kv tensors.
-            cache_key (str): The cache key of the kv tensors.
-            value (torch.Tensor): The kv tensors.
-            ev (asyncio.AbstractEventLoop): The event loop.
-        Returns:
-            The status of the put operation.
-        """
-        key = self.key_serializer.marshal(cache_key)
-        val = await ev.run_in_executor(self._executor,
-                                       self.tensor_serializer.marshal,
-                                       (real_key, value))
-        return await self._backend.put(key, val)
+        prefix: Iterable[int] | None,
+        tokens: Iterable[int],
+        mrs: Iterable[MemoryRegion],
+    ) -> Status[int]:
+        assert mrs is not None
+        keys = self._cache_block_keys(prefix, tokens)
+        cache_keys = [cache_key for _, cache_key in keys]
+        sge_lists = self._backend.get_sge_list(cache_keys, mrs)
+
+        num_processed_blocks = 0
+        for sge_list_batch in itertools.batched(sge_lists, self.op_batch):
+            tasks = []
+            num_blocks_in_batch = 0
+            async with asyncio.TaskGroup() as tg:
+                for sge_list in sge_list_batch:
+                    num_blocks_in_batch += len(sge_list)
+                    tasks.append(
+                        tg.create_task(self._backend.scatter(sge_list)))
+
+            if len(tasks) == 0:
+                return Status(StatusCodes.ERROR)
+            elif all(task.done() and task.result().is_ok() for task in tasks):
+                # all success, continue to the next batch
+                num_processed_blocks += num_blocks_in_batch
+                continue
+            elif num_processed_blocks > 0:
+                # current batch is not the first one.
+                # at least one batch is done successfully, return success.
+                return Status(StatusCodes.OK, num_processed_blocks)
+            else:
+                # this is the first batch and at least one block in
+                # current batch is failed, return error.
+                failures = [
+                    task for task in tasks
+                    if task.done() and not task.result().is_ok()
+                ]
+                if len(failures) > 0:
+                    return failures[0].result()
+                return Status(StatusCodes.ERROR)
+
+        return Status(StatusCodes.OK, num_processed_blocks)
 
     @nvtx_range("get", "kv_cache_ol.L2Cache")
     @MeasurableBase.measure(MetricRecorder.OP.GET)
@@ -324,27 +319,40 @@ class L2Cache(MeasurableBase):
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-    ) -> Status[Iterable[torch.Tensor]]:
+        mrs: Iterable[MemoryRegion] = None,
+    ) -> Status[Iterable[torch.Tensor | MemoryRegion]]:
         """Get kv tensors from the cache.
         Args:
             prefix (Iterable[int] | None): The prefix tokens of the kv tensors.
             tokens (Iterable[int]): The tokens of the kv tensors.
+            mrs (Iterable[MemoryRegion]): Memory regions to place the fetched
+                                          kv tensors.
         Returns:
             The kv tensors corresponding to the tokens.
         """
         if prefix is not None and len(prefix) % self.block_ntokens != 0:
             return Status(StatusCodes.INVALID)
 
+        if mrs is not None:
+            assert len(mrs) == len(tokens) // self.block_ntokens
+            if self._backend.feature.gather_scatter:
+                return await self._gather(prefix, tokens, mrs)
+
+        use_rdma = self._backend.feature.rdma
         # TODO: use mget if backend's mput_mget feature is enabled.
         tensors = []
-        ev = asyncio.get_running_loop()
+        offset = 0
         for key_batch in self._cache_block_key_batchs(prefix, tokens):
             tasks = []
             async with asyncio.TaskGroup() as tg:
+                tid = 0
                 for real_key, cache_key in key_batch:
+                    mr = mrs[offset + tid] if mrs is not None else None
+                    tid += 1  # noqa: SIM113
+
                     tasks.append(
                         tg.create_task(self._get_impl(real_key, cache_key,
-                                                      ev)))
+                                                      mr)))
 
             if len(tasks) == 0:
                 break
@@ -354,42 +362,83 @@ class L2Cache(MeasurableBase):
                 if not tasks[i].done() or not tasks[i].result().is_ok():
                     should_break = True
                     break
-                tensors.append(tasks[i].result().value)
+                if use_rdma:
+                    tensors.append(mrs[offset + i])
+                else:
+                    tensors.append(tasks[i].result().value)
 
             if should_break:
                 break
+
+            offset += self.op_batch
 
         if len(tensors) == 0:
             return Status(StatusCodes.NOT_FOUND)
 
         return Status(value=tensors)
 
+    async def _gather(
+        self,
+        prefix: Iterable[int] | None,
+        tokens: Iterable[int],
+        mrs: Iterable[MemoryRegion],
+    ) -> Status[Iterable[MemoryRegion]]:
+        assert mrs is not None
+        keys = self._cache_block_keys(prefix, tokens)
+        cache_keys = [cache_key for _, cache_key in keys]
+        sge_lists = self._backend.get_sge_list(cache_keys, mrs)
+
+        succ_total = 0
+        for sge_list_batch in itertools.batched(sge_lists, self.op_batch):
+            tasks = []
+            async with asyncio.TaskGroup() as tg:
+                for sge_list in sge_list_batch:
+                    tasks.append(tg.create_task(
+                        self._backend.gather(sge_list)))
+
+            if len(tasks) == 0:
+                break
+
+            should_break = False
+            for i in range(len(tasks)):
+                if not tasks[i].done() or not tasks[i].result().is_ok():
+                    should_break = True
+                    break
+                succ_total += len(sge_list_batch[i])
+
+            if should_break:
+                break
+
+        if succ_total == 0:
+            return Status(StatusCodes.NOT_FOUND)
+
+        return Status(value=mrs[:succ_total])
+
     async def _get_impl(
         self,
         real_key: Iterable[int],
         cache_key: str,
-        ev: asyncio.AbstractEventLoop,
+        mr: MemoryRegion,
     ) -> Status[torch.Tensor]:
         """Get kv tensors from the backend.
         Args:
             real_key (Iterable[int]): The key of the kv tensors.
             cache_key (str): The cache key of the kv tensors.
-            ev (asyncio.AbstractEventLoop): The event loop.
+            mr (MemoryRegion): The memory region to place the fetched
+                               kv tensor.
         Returns:
             The kv tensors corresponding to the key.
         """
-        status = await self._backend.get(self.key_serializer.marshal(cache_key)
-                                         )
-        if status.is_ok():
-            fetched_key, tensor = await ev.run_in_executor(
-                self._executor, self.tensor_serializer.unmarshal, status.value)
-            if real_key != fetched_key:
-                # key not match
-                return Status(StatusCodes.NOT_FOUND)
-            return Status(
-                value=tensor.view(self.block_dtype).view(self.block_shape))
+        if mr is None:
+            status = await self._backend.get(cache_key)
+            if status.is_ok():
+                tensor = status.value
+                return Status(
+                    value=tensor.view(self.block_dtype).view(self.block_shape))
+            else:
+                return status
         else:
-            return Status(StatusCodes.NOT_FOUND)
+            return await self._backend.get(cache_key, mr)
 
     @nvtx_range("delete", "kv_cache_ol.L2Cache")
     async def delete(self, prefix: Iterable[int] | None,
@@ -405,12 +454,8 @@ class L2Cache(MeasurableBase):
             return Status(StatusCodes.INVALID)
 
         for _, cache_key in self._cache_block_keys(prefix, tokens):
-            await self._delete_impl(cache_key)
+            await self._backend.delete(cache_key)
         return Status(StatusCodes.OK)
-
-    async def _delete_impl(self, cache_key: str) -> Status:
-        return await self._backend.delete(
-            self.key_serializer.marshal(cache_key))
 
     def _cache_block_keys(
             self, prefix: Iterable[int] | None,

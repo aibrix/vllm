@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_OL_L2_CACHE_BACKEND: str = ""
     VLLM_KV_CACHE_OL_L2_CACHE_NAMESPACE: str = "dummy"
     VLLM_KV_CACHE_OL_L2_CACHE_COMPRESSION: str = ""
-    VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH: int = 8
+    VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH: int = 32
     VLLM_KV_CACHE_OL_L2_CACHE_PER_TOKEN_TIMEOUT_MS: int = 20
 
     # Ingestion type, only applicable if L1 cache is enabled. Defaults to "HOT".
@@ -52,6 +52,10 @@ if TYPE_CHECKING:
 
     VLLM_KV_CACHE_OL_L2_CACHE_NUM_ASYNC_WORKERS: int = 8
 
+    # Mock Connector
+    VLLM_KV_CACHE_OL_MOCK_USE_RDMA: bool = False
+    VLLM_KV_CACHE_OL_MOCK_USE_GATHER_SCATTER: bool = False
+
     # RocksDB Env Vars
     VLLM_KV_CACHE_OL_ROCKSDB_ROOT: str = os.path.expanduser(
         os.path.join(os.path.expanduser("~"), ".kv_cache_ol", "rocksdb"))
@@ -61,6 +65,15 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_OL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER: int = 3
     VLLM_KV_CACHE_OL_ROCKSDB_MAX_TOTAL_WAL_SIZE: int = 128 * 1024 * 1024
     VLLM_KV_CACHE_OL_ROCKSDB_MAX_BACKGROUND_JOBS: int = 8
+
+    # InfiniStore Env Vars
+    VLLM_KV_CACHE_OL_INFINISTORE_HOST_ADDR: str = "127.0.0.1"
+    VLLM_KV_CACHE_OL_INFINISTORE_SERVICE_PORT: int = 12345
+    VLLM_KV_CACHE_OL_INFINISTORE_CONNECTION_TYPE: str = "RDMA"
+    VLLM_KV_CACHE_OL_INFINISTORE_IB_PORT: int = 1
+    VLLM_KV_CACHE_OL_INFINISTORE_LINK_TYPE: str = "Ethernet"
+    VLLM_KV_CACHE_OL_INFINISTORE_DEV_NAME: str = "mlx5_0"
+    VLLM_KV_CACHE_OL_INFINISTORE_USE_GDR: bool = True
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -126,7 +139,7 @@ kv_cache_ol_environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_KV_CACHE_OL_L2_CACHE_COMPRESSION", "").strip().upper()),
     "VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH":
-    lambda: int(os.getenv("VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH", "8")),
+    lambda: int(os.getenv("VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH", "32")),
     "VLLM_KV_CACHE_OL_L2_CACHE_PER_TOKEN_TIMEOUT_MS":
     lambda: int(
         os.getenv("VLLM_KV_CACHE_OL_L2_CACHE_PER_TOKEN_TIMEOUT_MS", "20")),
@@ -139,6 +152,14 @@ kv_cache_ol_environment_variables: Dict[str, Callable[[], Any]] = {
                   "2048")),
     "VLLM_KV_CACHE_OL_L2_CACHE_NUM_ASYNC_WORKERS":
     lambda: int(os.getenv("VLLM_KV_CACHE_OL_L2_CACHE_NUM_ASYNC_WORKERS", "8")),
+    # ================== Mock Connector Env Vars ==================
+    "VLLM_KV_CACHE_OL_MOCK_USE_RDMA":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_MOCK_USE_RDMA", "0").strip().lower() in
+     ("1", "true")),
+    "VLLM_KV_CACHE_OL_MOCK_USE_GATHER_SCATTER":
+    lambda: (os.getenv("VLLM_KV_CACHE_OL_MOCK_USE_GATHER_SCATTER", "0").strip(
+    ).lower() in ("1", "true")),
     # ================== RocksDB Env Vars ==================
     "VLLM_KV_CACHE_OL_ROCKSDB_ROOT":
     lambda: os.path.expanduser(
@@ -170,6 +191,28 @@ kv_cache_ol_environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_KV_CACHE_OL_ROCKSDB_MAX_BACKGROUND_JOBS":
     lambda: int(os.getenv("VLLM_KV_CACHE_OL_ROCKSDB_MAX_BACKGROUND_JOBS", "8")
                 ),
+    # ================== InfiniStore Env Vars ==================
+    "VLLM_KV_CACHE_OL_INFINISTORE_HOST_ADDR":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_HOST_ADDR", "127.0.0.1").strip()),
+    "VLLM_KV_CACHE_OL_INFINISTORE_SERVICE_PORT":
+    lambda: int(os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_SERVICE_PORT", "12345")
+                ),
+    "VLLM_KV_CACHE_OL_INFINISTORE_CONNECTION_TYPE":
+    lambda: (os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_CONNECTION_TYPE", "RDMA").
+             strip().upper()),
+    "VLLM_KV_CACHE_OL_INFINISTORE_IB_PORT":
+    lambda: int(os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_IB_PORT", "12345")),
+    "VLLM_KV_CACHE_OL_INFINISTORE_LINK_TYPE":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_LINK_TYPE", "Ethernet").strip()),
+    "VLLM_KV_CACHE_OL_INFINISTORE_DEV_NAME":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_DEV_NAME", "mlx5_0").strip()),
+    "VLLM_KV_CACHE_OL_INFINISTORE_USE_GDR":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_USE_GDR", "1").strip().lower() in
+     ("1", "true")),
 }
 
 # end-env-vars-definition

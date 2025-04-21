@@ -10,7 +10,12 @@ def tensor_to_bytes(tensor: torch.Tensor) -> bytes:
     """Convert a PyTorch tensor (CPU/GPU) to raw bytes."""
     if tensor.is_cuda:
         tensor = tensor.cpu()  # Move to CPU if on GPU
-    return tensor.numpy().tobytes()
+    return tensor.view(torch.uint8).numpy().tobytes()
+
+
+def bytes_to_tensor(data: bytes) -> torch.Tensor:
+    """Convert raw bytes to a PyTorch tensor."""
+    return torch.frombuffer(data, dtype=torch.uint8)
 
 
 def in_place_pin_memory(x: torch.Tensor) -> torch.Tensor:

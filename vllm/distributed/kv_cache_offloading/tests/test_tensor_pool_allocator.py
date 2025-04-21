@@ -3,102 +3,96 @@ import random
 
 import pytest
 
-from ..memory import MemoryRegion, TensorPoolAllocator
+from ..memory import TensorPoolAllocator
 
 
 @pytest.fixture
 def allocator():
+    # use a small slab size for testing
+    TensorPoolAllocator.SLAB_MAX_NBYTES = 1024
     return TensorPoolAllocator(1024 * 1024, 16)
 
 
 def test_basic_allocation(allocator):
     """Test basic allocation and deallocation."""
+    assert allocator.num_memory_regions == 1024
     size = 1024
     status = allocator.alloc(size)
     allocator.assert_consistency()
     assert status.is_ok()
     assert len(allocator) == size
-    mr = status.value
-    assert mr.length == size
-    assert allocator.num_memory_regions == 1
-    mr.ref_down()  # Trigger garbage collection
+    mrs = status.value
+    assert len(mrs) == size // allocator.mr_nbytes
+    assert sum([mr.length for mr in mrs]) == size
+    assert allocator.num_memory_regions == 1023
+    [mr.ref_down() for mr in mrs]  # Trigger garbage collection
     assert len(allocator) == 0
     allocator.assert_consistency()
-    assert allocator.num_memory_regions == 1
+    assert allocator.num_memory_regions == 1024
+
+
+def test_allocating_large(allocator):
+    """Test allocating with a size larger than the slab size."""
+    assert allocator.num_memory_regions == 1024
+    size = 1024 * 2 + 256
+    status = allocator.alloc(size)
+    allocator.assert_consistency()
+    assert status.is_ok()
+    assert len(allocator) == size
+    mrs = status.value
+    assert len(mrs) == size // allocator.mr_nbytes
+    assert sum([mr.length for mr in mrs]) == size
+    assert allocator.num_memory_regions == 1022
+    [mr.ref_down() for mr in mrs]  # Trigger garbage collection
+    assert len(allocator) == 0
+    allocator.assert_consistency()
+    assert allocator.num_memory_regions == 1024
 
 
 def test_coalescing_mechanism(allocator):
     """Test memory coalescing when MRs are deallocated."""
-    size1, size2, size3 = 1024, 2048, 1024
+    assert allocator.num_memory_regions == 1024
+    size1, size2, size3 = 128, 512, 128
 
     # Allocate three MRs
     status1 = allocator.alloc(size1)
-    assert allocator.num_memory_regions == 1
+    assert allocator.num_memory_regions == 1024
     status2 = allocator.alloc(size2)
-    assert allocator.num_memory_regions == 1
+    assert allocator.num_memory_regions == 1024
     status3 = allocator.alloc(size3)
-    assert allocator.num_memory_regions == 1
+    assert allocator.num_memory_regions == 1024
 
     assert status1.is_ok()
     assert status2.is_ok()
     assert status3.is_ok()
     assert len(allocator) == size1 + size2 + size3
 
-    mr1 = status1.value
-    assert mr1.length == size1
-    mr2 = status2.value
-    assert mr2.length == size2
-    mr3 = status3.value
-    assert mr3.length == size3
+    mrs1 = status1.value
+    assert len(mrs1) == size1 // allocator.mr_nbytes
+    assert sum([mr.length for mr in mrs1]) == size1
+    mrs2 = status2.value
+    assert len(mrs2) == size2 // allocator.mr_nbytes
+    assert sum([mr.length for mr in mrs2]) == size2
+    mrs3 = status3.value
+    assert len(mrs3) == size3 // allocator.mr_nbytes
+    assert sum([mr.length for mr in mrs3]) == size3
 
     # Free the middle allocation first
-    mr2.ref_down()
+    [mr.ref_down() for mr in mrs2]
     allocator.assert_consistency()
-    assert allocator.num_memory_regions == 2
+    assert allocator.num_memory_regions == 1025
 
     # Free the first and last allocations
-    mr1.ref_down()
+    [mr.ref_down() for mr in mrs1]
     allocator.assert_consistency()
-    # mr1 got merged with mr2
-    assert allocator.num_memory_regions == 2
-    mr3.ref_down()
+    # mrs1 got merged with mrs2
+    assert allocator.num_memory_regions == 1025
+    [mr.ref_down() for mr in mrs3]
     allocator.assert_consistency()
     # all memory regions got merged into one
-    assert allocator.num_memory_regions == 1
+    assert allocator.num_memory_regions == 1024
 
     assert len(allocator) == 0
-
-
-def test_split(allocator):
-    """Test split."""
-    size = 1024
-    status = allocator.alloc(size)
-    allocator.assert_consistency()
-    assert status.is_ok()
-    assert len(allocator) == size
-    mr = status.value
-    assert mr.length == size
-    assert allocator.num_memory_regions == 1
-
-    mrs = list(MemoryRegion.split(mr, 16))
-    mr.ref_down()
-    assert len(allocator) == 1024
-
-    used = 1024
-    addr = mr.addr
-    for i in range(len(mrs)):
-        assert addr == mrs[i].addr
-        assert mrs[i].length == 16
-        mrs[i].ref_down()  # Trigger garbage collection
-        used -= 16
-        addr += 16
-        assert len(allocator) == used
-
-        allocator.assert_consistency()
-        if i < len(mrs) - 1:
-            assert allocator.num_memory_regions == 2
-        else:
-            assert allocator.num_memory_regions == 1
 
 
 def test_out_of_memory(allocator):
@@ -125,10 +119,9 @@ def test_stress_allocation(allocator, rseed):
         size = sizes[i % len(sizes)]
         status = allocator.alloc(size)
         assert status.is_ok()
-        mr = status.value
-        mrs.append(mr)
+        mrs.extend(status.value)
         allocated_size += size
-        assert mr.length == size
+        assert sum([mr.length for mr in status.value]) == size
         assert len(allocator) == allocated_size
         allocator.assert_consistency()
 

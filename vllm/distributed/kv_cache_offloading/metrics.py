@@ -137,19 +137,6 @@ class MetricRecorder(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def trace_usage(
-        self,
-        resource: Resource,
-        used: int,
-    ) -> None:
-        """Track the resource usage.
-        Args:
-            resource: The resource type.
-            used: Used size.
-        """
-        raise NotImplementedError
-
 
 class OpMetrics(Metrics):
     """Op metrics."""
@@ -205,7 +192,9 @@ class OpMetrics(Metrics):
         self.num_ops += 1
         if self._is_error(status):
             self.num_errors += 1
-            self.num_errors_by_reason[status.error_code.lower()] += 1
+            error_key = status.error_code.lower()
+            prev = self.num_errors_by_reason.get(error_key, 0)
+            self.num_errors_by_reason[error_key] = prev + 1
         elif self._is_get() and status.is_ok():
             if isinstance(status.value, tuple):
                 num_fetched_tokens = status.value[0]

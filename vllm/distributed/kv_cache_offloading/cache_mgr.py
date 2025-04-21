@@ -16,12 +16,11 @@ import uvloop
 from . import envs
 from .cache_handle import (KVCacheHandle, MemoryRegionKVCacheHandle,
                            ObjectPoolKVCacheHandle)
-from .common import ObjectPool, nvtx_range
+from .common import nvtx_range
 from .common.absl_logging import getLogger, log_every_n_seconds
 from .config import KVCacheConfig
 from .l1 import L1Cache
-from .l2 import (L2Cache, MD5Hasher, RollingHashKeyBuilder, StringSerializer,
-                 TensorSerializer, ZstdCompressor)
+from .l2 import L2Cache
 from .memory import MemoryRegion, TensorPoolAllocator
 from .metrics import KVCacheMetrics, MeasurableBase, MetricRecorder
 from .spec import KVCacheBlockLayout, KVCacheBlockSpec
@@ -38,11 +37,9 @@ class KVCacheFeature:
     """The features of the kv cache.
     Args:
         zero_copy: Whether the kv cache supports zero-copy.
-        non_blocking_put: Whether the kv cache uses non-blocking put.
     """
 
     zero_copy: bool = False
-    non_blocking_put: bool = False
 
 
 class KVCacheManager(ABC):
@@ -268,7 +265,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         self._infight_cv: threading.Condition = None
         self._l2_inflight_writes: int = 0
         self._l2_inflight_quota: int = 0
-        self._inflight_pool: ObjectPool = None
+        self._allocator: TensorPoolAllocator = None
         self._metrics: KVCacheMetrics = None
 
         self._double_get_threshold: Tuple[
@@ -316,22 +313,22 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         # init MeasurableBase
         MeasurableBase.__init__(self, self._metrics.mgr)
 
+        self._allocator = TensorPoolAllocator(
+            self.block_nbytes,
+            device=device,
+            pin_memory=pin_memory,
+        )
+
         if enable_l1:
             eviction_policy: str = (
                 envs.VLLM_KV_CACHE_OL_L1_CACHE_EVICTION_POLICY)
             evict_size: int = envs.VLLM_KV_CACHE_OL_L1_CACHE_EVICT_SIZE
-
-            allocator: TensorPoolAllocator = TensorPoolAllocator(
-                capacity * self.block_nbytes,
-                self.block_nbytes,
-                device=device,
-                pin_memory=pin_memory,
-            )
+            self._allocator.increase(capacity * self.block_nbytes)
 
             self._l1_cache = L1Cache(
                 eviction_policy,
                 capacity,
-                allocator,
+                self._allocator,
                 self.block_spec,
                 evict_size,
                 metrics=self._metrics.l1,
@@ -340,7 +337,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         if enable_l2:
             backend_name: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_BACKEND
             namespace: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_NAMESPACE
-            compression: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_COMPRESSION
+            # compression: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_COMPRESSION
             ingestion_type: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_TYPE
             op_batch: int = envs.VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH
             self._executor = ThreadPoolExecutor(
@@ -350,44 +347,39 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                 envs.VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS //
                 self.block_ntokens)
 
-            tensor_creator = lambda: torch.empty(
-                self.block_shape,
-                dtype=self.block_dtype,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if self._l1_cache is None and self._l2_inflight_quota > 0:
-                self._inflight_pool = ObjectPool(
-                    object_creator=tensor_creator,
-                    max_pool_size=self._l2_inflight_quota,
-                    min_pool_size=self._l2_inflight_quota // 3,
-                )
-            elif self._l1_cache is None:
-                fixed_size = self._chunk_size // self.block_ntokens
-                self._inflight_pool = ObjectPool(
-                    object_creator=tensor_creator,
-                    max_pool_size=fixed_size,
-                    min_pool_size=fixed_size,
-                )
-
-            key_builder = RollingHashKeyBuilder(MD5Hasher(),
-                                                self.block_ntokens)
-            key_serializer = StringSerializer()
-            tensor_serializer = TensorSerializer()
-            if len(compression) > 0 and compression == "ZSTD":
-                tensor_serializer = ZstdCompressor(tensor_serializer)
-
             self._l2_cache = L2Cache(
                 backend_name=backend_name,
                 namespace=namespace,
                 block_spec=self.block_spec,
                 executor=self._executor,
-                key_builder=key_builder,
-                key_serializer=key_serializer,
-                tensor_serializer=tensor_serializer,
                 op_batch=op_batch,
                 metrics=self._metrics.l2,
             )
+
+            if self._l2_inflight_quota > 0:
+                more_capacity = (
+                    self._l2_inflight_quota * self.block_nbytes \
+                        // self.block_ntokens
+                )
+            else:
+                more_capacity = self.block_nbytes
+
+            if self._l2_cache._backend.feature.rdma:
+                more_capacity += (
+                    self._chunk_size * self.block_nbytes \
+                        // self.block_nbytes
+                )
+
+            self._allocator.increase(more_capacity)
+
+            if self._l2_cache._backend.feature.rdma:
+                for slab in self._allocator._slabs:
+                    status = self._l2_cache.register_mr(
+                        slab.data_ptr(), slab.numel())
+                    if not status.is_ok():
+                        logger.fatal(
+                            f"Failed to register slab with "
+                            f"{self._l2_cache._backend.name}'s register func")
 
             # new an event loop to carry out L2Cache ops
             self._event_loop = asyncio.new_event_loop()
@@ -424,13 +416,9 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         Returns:
             The feature of the kv cache.
         """
-        if self._l1_cache is not None:
+        if self._l1_cache is not None or \
+            self._l2_cache._backend.feature.rdma:
             return KVCacheFeature(zero_copy=True)
-        # TODO: enable zero-copy if the L2Cache supports it.
-        # elif self._l2_cache._backend.feature.zero_copy:
-        #     return KVCacheFeature(zero_copy=True)
-        if self._l2_inflight_quota > 0:
-            return KVCacheFeature(non_blocking_put=True)
         return KVCacheFeature()
 
     @property
@@ -812,6 +800,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                 return l1_status
 
         assert self._l2_cache is not None
+        use_rdma = self._l2_cache._backend.feature.rdma
         # fetch missing kv tensors from L2Cache
         prefix_curr = [t for t in prefix] if prefix is not None else []
         prefix_curr.extend(tokens[:num_fetched_blocks * self.block_ntokens])
@@ -819,12 +808,25 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         timeout_s = (num_missing_blocks * self.block_ntokens *
                      self._l2_cache_per_token_timeout_ms) / 1000
 
+        mrs = None
+        if use_rdma:
+            nblocks_curr = len(tokens_curr) // self.block_ntokens
+            status = self._allocator.alloc(nblocks_curr * self.block_nbytes)
+            if not status.is_ok():
+                return status if num_fetched_blocks == 0 else l1_status
+            mrs = status.value
         future = asyncio.run_coroutine_threadsafe(
-            self._l2_cache.get(prefix_curr, tokens_curr), self._event_loop)
+            self._l2_cache.get(prefix_curr, tokens_curr, mrs),
+            self._event_loop)
         try:
             status = future.result(timeout=timeout_s)
             if not status.is_ok():
+                if use_rdma:
+                    self._release(mrs)
                 return status if num_fetched_blocks == 0 else l1_status
+
+            if use_rdma:
+                self._release(mrs[len(status.value):])
 
             # put the fetched kv tensors to L1Cache
             if self._l1_cache is not None:
@@ -832,14 +834,17 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                 self._l1_cache.put(prefix_curr, tokens_curr, status.value)
 
             if zero_copy:
-                assert self._l1_cache is not None
-                # get the cache handles
-                acquire_status = self._l1_cache.acquire(
-                    prefix_curr, tokens_curr)
-                if acquire_status.is_ok():
-                    return Status(value=fetched_mrs + acquire_status.value)
+                if use_rdma:
+                    self._release(mrs[len(status.value):])
+                    return Status(value=fetched_mrs + status.value)
                 else:
-                    return Status(value=fetched_mrs)
+                    # get the cache handles
+                    acquire_status = self._l1_cache.acquire(
+                        prefix_curr, tokens_curr)
+                    if acquire_status.is_ok():
+                        return Status(value=fetched_mrs + acquire_status.value)
+                    else:
+                        return Status(value=fetched_mrs)
 
             return Status(value=fetched_mrs + status.value)
         except asyncio.CancelledError:
@@ -938,19 +943,22 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         """
         if self._l1_cache is not None:
             status = self._l1_cache.allocate(nblocks)
-            if not status.is_ok():
-                return status
-            return Status(value=MemoryRegionKVCacheHandle(
-                self.block_dtype, self.block_shape, status.value))
-        elif self._inflight_pool is not None:
-            tensors = self._inflight_pool.get(nblocks)
-            if tensors is None:
-                return Status(StatusCodes.OUT_OF_MEMORY)
-            return Status(
-                value=ObjectPoolKVCacheHandle(tensors, self._inflight_pool))
+        elif self._l2_inflight_quota > 0:
+            # l2 cache only, async put: returns OOM if no inflight quota
+            status = None
+            with self._lock:
+                if self._l2_inflight_writes >= self._l2_inflight_quota:
+                    status = Status(StatusCodes.OUT_OF_MEMORY)
+            if status is None:
+                status = self._allocator.alloc(self.block_nbytes * nblocks)
+        else:
+            # l2 cache only, sync put
+            status = self._allocator.alloc(self.block_nbytes * nblocks)
 
-        # no l1 cache and async put is not enabled
-        raise NotImplementedError
+        if not status.is_ok():
+            return status
+        return Status(value=MemoryRegionKVCacheHandle(
+            self.block_dtype, self.block_shape, status.value))
 
     @nvtx_range("put", "KVCacheManager")
     @MeasurableBase.measure(MetricRecorder.OP.PUT)

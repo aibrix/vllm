@@ -7,14 +7,13 @@ import pytest
 import torch
 
 from ..l2.connectors.rocksdb import RocksDBConnector
-from ..l2.marshallers import StringSerializer, TensorSerializer, ZstdCompressor
+from ..l2.marshallers import StringSerializer
 
 TEMP_ROOT = os.path.join(os.path.expanduser("."), ".test_rocksdb")
 TEMP_FILE = os.path.join(os.path.expanduser(TEMP_ROOT), "test")
 CACHE_SHAPE = (16, 2, 8, 64)
 
 key_serializer_g = StringSerializer()
-tensor_serializer_g = ZstdCompressor(TensorSerializer())
 
 
 @pytest.fixture
@@ -52,41 +51,13 @@ async def test_put_and_get(rocksdb):
     key = "-".join(str(i) for i in range(32))
     kv_tensors = torch.randn(32, *CACHE_SHAPE[1:], dtype=torch.bfloat16)
 
-    put_status = await cache.put(key_serializer_g.marshal(key),
-                                 tensor_serializer_g.marshal(kv_tensors))
+    put_status = await cache.put(key_serializer_g.marshal(key), kv_tensors)
     assert put_status.is_ok()
 
     get_status = await cache.get(key_serializer_g.marshal(key))
     assert get_status.is_ok()
     assert torch.equal(
-        tensor_serializer_g.unmarshal(get_status.value).view(
-            kv_tensors.dtype).view(kv_tensors.shape),
-        kv_tensors,
-    )
-
-
-@pytest.mark.asyncio
-async def test_put_and_get_with_key(rocksdb):
-    cache = rocksdb
-    assert cache.open().is_ok()
-
-    key = [i for i in range(32)]
-    key_str = "-".join(str(i) for i in key)
-    kv_tensors = torch.randn(32, *CACHE_SHAPE[1:], dtype=torch.bfloat16)
-
-    put_status = await cache.put(
-        key_serializer_g.marshal(key_str),
-        tensor_serializer_g.marshal((key, kv_tensors)),
-    )
-    assert put_status.is_ok()
-
-    get_status = await cache.get(key_serializer_g.marshal(key_str))
-    assert get_status.is_ok()
-    fetched_key, fetched_kv_tensors = tensor_serializer_g.unmarshal(
-        get_status.value)
-    assert fetched_key == key
-    assert torch.equal(
-        fetched_kv_tensors.view(kv_tensors.dtype).view(kv_tensors.shape),
+        get_status.value.view(kv_tensors.dtype).view(kv_tensors.shape),
         kv_tensors,
     )
 
@@ -98,16 +69,13 @@ async def test_put_update_existing(rocksdb):
 
     key, value = "key1", torch.tensor([1, 2, 3])
     new_value = torch.tensor([9, 10, 11])
-    put_status = await cache.put(key_serializer_g.marshal(key),
-                                 tensor_serializer_g.marshal(value))
-    put_status = await cache.put(key_serializer_g.marshal(key),
-                                 tensor_serializer_g.marshal(new_value))
+    put_status = await cache.put(key_serializer_g.marshal(key), value)
+    put_status = await cache.put(key_serializer_g.marshal(key), new_value)
     assert put_status.is_ok()
     get_status = await cache.get(key_serializer_g.marshal(key))
     assert get_status.is_ok()
     assert torch.equal(
-        tensor_serializer_g.unmarshal(get_status.value).view(
-            new_value.dtype).view(new_value.shape),
+        get_status.value.view(new_value.dtype).view(new_value.shape),
         new_value,
     )
 
@@ -118,8 +86,7 @@ async def test_delete(rocksdb):
     assert cache.open().is_ok()
 
     key, value = "key1", torch.tensor([1, 2, 3])
-    put_status = await cache.put(key_serializer_g.marshal(key),
-                                 tensor_serializer_g.marshal(value))
+    put_status = await cache.put(key_serializer_g.marshal(key), value)
     assert put_status.is_ok()
     delete_status = await cache.delete(key_serializer_g.marshal(key))
     assert delete_status.is_ok()
@@ -133,5 +100,5 @@ async def test_delete_empty(rocksdb):
     assert cache.open().is_ok()
 
     key = "nonexistent"
-    await cache.delete(key_serializer_g.marshal(key)
-                       )  # Should not raise an error
+    # Should not raise an error
+    await cache.delete(key_serializer_g.marshal(key))

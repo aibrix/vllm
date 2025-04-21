@@ -9,7 +9,7 @@ import numpy as np
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
-from vllm.distributed import get_kv_transfer_group
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger

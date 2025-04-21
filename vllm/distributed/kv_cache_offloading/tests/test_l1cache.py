@@ -12,6 +12,8 @@ from .conftest import CACHE_DTYPE
 
 def get_allocator(capacity, shape, dtype):
     mr_nbytes = torch.Size(shape).numel() * dtype.itemsize
+    # use a small slab size for testing
+    TensorPoolAllocator.SLAB_MAX_NBYTES = mr_nbytes * 8
     capacity_nbytes = capacity * mr_nbytes
     allocator = TensorPoolAllocator(capacity_nbytes=capacity_nbytes,
                                     mr_nbytes=mr_nbytes)

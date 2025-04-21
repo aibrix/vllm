@@ -12,6 +12,7 @@ from .ref_counted_obj import RefCountedObj
 
 @dataclass
 class MemoryRegionIntl:
+    slab: torch.Tensor
     addr: int
     length: int
 
@@ -24,7 +25,8 @@ class MemoryRegionIntl:
         if src is None or dst is None:
             return False
 
-        return src.addr == dst.addr + dst.length
+        return src.slab.data_ptr() == dst.slab.data_ptr(
+        ) and src.addr == dst.addr + dst.length
 
     @staticmethod
     def expand(mr: "MemoryRegionIntl", expand_size: int) -> "MemoryRegionIntl":
@@ -47,22 +49,31 @@ class MemoryRegion(RefCountedObj):
     def __init__(
         self,
         allocator: "TensorPoolAllocator",
+        slab: torch.Tensor,
         addr: int,
         len: int,
     ) -> None:
         super().__init__()
         assert allocator is not None
         self.allocator = allocator
+        self.slab = slab
         self.addr = addr
         self.length = len
         self._use_finalizer = True
 
     def __repr__(self) -> str:
-        return (f"MemoryRegion(addr={self.addr}, length={self.length}, "
-                f"ref={self.ref_count})")
+        return (f"MemoryRegion(addr={self.slab.data_ptr() + self.addr}, "
+                f"length={self.length}, ref={self.ref_count})")
 
     def __str__(self) -> str:
         return self.__repr__()
+
+    def __memoryview__(self):
+        """Memoryview protocol support"""
+        return memoryview(self.slab[self.addr:self.addr + self.length].numpy())
+
+    def data_ptr(self) -> int:
+        return self.slab.data_ptr() + self.addr
 
     @staticmethod
     def split(mr: "MemoryRegion",
@@ -82,19 +93,19 @@ class MemoryRegion(RefCountedObj):
         with mr._lock:
             mr._use_finalizer = False
             return tuple(
-                MemoryRegion(mr.allocator, mr.addr + offset, split_size)
+                MemoryRegion(mr.allocator, mr.slab, mr.addr +
+                             offset, split_size)
                 for offset in range(0, mr.length, split_size))
 
     def destroy_unsafe(self):
         if self._use_finalizer:
-            self.allocator._finalize_mr(self.addr, self.length)
+            self.allocator._finalize_mr(self.slab, self.addr, self.length)
 
     def to_tensor(self, mr_dtype: torch.dtype,
                   mr_shape: Tuple[int, ...]) -> torch.Tensor:
         """Convert MR to tensor"""
-        return (self.allocator._buffer[self.addr:self.addr +
-                                       self.length].view(mr_dtype).view(
-                                           *mr_shape))
+        return (self.slab[self.addr:self.addr +
+                          self.length].view(mr_dtype).view(*mr_shape))
 
     @staticmethod
     def to_tensors(
@@ -112,27 +123,24 @@ class MemoryRegion(RefCountedObj):
 
 
 class TensorPoolAllocator:
+    SLAB_MAX_NBYTES = 1 * 1024**3  # 1GB in bytes
 
     def __init__(
         self,
-        capacity_nbytes: int,
         mr_nbytes: int,
+        capacity_nbytes: int = 0,
         device: str = "cpu",
         pin_memory: bool = False,
     ) -> None:
         """Initialize the tensor pool allocator.
         Args:
-            capacity_nbytes: The capacity of the allocator in bytes.
             mr_nbytes: The size of the memory region in bytes.
+            capacity_nbytes: The capacity of the allocator in bytes.
             device: The device to allocate the memory on.
             pin_memory: Whether to pin the memory.
         """
-        assert capacity_nbytes > 0, "capacity_nbytes must be greater than 0"
         assert mr_nbytes > 0, "mr_nbytes must be greater than 0"
         assert mr_nbytes % 2 == 0, "mr_nbytes must be a multiple of 2"
-        assert (
-            capacity_nbytes %
-            mr_nbytes == 0), "capacity_nbytes must be a multiple of mr_nbytes"
 
         self.capacity_nbytes: int = capacity_nbytes
         self._used_nbytes: int = 0
@@ -140,22 +148,17 @@ class TensorPoolAllocator:
         self.device: str = "cpu" if device is None else device
         self.pin_memory: bool = pin_memory
 
-        # Internal buffer
-        self._buffer: torch.Tensor = torch.empty(
-            self.capacity_nbytes,
-            dtype=torch.uint8,
-            device=self.device,
-            pin_memory=self.pin_memory,
-        )
-
-        init_mr = MemoryRegionIntl(addr=0, length=self._buffer.numel())
-        self._mr_list = SortedList([init_mr], key=lambda x: x.addr)
-
+        self._mr_list = SortedList([],
+                                   key=lambda x: x.slab.data_ptr() + x.addr)
         # Each item is a list of memory regions having the same length
         self._lookup_table = SortedDict()
-        self._lookup_table[self._buffer.numel()] = self._mr_list
 
         self._lock: Lock = Lock()
+
+        # Fill slabs
+        self._slabs = []
+        if capacity_nbytes > 0:
+            self.increase(capacity_nbytes)
 
     def __len__(self) -> int:
         """Return nbytes allocated by the allocator."""
@@ -170,82 +173,136 @@ class TensorPoolAllocator:
     def __str__(self) -> str:
         return self.__repr__()
 
-    def alloc(self, size: int) -> Status[MemoryRegion]:
-        assert size % self.mr_nbytes == 0
+    def increase(self, size_nbytes: int) -> None:
+        assert size_nbytes > 0, "size_nbytes must be greater than 0"
+        assert (
+            size_nbytes %
+            self.mr_nbytes == 0), "size_nbytes must be a multiple of mr_nbytes"
+        slab_nmrs = self.SLAB_MAX_NBYTES // self.mr_nbytes
+        slab_nbytes = slab_nmrs * self.mr_nbytes
+
+        nslabs = size_nbytes // slab_nbytes
+        if size_nbytes % slab_nbytes != 0:
+            nslabs += 1
         with self._lock:
-            if self.capacity_nbytes - self._used_nbytes < size:
-                return Status(StatusCodes.OUT_OF_MEMORY)
-
-            # Find the first length that is greater than or equal to size
-            idx = self._lookup_table.bisect_left(size)
-            if idx >= len(self._lookup_table):
-                return Status(StatusCodes.OUT_OF_MEMORY)
-
-            target_mr_len = self._lookup_table.keys()[idx]
-            target_mr_list = self._lookup_table[target_mr_len]
-            # Get the first memory region from the list
-            target_mr = target_mr_list.pop()
-            self._mr_list.discard(target_mr)
-
-            # Remove the list if it is empty
-            if len(target_mr_list) == 0:
-                del self._lookup_table[target_mr_len]
-
-            # Split the memory region if needed
-            if target_mr_len > size:
-                left_over_mr = MemoryRegionIntl(
-                    addr=target_mr.addr + size,
-                    length=target_mr.length - size,
+            self.capacity_nbytes += nslabs * self.SLAB_MAX_NBYTES
+            for i in range(nslabs):
+                slab = torch.empty(
+                    slab_nbytes,
+                    dtype=torch.uint8,
+                    device=self.device,
+                    pin_memory=self.pin_memory,
                 )
-                self._mr_list.add(left_over_mr)
-                self._lookup_table.setdefault(
-                    left_over_mr.length,
-                    SortedList(key=lambda x: x.addr)).add(left_over_mr)
+                self._slabs.append(slab)
+                self._used_nbytes += slab.numel()
+                self._finalize_mr_unsafe(slab, 0, slab.numel())
 
-            mr = MemoryRegion(self, target_mr.addr, size)
-            self._used_nbytes += size
-            return Status(value=mr)
-
-    def _finalize_mr(self, addr: int, length: int) -> None:
+    def alloc(self, size: int) -> Status[Iterable[MemoryRegion]]:
+        assert size % self.mr_nbytes == 0
+        num_mrs = size // self.mr_nbytes
+        allocated = 0
         with self._lock:
-            mr = MemoryRegionIntl(addr, length)
-            self._used_nbytes -= mr.length
-            assert self._used_nbytes >= 0, "double free memory region"
-            # Find the index of the memory region in the list
-            idx = self._mr_list.bisect_right(mr)
-            prev = self._mr_list[idx - 1] if idx > 0 else None
-            next = self._mr_list[idx] if idx < len(self._mr_list) else None
+            mrs = []
+            while len(mrs) < num_mrs:
+                status = self._alloc_unsafe(upper_bound=size - allocated)
+                if status.is_ok():
+                    mrs.extend(status.value)
+                    allocated += len(status.value) * self.mr_nbytes
+                else:
+                    for mr in mrs:
+                        self._finalize_mr_unsafe(mr.slab, mr.addr, mr.length)
+                    return status
+            return Status(value=mrs)
 
-            curr = mr
-            # 1. append mr to prev if possible
-            if MemoryRegionIntl.is_appendable(curr, prev):
-                # Remove prev from the list and lookup table
-                self._mr_list.discard(prev)
-                prev_len_list = self._lookup_table[prev.length]
-                prev_len_list.discard(prev)
-                # Remove the list if it is empty
-                if len(prev_len_list) == 0:
-                    del self._lookup_table[prev.length]
-                # Append curr to prev
-                curr = MemoryRegionIntl.expand(prev, curr.length)
+    def _alloc_unsafe(self,
+                      upper_bound: int) -> Status[Iterable[MemoryRegion]]:
+        if len(self._lookup_table) == 0:
+            return Status(StatusCodes.OUT_OF_MEMORY)
 
-            # curr = prev + mr if append happened
-            # 2. append next to curr if possible
-            if MemoryRegionIntl.is_appendable(next, curr):
-                # Remove next from the list and lookup table
-                self._mr_list.discard(next)
-                next_len_list = self._lookup_table[next.length]
-                next_len_list.discard(next)
-                # Remove the list if it is empty
-                if len(next_len_list) == 0:
-                    del self._lookup_table[next.length]
-                # Append next to curr
-                curr = MemoryRegionIntl.expand(curr, next.length)
+        # Find the first length that is greater than or equal to upper_bound
+        idx = self._lookup_table.bisect_left(upper_bound)
+        if idx >= len(self._lookup_table):
+            # Could not find an MR w/ a size >= upper_bound, just use a
+            # smaller one
+            idx -= 1
 
-            # 3. insert curr into the list and lookup table
-            self._mr_list.add(curr)
+        target_mr_len = self._lookup_table.keys()[idx]
+        target_mr_list = self._lookup_table[target_mr_len]
+        # Get the first memory region from the list
+        target_mr = target_mr_list.pop()
+        self._mr_list.discard(target_mr)
+
+        # Remove the list if it is empty
+        if len(target_mr_list) == 0:
+            del self._lookup_table[target_mr_len]
+
+        allocated = target_mr_len
+        # Split the memory region if needed
+        if target_mr_len > upper_bound:
+            allocated = upper_bound
+            left_over_mr = MemoryRegionIntl(
+                slab=target_mr.slab,
+                addr=target_mr.addr + upper_bound,
+                length=target_mr.length - upper_bound,
+            )
+            self._mr_list.add(left_over_mr)
             self._lookup_table.setdefault(
-                curr.length, SortedList(key=lambda x: x.addr)).add(curr)
+                left_over_mr.length,
+                SortedList(key=lambda x: x.slab.data_ptr() + x.addr)).add(
+                    left_over_mr)
+
+        mrs = [None] * (allocated // self.mr_nbytes)
+        for offset in range(0, allocated, self.mr_nbytes):
+            mrs[offset // self.mr_nbytes] = MemoryRegion(
+                self, target_mr.slab, target_mr.addr + offset, self.mr_nbytes)
+        self._used_nbytes += allocated
+        return Status(value=mrs)
+
+    def _finalize_mr(self, slab: torch.Tensor, addr: int, length: int) -> None:
+        with self._lock:
+            return self._finalize_mr_unsafe(slab, addr, length)
+
+    def _finalize_mr_unsafe(self, slab: torch.Tensor, addr: int,
+                            length: int) -> None:
+        mr = MemoryRegionIntl(slab, addr, length)
+        self._used_nbytes -= mr.length
+        assert self._used_nbytes >= 0, "double free memory region"
+        # Find the index of the memory region in the list
+        idx = self._mr_list.bisect_right(mr)
+        prev = self._mr_list[idx - 1] if idx > 0 else None
+        next = self._mr_list[idx] if idx < len(self._mr_list) else None
+
+        curr = mr
+        # 1. append mr to prev if possible
+        if MemoryRegionIntl.is_appendable(curr, prev):
+            # Remove prev from the list and lookup table
+            self._mr_list.discard(prev)
+            prev_len_list = self._lookup_table[prev.length]
+            prev_len_list.discard(prev)
+            # Remove the list if it is empty
+            if len(prev_len_list) == 0:
+                del self._lookup_table[prev.length]
+            # Append curr to prev
+            curr = MemoryRegionIntl.expand(prev, curr.length)
+
+        # curr = prev + mr if append happened
+        # 2. append next to curr if possible
+        if MemoryRegionIntl.is_appendable(next, curr):
+            # Remove next from the list and lookup table
+            self._mr_list.discard(next)
+            next_len_list = self._lookup_table[next.length]
+            next_len_list.discard(next)
+            # Remove the list if it is empty
+            if len(next_len_list) == 0:
+                del self._lookup_table[next.length]
+            # Append next to curr
+            curr = MemoryRegionIntl.expand(curr, next.length)
+
+        # 3. insert curr into the list and lookup table
+        self._mr_list.add(curr)
+        self._lookup_table.setdefault(
+            curr.length,
+            SortedList(key=lambda x: x.slab.data_ptr() + x.addr)).add(curr)
 
     @property
     def num_memory_regions(self) -> int:
@@ -268,8 +325,16 @@ class TensorPoolAllocator:
                         ), f"{mr_i} not in lookup_table[{mr_i.length}]"
                 if i > 0:
                     mr_i_prev = self._mr_list[i - 1]
-                    assert (mr_i_prev.addr + mr_i_prev.length < mr_i.addr
-                            ), f"{mr_i_prev} and {mr_i} are not disjoint"
+                    if (mr_i_prev.slab.data_ptr() + mr_i_prev.addr +
+                            mr_i_prev.length == mr_i.slab.data_ptr() +
+                            mr_i.addr):
+                        assert mr_i_prev.slab.data_ptr() != mr_i.slab.data_ptr(
+                        )
+                    else:
+                        assert (mr_i_prev.slab.data_ptr() + mr_i_prev.addr +
+                                mr_i_prev.length
+                                < mr_i.slab.data_ptr() + mr_i.addr
+                                ), f"{mr_i_prev} and {mr_i} are not disjoint"
             assert (mr_list_total_nbytes == self.capacity_nbytes -
                     self._used_nbytes), (
                         f"{mr_list_total_nbytes} != {self.capacity_nbytes} - "

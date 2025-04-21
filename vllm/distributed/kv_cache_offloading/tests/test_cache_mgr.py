@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from .. import BaseKVCacheManager, KVCacheConfig
+from ..memory import TensorPoolAllocator
 from .conftest import TEMP_ROOT, discard_all_vllm_envs
 
 
@@ -72,6 +73,8 @@ def cache_mgr_fixture(cache_conf_fixture, request):
     cache = None
     try:
         config = KVCacheConfig(block_spec=spec)
+        # use a small slab size for testing
+        TensorPoolAllocator.SLAB_MAX_NBYTES = spec.block_nbytes * 8
         cache = BaseKVCacheManager(config=config)
         yield shape, spec, cache, request.param
     finally:

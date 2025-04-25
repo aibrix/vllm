@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import asyncio
 import copy
 import os
 import random
@@ -10,7 +9,7 @@ import torch
 
 from .. import BaseKVCacheManager, KVCacheConfig
 from ..memory import TensorPoolAllocator
-from .conftest import TEMP_ROOT, discard_all_vllm_envs
+from .conftest import TEMP_ROOT, discard_all_vllm_envs, randomize_cache_handle
 
 
 @pytest.fixture(params=["l1", "l2_sync", "l2_async", "l1_l2_sync"],
@@ -98,121 +97,147 @@ def test_put_and_get_aligned(cache_mgr_fixture):
     shape, spec, cache_mgr, param = cache_mgr_fixture
     tokens = [i for i in range(32)]
     origin_tokens = copy.deepcopy(tokens)
-    shape[spec.block_shape_token_dim] = len(tokens)
-    kv_tensors = torch.randn(*shape, dtype=torch.bfloat16)
+    status = cache_mgr.allocate(2)
+    assert status.is_ok()
+    put_handle = status.value
+    randomize_cache_handle(put_handle)
+    put_tensors = put_handle.to_tensors()
+    put_tensors = [t.clone() for t in put_tensors]
 
-    put_status = cache_mgr.put(None, tokens, kv_tensors)
+    put_status = cache_mgr.put(None, tokens, put_handle)
     assert tokens == origin_tokens
     assert put_status.is_ok()
 
     if param.endswith("async"):
         cache_mgr.flush()
 
-    get_status = cache_mgr.get(None, tokens)
+    get_status = cache_mgr.acquire(None, tokens)
     assert tokens == origin_tokens
     assert get_status.is_ok()
     assert get_status.value[0] == 32
-    assert torch.equal(get_status.value[1], kv_tensors)
+    get_handle = get_status.value[1]
+    assert len(put_handle) == len(
+        get_handle
+    ), f"len(put_handle): {len(put_handle)}, len(get_handle): {len(get_handle)}"
+    get_tensors = get_handle.to_tensors()
+    for pt, gt in zip(put_tensors, get_tensors):
+        assert torch.equal(pt, gt)
     exists_status = cache_mgr.exists(None, tokens)
     assert exists_status.is_ok()
     assert exists_status.value == 32
-
-
-def test_put_and_get_unaligned(cache_mgr_fixture):
-    shape, spec, cache_mgr, param = cache_mgr_fixture
-    tokens = [i for i in range(35)]
-    shape[spec.block_shape_token_dim] = len(tokens)
-    kv_tensors = torch.randn(*shape, dtype=torch.bfloat16)
-
-    put_status = cache_mgr.put(None, tokens, kv_tensors)
-    assert put_status.is_ok()
-
-    if param.endswith("async"):
-        cache_mgr.flush()
-
-    get_status = cache_mgr.get(None, tokens)
-    assert get_status.is_ok()
-    assert get_status.value[0] == 32
-    slices = [slice(None)] * len(shape)
-    slices[spec.block_shape_token_dim] = slice(0, 32)
-    assert torch.equal(get_status.value[1], kv_tensors[tuple(slices)])
-    exists_status = cache_mgr.exists(None, tokens)
-    assert exists_status.is_ok()
-    assert exists_status.value == 32
+    get_handle.release()
 
 
 def test_put_and_get_with_prefix(cache_mgr_fixture):
     shape, spec, cache_mgr, param = cache_mgr_fixture
     tokens0 = [i for i in range(32)]
-    shape[spec.block_shape_token_dim] = len(tokens0)
-    kv_tensors0 = torch.randn(*shape, dtype=torch.bfloat16)
+    status = cache_mgr.allocate(2)
+    assert status.is_ok()
+    put_handle0 = status.value
+    assert len(put_handle0) == 2
+    randomize_cache_handle(put_handle0)
+    put_tensors0 = put_handle0.to_tensors()
+    put_tensors0 = [t.clone() for t in put_tensors0]
 
-    put_status = cache_mgr.put(None, tokens0, kv_tensors0)
+    put_status = cache_mgr.put(None, tokens0, put_handle0)
     assert put_status.is_ok()
 
-    tokens1 = [i for i in range(100, 135)]
-    shape[spec.block_shape_token_dim] = len(tokens1)
-    kv_tensors1 = torch.randn(*shape, dtype=torch.bfloat16)
+    tokens1 = [i for i in range(100, 132)]
+    status = cache_mgr.allocate(2)
+    assert status.is_ok()
+    put_handle1 = status.value
+    assert len(put_handle1) == 2
+    randomize_cache_handle(put_handle1)
+    put_tensors1 = put_handle1.to_tensors()
+    put_tensors1 = [t.clone() for t in put_tensors1]
 
-    put_status = cache_mgr.put(tokens0, tokens1, kv_tensors1)
+    put_status = cache_mgr.put(tokens0, tokens1, put_handle1)
     assert put_status.is_ok()
 
     if param.endswith("async"):
         cache_mgr.flush()
 
-    get_status = cache_mgr.get(None, tokens0)
+    get_status = cache_mgr.acquire(None, tokens0)
     assert get_status.is_ok()
-    assert torch.equal(get_status.value[1], kv_tensors0)
+    assert get_status.value[0] == 32
+    get_handle0 = get_status.value[1]
+    assert len(put_handle0) == len(
+        get_handle0), f"{len(put_handle0)} != {len(get_handle0)}"
+    get_tensors0 = get_handle0.to_tensors()
+    for pt, gt in zip(put_tensors0, get_tensors0):
+        assert torch.equal(pt, gt)
 
-    get_status = cache_mgr.get(tokens0, tokens1)
+    get_status = cache_mgr.acquire(tokens0, tokens1)
     assert get_status.is_ok()
-    slices = [slice(None)] * len(shape)
-    slices[spec.block_shape_token_dim] = slice(0, 32)
-    assert torch.equal(get_status.value[1], kv_tensors1[tuple(slices)])
+    assert get_status.value[0] == 32
+    get_handle1 = get_status.value[1]
+    assert len(put_handle1) == len(
+        get_handle1), f"{len(put_handle1)} != {len(get_handle1)}"
+    get_tensors1 = get_handle1.to_tensors()
+    for pt, gt in zip(put_tensors1, get_tensors1):
+        assert torch.equal(pt, gt)
+
     exists_status = cache_mgr.exists(tokens0, tokens1)
     assert exists_status.is_ok()
     assert exists_status.value == 32
 
-    get_status = cache_mgr.get(None, tokens0 + tokens1)
+    get_status = cache_mgr.acquire(None, tokens0 + tokens1)
     assert get_status.is_ok()
-    chunks = torch.chunk(get_status.value[1],
-                         2,
-                         dim=spec.block_shape_token_dim)
-    assert torch.equal(chunks[0], kv_tensors0)
-    slices = [slice(None)] * len(shape)
-    slices[spec.block_shape_token_dim] = slice(0, 32)
-    assert torch.equal(chunks[1], kv_tensors1[tuple(slices)])
+    assert get_status.value[0] == 64
+    get_handle2 = get_status.value[1]
+    assert len(get_handle2) == 4, f"len(get_handle2): {len(get_handle2)} != 4"
+    get_tensors2 = get_handle2.to_tensors()
+    for pt, gt in zip(put_tensors0 + put_tensors1, get_tensors2):
+        assert torch.equal(pt, gt)
+    get_handle0.release()
+    get_handle1.release()
+    get_handle2.release()
 
 
 def test_duplicated_puts(cache_mgr_fixture):
     shape, spec, cache_mgr, param = cache_mgr_fixture
     for _ in range(10):
         tokens = [i for i in range(32)]
-        shape[spec.block_shape_token_dim] = len(tokens)
-        kv_tensors = torch.randn(*shape, dtype=torch.bfloat16)
+        status = cache_mgr.allocate(2)
+        assert status.is_ok()
+        put_handle = status.value
+        randomize_cache_handle(put_handle)
+        put_tensors = put_handle.to_tensors()
+        put_tensors = [t.clone() for t in put_tensors]
 
-        put_status = cache_mgr.put(None, tokens, kv_tensors)
+        put_status = cache_mgr.put(None, tokens, put_handle)
         assert put_status.is_ok()
 
         if param.endswith("async"):
             cache_mgr.flush()
 
-        get_status = cache_mgr.get(None, tokens)
+        get_status = cache_mgr.acquire(None, tokens)
         assert get_status.is_ok()
-        assert torch.equal(get_status.value[1], kv_tensors)
+        assert get_status.value[0] == 32
+        get_handle = get_status.value[1]
+        assert len(put_handle) == len(
+            get_handle), f"{len(put_handle)} != {len(get_handle)}"
+        get_tensors = get_handle.to_tensors()
+        for pt, gt in zip(put_tensors, get_tensors):
+            assert torch.equal(pt, gt)
+        get_handle.release()
 
 
 def test_delete(cache_mgr_fixture):
     shape, spec, cache_mgr, param = cache_mgr_fixture
     tokens = [i for i in range(32)]
     origin_tokens = copy.deepcopy(tokens)
-    shape[spec.block_shape_token_dim] = len(tokens)
-    kv_tensors = torch.randn(*shape, dtype=torch.bfloat16)
+    status = cache_mgr.allocate(2)
+    assert status.is_ok()
+    put_handle = status.value
+    randomize_cache_handle(put_handle)
+    put_tensors = put_handle.to_tensors()
+    put_tensors = [t.clone() for t in put_tensors]
 
-    put_status = cache_mgr.put(None, tokens, kv_tensors)
+    put_status = cache_mgr.put(None, tokens, put_handle)
     assert tokens == origin_tokens
     assert put_status.is_ok()
-    assert put_status.value == kv_tensors.shape[spec.block_shape_token_dim]
+    assert put_status.value == 32
 
     if param.endswith("async"):
         cache_mgr.flush()
@@ -220,14 +245,15 @@ def test_delete(cache_mgr_fixture):
     del_status = cache_mgr.delete(tokens[:16], tokens[16:])
     assert del_status.is_ok()
 
-    get_status = cache_mgr.get(None, tokens[:16])
+    get_status = cache_mgr.acquire(None, tokens[:16])
     assert get_status.is_ok()
     assert get_status.value[0] == 16
-    slices = [slice(None)] * len(shape)
-    slices[spec.block_shape_token_dim] = slice(0, 16)
-    assert torch.equal(get_status.value[1], kv_tensors[tuple(slices)])
+    get_handle = get_status.value[1]
+    assert len(get_handle) == 1, f"len(get_handle): {len(get_handle)} != 1"
+    assert torch.equal(get_handle.to_tensors()[0], put_tensors[0])
+    get_handle.release()
 
-    get_status = cache_mgr.get(tokens[:16], tokens[16:])
+    get_status = cache_mgr.acquire(tokens[:16], tokens[16:])
     assert get_status.is_not_found()
 
 
@@ -235,29 +261,51 @@ def test_stress_cache(cache_mgr_fixture):
     shape, spec, cache_mgr, param = cache_mgr_fixture
     query = {}
     for i in range(200):
-        num_prefix_blocks = random.randint(0, 30)
-        prefix_tokens = [j for j in range(num_prefix_blocks * 16)]
-        shape[spec.block_shape_token_dim] = len(prefix_tokens)
-        prefix_kv_tensors = torch.randn(*shape, dtype=torch.bfloat16)
-        put_status = cache_mgr.put(None, prefix_tokens, prefix_kv_tensors)
-        if put_status.is_out_of_memory() or put_status.is_denied():
-            continue
+        num_prefix_blocks = random.randint(0, 10)
+        if num_prefix_blocks > 0:
+            prefix_tokens = [j for j in range(num_prefix_blocks * 16)]
+            status = cache_mgr.allocate(num_prefix_blocks)
+            assert status.is_ok()
+            prefix_handle = status.value
+            randomize_cache_handle(prefix_handle)
+            prefix_tokens = prefix_tokens[:len(prefix_handle) * 16]
+            put_status = cache_mgr.put(None, prefix_tokens, prefix_handle)
+            assert not put_status.is_invalid()
+            if put_status.is_out_of_memory() or put_status.is_denied():
+                continue
+            assert put_status.is_ok()
+            assert put_status.value >= 0 and put_status.value <= len(
+                prefix_tokens)
 
-        assert put_status.is_ok()
-        cache_mgr.get(None, prefix_tokens)
+            status = cache_mgr.acquire(None, prefix_tokens)
+            assert status.is_ok()
+            status.value[1].release()
+        else:
+            prefix_tokens = None
 
-        ntokens = random.randint(128, 1024)
-        tokens = [j for j in range(ntokens)]
+        num_token_blocks = random.randint(1, 64)
+        tokens = [j for j in range(num_token_blocks * 16)]
         random.shuffle(tokens)
-        shape[spec.block_shape_token_dim] = len(tokens)
-        kv_tensors = torch.randn(*shape, dtype=torch.bfloat16)
-        put_status = cache_mgr.put(prefix_tokens, tokens, kv_tensors)
+        status = cache_mgr.allocate(num_token_blocks)
+        assert status.is_ok()
+        token_handle = status.value
+        randomize_cache_handle(token_handle)
+        tokens = tokens[:len(token_handle) * 16]
+        token_tensors = token_handle.to_tensors()
+        token_tensors = [t.clone() for t in token_tensors]
+        put_status = cache_mgr.put(prefix_tokens, tokens, token_handle)
         if put_status.is_out_of_memory() or put_status.is_denied():
             continue
 
         assert put_status.is_ok()
-        cache_mgr.get(prefix_tokens, tokens)
-        query[i] = (prefix_tokens, tokens, kv_tensors)
+        assert put_status.value >= 0 and put_status.value <= len(tokens)
+        status = cache_mgr.acquire(prefix_tokens, tokens)
+        assert not status.is_invalid()
+        if not status.is_ok():
+            continue
+
+        status.value[1].release()
+        query[i] = (prefix_tokens or [], tokens, token_tensors)
 
     if param.endswith("async"):
         cache_mgr.flush()
@@ -267,51 +315,40 @@ def test_stress_cache(cache_mgr_fixture):
         if i not in query:
             continue
 
-        prefix_tokens, tokens, kv_tensors = query[i]
-        slices = [slice(None)] * len(shape)
+        prefix_tokens, tokens, token_tensors = query[i]
         j = 0
         while j < len(tokens):
             length = (random.randint(1, (len(tokens) - j) // 16) *
                       16 if len(tokens) - j > 16 else 16)
 
-            if (cache_mgr._l1_cache is not None
-                    and cache_mgr._l2_cache is not None):
-                l1_get_status = cache_mgr._l1_cache.get(
-                    prefix_tokens, tokens[j:j + length])
-                l1_got = (len(l1_get_status.value)
-                          if l1_get_status.is_ok() else 0)
-                l2_get_status = asyncio.run_coroutine_threadsafe(
-                    cache_mgr._l2_cache.get(prefix_tokens,
-                                            tokens[j:j + length]),
-                    cache_mgr._event_loop,
-                ).result()
-                l2_got = (len(l2_get_status.value)
-                          if l2_get_status.is_ok() else 0)
-                get_status = cache_mgr.get(prefix_tokens, tokens[j:j + length])
-                if l1_got + l2_got > 0:
-                    assert (get_status.is_ok()
-                            and get_status.value[0] == max(l1_got, l2_got) *
-                            16), (f"l1_got={l1_got}, l2_got={l2_got}, "
-                                  f"get_status={get_status}")
-            else:
-                get_status = cache_mgr.get(prefix_tokens, tokens[j:j + length])
-
+            get_status = cache_mgr.acquire(prefix_tokens, tokens[j:j + length])
             if get_status.is_ok():
-                assert (get_status.value[0] > 0 and get_status.value[0]
-                        <= length), f"{get_status.value[0]} vs {length}"
-                slices[spec.block_shape_token_dim] = slice(
-                    j, j + get_status.value[0])
-                assert torch.equal(get_status.value[1],
-                                   kv_tensors[tuple(slices)])
+                assert get_status.value[0] > 0
+                num = get_status.value[0] // 16
+                get_handle = get_status.value[1]
+                get_tensors = get_handle.to_tensors()
+                for i in range(num):
+                    assert torch.equal(get_tensors[i],
+                                       token_tensors[j // 16 + i])
                 results.append(1)
+                get_handle.release()
                 exists_status = cache_mgr.exists(prefix_tokens,
                                                  tokens[j:j + length])
                 assert exists_status.is_ok()
-                assert exists_status.value == get_status.value[0]
+                assert exists_status.value >= num * 16
             else:
                 results.append(0)
             prefix_tokens += tokens[j:j + length]
             j += length
 
+    recorder = cache_mgr._recorder
+
+    for reason, num in recorder.put_metrics.num_errors_by_reason.items():
+        if num > 0 and reason not in ["out_of_memory", "denied", "not_found"]:
+            raise AssertionError(f"PUT {reason}: {num}")
+
+    for reason, num in recorder.get_metrics.num_errors_by_reason.items():
+        if num > 0 and reason not in ["out_of_memory", "denied", "not_found"]:
+            raise AssertionError(f"GET {reason}: {num}")
     num_oks = sum(results)
     assert num_oks > 50

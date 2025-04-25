@@ -10,12 +10,13 @@ from ..memory import TensorPoolAllocator
 def allocator():
     # use a small slab size for testing
     TensorPoolAllocator.SLAB_MAX_NBYTES = 1024
-    return TensorPoolAllocator(1024 * 1024, 16)
+    return TensorPoolAllocator(16, 1024 * 1024)
 
 
 def test_basic_allocation(allocator):
     """Test basic allocation and deallocation."""
     assert allocator.num_memory_regions == 1024
+    assert allocator.capacity_nbytes == 1024 * 1024
     size = 1024
     status = allocator.alloc(size)
     allocator.assert_consistency()
@@ -98,8 +99,12 @@ def test_coalescing_mechanism(allocator):
 def test_out_of_memory(allocator):
     """Test allocator behavior when requesting more memory than available."""
     max_size = 1 << 30  # 1GB for testing
-    status = allocator.alloc(max_size)
-    assert status.is_out_of_memory()
+    # the first allocation should succeed
+    first = allocator.alloc(max_size)
+    assert first.is_ok()
+    # the second allocation should fail with OOM
+    second = allocator.alloc(max_size)
+    assert second.is_out_of_memory()
 
 
 @pytest.mark.parametrize("rseed", [i * 100 + 43 for i in range(13)])

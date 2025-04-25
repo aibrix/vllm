@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     # Mock Connector
     VLLM_KV_CACHE_OL_MOCK_USE_RDMA: bool = False
-    VLLM_KV_CACHE_OL_MOCK_USE_GATHER_SCATTER: bool = False
+    VLLM_KV_CACHE_OL_MOCK_USE_MPUT_MGET: bool = False
 
     # RocksDB Env Vars
     VLLM_KV_CACHE_OL_ROCKSDB_ROOT: str = os.path.expanduser(
@@ -74,6 +74,13 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_OL_INFINISTORE_LINK_TYPE: str = "Ethernet"
     VLLM_KV_CACHE_OL_INFINISTORE_DEV_NAME: str = "mlx5_0"
     VLLM_KV_CACHE_OL_INFINISTORE_USE_GDR: bool = True
+
+    # HPKV Env Vars
+    VLLM_KV_CACHE_OL_HPKV_REMOTE_ADDR: str = "127.0.0.1"
+    VLLM_KV_CACHE_OL_HPKV_REMOTE_PORT: int = 12346
+    VLLM_KV_CACHE_OL_HPKV_LOCAL_ADDR: str = "127.0.0.1"
+    VLLM_KV_CACHE_OL_HPKV_LOCAL_PORT: int = 12345
+    VLLM_KV_CACHE_OL_HPKV_USE_GDR: bool = True
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -157,9 +164,10 @@ kv_cache_ol_environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_KV_CACHE_OL_MOCK_USE_RDMA", "0").strip().lower() in
      ("1", "true")),
-    "VLLM_KV_CACHE_OL_MOCK_USE_GATHER_SCATTER":
-    lambda: (os.getenv("VLLM_KV_CACHE_OL_MOCK_USE_GATHER_SCATTER", "0").strip(
-    ).lower() in ("1", "true")),
+    "VLLM_KV_CACHE_OL_MOCK_USE_MPUT_MGET":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_MOCK_USE_MPUT_MGET", "0").strip().lower() in
+     ("1", "true")),
     # ================== RocksDB Env Vars ==================
     "VLLM_KV_CACHE_OL_ROCKSDB_ROOT":
     lambda: os.path.expanduser(
@@ -213,6 +221,20 @@ kv_cache_ol_environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.getenv("VLLM_KV_CACHE_OL_INFINISTORE_USE_GDR", "1").strip().lower() in
      ("1", "true")),
+    # ================== HPKV Env Vars ==================
+    "VLLM_KV_CACHE_OL_HPKV_REMOTE_ADDR":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_HPKV_REMOTE_ADDR", "127.0.0.1").strip()),
+    "VLLM_KV_CACHE_OL_HPKV_REMOTE_PORT":
+    lambda: int(os.getenv("VLLM_KV_CACHE_OL_HPKV_REMOTE_PORT", "12346")),
+    "VLLM_KV_CACHE_OL_HPKV_LOCAL_ADDR":
+    lambda:
+    (os.getenv("VLLM_KV_CACHE_OL_HPKV_LOCAL_ADDR", "127.0.0.1").strip()),
+    "VLLM_KV_CACHE_OL_HPKV_LOCAL_PORT":
+    lambda: int(os.getenv("VLLM_KV_CACHE_OL_HPKV_LOCAL_PORT", "12345")),
+    "VLLM_KV_CACHE_OL_HPKV_USE_GDR":
+    lambda: (os.getenv("VLLM_KV_CACHE_OL_HPKV_USE_GDR", "1").strip().lower() in
+             ("1", "true")),
 }
 
 # end-env-vars-definition

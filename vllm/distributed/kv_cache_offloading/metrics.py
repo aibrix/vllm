@@ -198,6 +198,8 @@ class OpMetrics(Metrics):
         elif self._is_get() and status.is_ok():
             if isinstance(status.value, tuple):
                 num_fetched_tokens = status.value[0]
+            elif isinstance(status.value, int):
+                num_fetched_tokens = status.value * self._block_ntokens
             else:
                 num_fetched_tokens = len(status.value) * self._block_ntokens
             self.num_fetched_tokens.append(num_fetched_tokens)
@@ -442,6 +444,8 @@ class BaseCacheMetrics(Metrics, MetricRecorder):
         if status.is_ok():
             if isinstance(status.value, tuple):
                 num_tokens_hit = status.value[0]
+            elif isinstance(status.value, int):
+                num_tokens_hit = status.value * self._block_ntokens
             else:
                 num_tokens_hit = len(status.value) * self._block_ntokens
             self.num_tokens_hit += num_tokens_hit

@@ -2,9 +2,8 @@
 from abc import abstractmethod
 from concurrent.futures import Executor
 from dataclasses import dataclass
-from typing import Generic, Iterable, TypeVar
+from typing import Generic, Iterable, Tuple, TypeVar
 
-from ...cache_handle import KVCacheHandle
 from ...memory import MemoryRegion
 from ...status import Status
 
@@ -18,31 +17,18 @@ class ConnectorFeature:
     Args:
         mput_mget: Whether the kv cache connector supports mput/mget
         prefetch: Whether the kv cache connector supports prefetch.
-        acquire: Whether the kv cache connector supports acquire.
         rdma: Whether the kv cache connector supports RDMA.
-        gather_scatter: Whether the kv cache connector supports gather_scatter.
     """
 
     mput_mget: bool = False
     prefetch: bool = False
-    acquire: bool = False
     rdma: bool = False
-    gather_scatter: bool = False
 
 
 @dataclass
 class ConnectorRegisterDescriptor:
     """The register descriptor"""
     pass
-
-
-@dataclass
-class ConnectorSGEntry:
-    """The entry of scatter-gather list."""
-    key: K
-    base_addr: int
-    offset: int
-    length: int
 
 
 class Connector(Generic[K, V]):
@@ -65,6 +51,10 @@ class Connector(Generic[K, V]):
             from .infinistore import InfiniStoreConnector
 
             return InfiniStoreConnector.from_envs(conn_id, executor)
+        elif backend_name == "HPKV":
+            from .hpkv import HPKVConnector
+
+            return HPKVConnector.from_envs(conn_id, executor)
         elif backend_name == "MOCK":
             from .mock import MockConnector
 
@@ -115,23 +105,22 @@ class Connector(Generic[K, V]):
         raise NotImplementedError
 
     @abstractmethod
-    async def get(self, key: K, mr: MemoryRegion = None) -> Status[V]:
+    async def get(self, key: K, mr: MemoryRegion) -> Status:
         """Get a value.
         Args:
             key: The key of the kv tensor.
-            mr: The memory region to place the fetched kv tensor. Only
-                backends support RDMA will use this parameter.
+            mr: The memory region to place the fetched kv tensor.
         Returns:
-            The fetched kv tensor.
+            The status of the get operation.
         """
         raise NotImplementedError
 
     @abstractmethod
-    async def put(self, key: K, value: V) -> Status:
+    async def put(self, key: K, mr: MemoryRegion) -> Status:
         """Put a key value pair.
         Args:
             key: The key of the kv cache.
-            value: The value of the kv cache.
+            mr: The memory region holding the kv tensors.
         Returns:
             The status of the put operation.
         """
@@ -158,78 +147,45 @@ class Connector(Generic[K, V]):
         """
         raise NotImplementedError
 
-    def get_sge_list(
-            self, keys: Iterable[K], mrs: Iterable[MemoryRegion]
-    ) -> Iterable[Iterable[ConnectorSGEntry]]:
-        """Convert a list of keys and mrs to a list of scatter-gather entries.
-        The upper-layer will call gather/scatter on each returned list of
-        entries.
-        This function is optional and only connectors have gather_scatter
-        feature enabled can implement this function.
+    def get_batches(
+        self,
+        keys: Iterable[K],
+        mrs: Iterable[MemoryRegion],
+        batch_size: int,
+    ) -> Iterable[Iterable[Tuple[K, MemoryRegion]]]:
+        """Get a list of key MR batches that is used for mput and mget
+        operations.
+
         Args:
             keys: The keys of the kv tensors.
-            mrs: The memory regions to gather/scatter.
-        """
-        raise NotImplementedError
-
-    async def gather(
-            self,
-            sge_list: Iterable[ConnectorSGEntry]) -> Status | Iterable[Status]:
-        """Gather a list of values. This function is optional and only
-        connectors have gather_scatter feature enabled can implement this
-        function.
-        Args:
-            sge_list: A list of scatter-gather entries.
+            mrs: Memory regions holding the kv tensors.
+            batch_size: The maximum number of key MR pairs in a batch.
         Returns:
-            Status of the gather operation.
-            Or, a list of operation status on each entry.
+            List of key MR batches.
         """
         raise NotImplementedError
 
-    async def scatter(
-            self,
-            sge_list: Iterable[ConnectorSGEntry]) -> Status | Iterable[Status]:
-        """Scatter a list of values. This function is optional and only
-        connectors have gather_scatter feature enabled can implement this
-        function.
-        Args:
-            sge_list: A list of scatter-gather entries.
-        Returns:
-            Status of the scatter operation.
-            Or, a list of operation status on each entry.
-        """
-        raise NotImplementedError
-
-    async def mget(self, keys: Iterable[K]) -> Iterable[Status[V]]:
+    async def mget(self, keys: Iterable[K],
+                   mrs: Iterable[MemoryRegion]) -> Iterable[Status]:
         """MGet a list of values. This function is optional and only connectors
         have mput_mget feature enabled can implement this function.
         Args:
             keys: The keys of the kv tensors.
-        Returns:
-            List of values.
-        """
-        raise NotImplementedError
-
-    async def mput(self, keys: Iterable[K],
-                   values: Iterable[V]) -> Iterable[Status]:
-        """MPut a list of key value pairs. This function is optional and only
-        connectors have mput_mget feature enabled can implement this function.
-        Args:
-            keys: The keys of the kv tensors.
-            values: The values of the kv tensors.
+            mrs: Memory regions to hold the fetched kv tensors.
         Returns:
             List of statuses.
         """
         raise NotImplementedError
 
-    async def acquire(self, key: K) -> Status[KVCacheHandle]:
-        """Acquire a kv cache handle pointing to the kv tensors. This function
-        is optional and only connectors have acquire feature enabled can
-        implement this function.
+    async def mput(self, keys: Iterable[K],
+                   mrs: Iterable[MemoryRegion]) -> Iterable[Status]:
+        """MPut a list of key value pairs. This function is optional and only
+        connectors have mput_mget feature enabled can implement this function.
         Args:
-            key: The key of the kv cache.
+            keys: The keys of the kv tensors.
+            mrs: Memory regions holding the kv tensors.
         Returns:
-            The kv cache handle.
+            List of statuses.
         """
         raise NotImplementedError
 

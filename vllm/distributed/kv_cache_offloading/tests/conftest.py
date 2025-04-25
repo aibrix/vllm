@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
+from typing import Iterable
 
 import pytest
 import torch
 
+from ..cache_handle import KVCacheHandle
+from ..memory import MemoryRegion, TensorPoolAllocator
 from ..spec import KVCacheBlockLayout, KVCacheBlockSpec, KVCacheTensorSpec
 
 CACHE_SHAPE_NCLD = (16, 2, 8, 2, 32)
@@ -54,3 +57,28 @@ def get_cache_conf(layout):
 def cache_conf_fixture(request):
     layout = request.param
     return get_cache_conf(layout)
+
+
+def get_allocator(capacity, shape, dtype):
+    mr_nbytes = torch.Size(shape).numel() * dtype.itemsize
+    # use a small slab size for testing
+    TensorPoolAllocator.SLAB_MAX_NBYTES = mr_nbytes * 8
+    capacity_nbytes = capacity * mr_nbytes
+    allocator = TensorPoolAllocator(capacity_nbytes=capacity_nbytes,
+                                    mr_nbytes=mr_nbytes)
+    return allocator
+
+
+def release_mrs(mrs: Iterable[MemoryRegion]):
+    [mr.ref_down() for mr in mrs]
+
+
+def randomize_mrs(mrs: Iterable[MemoryRegion]):
+    for mr in mrs:
+        mr.to_tensor(CACHE_DTYPE).uniform_()
+
+
+def randomize_cache_handle(handle: KVCacheHandle):
+    tensors = handle.to_tensors()
+    for tensor in tensors:
+        tensor.view(CACHE_DTYPE).uniform_()

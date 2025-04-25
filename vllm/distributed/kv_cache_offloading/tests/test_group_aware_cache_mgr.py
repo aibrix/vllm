@@ -13,8 +13,8 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 
 from .. import GroupAwareKVCacheManager, KVCacheBlockLayout, KVCacheConfig
-from .conftest import (CACHE_DTYPE, TEMP_ROOT, discard_all_vllm_envs,
-                       get_cache_conf)
+from .conftest import (TEMP_ROOT, discard_all_vllm_envs, get_cache_conf,
+                       randomize_cache_handle)
 
 
 @pytest.fixture(params=["l1", "l2_sync", "l2_async", "l1_l2_sync"],
@@ -136,10 +136,14 @@ def _test_put_and_get_aligned(envs_name: str, rank: int, world_size: int,
         shape, spec, cache = cache_config
         tokens = [i for i in range(32)]
         origin_tokens = copy.deepcopy(tokens)
-        shape[spec.block_shape_token_dim] = len(tokens)
-        kv_tensors = torch.randn(*shape, dtype=CACHE_DTYPE)
+        status = cache.allocate(2)
+        assert status.is_ok()
+        put_handle = status.value
+        randomize_cache_handle(put_handle)
+        put_tensors = put_handle.to_tensors()
+        put_tensors = [t.clone() for t in put_tensors]
 
-        put_status = cache.put(None, tokens, kv_tensors)
+        put_status = cache.put(None, tokens, put_handle)
         assert tokens == origin_tokens, f"{tokens}!= {origin_tokens}"
         assert put_status.is_ok(), f"{put_status}"
         assert put_status.value == len(
@@ -148,56 +152,23 @@ def _test_put_and_get_aligned(envs_name: str, rank: int, world_size: int,
         if envs_name.endswith("async"):
             cache.flush()
 
-        get_status = cache.get(None, tokens)
+        get_status = cache.acquire(None, tokens)
         assert tokens == origin_tokens, f"{tokens}!= {origin_tokens}"
         assert get_status.is_ok(), f"{get_status}"
         assert get_status.value[0] == 32, f"{get_status.value[0]}!= 32"
-        assert torch.equal(get_status.value[1], kv_tensors)
+        get_handle = get_status.value[1]
+        assert len(put_handle) == len(
+            get_handle), f"{len(put_handle)} != {len(get_handle)}"
+        get_tensors = get_handle.to_tensors()
+        for pt, gt in zip(put_tensors, get_tensors):
+            assert torch.equal(pt, gt)
+        get_handle.release()
 
 
 @pytest.mark.parametrize("layout",
                          [KVCacheBlockLayout.NCLD, KVCacheBlockLayout.LCND])
 def test_put_and_get_aligned(envs, layout):
     dist_run(_test_put_and_get_aligned, envs, 8, layout)
-
-
-def _test_put_and_get_unaligned(envs_name: str, rank: int, world_size: int,
-                                layout: KVCacheBlockLayout):
-    with process_group(rank, world_size), cache_conf(rank, world_size,
-                                                     layout) as cache_config:
-        shape, spec, cache = cache_config
-        tokens = [i for i in range(35 + world_size * 700)]
-        shape[spec.block_shape_token_dim] = len(tokens)
-        kv_tensors = torch.randn(*shape, dtype=CACHE_DTYPE)
-
-        put_status = cache.put(None, tokens, kv_tensors)
-        assert put_status.is_ok(), f"{put_status}"
-
-        if envs_name.endswith("async"):
-            cache.flush()
-
-        num_blocks = len(tokens) // 16
-        num_blocks_per_rank = num_blocks // world_size
-        num_tokens_per_rank = num_blocks_per_rank * 16
-        my_token_len = num_tokens_per_rank * (rank + 1)
-        # we delete some portion of tokens on different ranks to mimic
-        # the scenario of different ranks have different cache hits
-        del_status = cache.delete(tokens[:my_token_len], tokens[my_token_len:])
-        assert del_status.is_ok(), f"{del_status}"
-
-        get_status = cache.get(None, tokens)
-        assert get_status.is_ok(), f"{get_status}"
-        assert (get_status.value[0] == num_tokens_per_rank
-                ), f"{get_status.value[0]}!={num_tokens_per_rank}"
-        slices = [slice(None)] * len(shape)
-        slices[spec.block_shape_token_dim] = slice(0, num_tokens_per_rank)
-        assert torch.equal(get_status.value[1], kv_tensors[tuple(slices)])
-
-
-@pytest.mark.parametrize("layout",
-                         [KVCacheBlockLayout.NCLD, KVCacheBlockLayout.LCND])
-def test_put_and_get_unaligned(envs, layout):
-    dist_run(_test_put_and_get_unaligned, envs, 8, layout)
 
 
 def _test_stress_cache(envs_name: str, rank: int, world_size: int,
@@ -216,52 +187,78 @@ def _test_stress_cache(envs_name: str, rank: int, world_size: int,
         for i in tqdm(range(200), desc="putting cache"):
             num_prefix_blocks = random.randint(0, 10)
             num_prefix_blocks = _bcast_object(num_prefix_blocks)
-            prefix_tokens = [j for j in range(num_prefix_blocks * 16)]
-            prefix_tokens = _bcast_object(prefix_tokens)
-            shape[spec.block_shape_token_dim] = len(prefix_tokens)
-            prefix_kv_tensors = torch.randn(*shape, dtype=CACHE_DTYPE)
-            cache.put(None, prefix_tokens, prefix_kv_tensors)
+            if num_prefix_blocks > 0:
+                prefix_tokens = [j for j in range(num_prefix_blocks * 16)]
+                prefix_tokens = _bcast_object(prefix_tokens)
+                status = cache.allocate(num_prefix_blocks)
+                assert status.is_ok()
+                put_handle = status.value
+                randomize_cache_handle(put_handle)
+                cache.put(None, prefix_tokens, put_handle)
 
-            ntokens = random.randint(256, 10240)
+            else:
+                prefix_tokens = None
+
+            num_token_blocks = random.randint(16, 256)
+            ntokens = num_token_blocks * 16
             ntokens = _bcast_object(ntokens)
             tokens = [j for j in range(ntokens)]
             random.shuffle(tokens)
             tokens = _bcast_object(tokens)
-            shape[spec.block_shape_token_dim] = len(tokens)
-            kv_tensors = torch.randn(*shape, dtype=CACHE_DTYPE)
-            cache.put(prefix_tokens, tokens, kv_tensors)
-            query[i] = (prefix_tokens, tokens, kv_tensors)
+            status = cache.allocate(2)
+            assert status.is_ok()
+            token_handle = status.value
+            randomize_cache_handle(token_handle)
+            token_tensors = token_handle.to_tensors()
+            token_tensors = [t.clone() for t in token_tensors]
+            tokens = tokens[:len(token_handle) * 16]
+            cache.put(prefix_tokens, tokens, token_handle)
+            query[i] = (prefix_tokens, tokens, token_tensors)
 
         if envs_name.endswith("async"):
             cache.flush()
 
         results = []
-        slices = [slice(None)] * len(shape)
         for i in tqdm(range(200), desc="getting cache"):
-            prefix_tokens, tokens, kv_tensors = query[i]
+            prefix_tokens, tokens, token_tensors = query[i]
 
-            ntokens_to_del = random.randint(128, len(tokens))
-            ntokens_left = (len(tokens) - ntokens_to_del) // 16 * 16
-            # we delete some portion of tokens on different ranks to mimic
-            # the scenario of different ranks have different cache hits
-            del_status = cache.delete(prefix_tokens + tokens[:ntokens_left],
-                                      tokens[ntokens_left:])
-            assert del_status.is_ok(), f"{del_status}"
+            if len(tokens) > 128:
+                ntokens_to_del = random.randint(128, len(tokens))
+                ntokens_left = (len(tokens) - ntokens_to_del) // 16 * 16
+                # we delete some portion of tokens on different ranks to mimic
+                # the scenario of different ranks have different cache hits
+                del_status = cache.delete(
+                    prefix_tokens + tokens[:ntokens_left],
+                    tokens[ntokens_left:])
+                assert del_status.is_ok(), f"{del_status}"
+            else:
+                ntokens_left = len(tokens)
 
-            get_status = cache.get(prefix_tokens, tokens)
+            get_status = cache.acquire(prefix_tokens, tokens)
             if get_status.is_ok():
                 assert get_status.value[0] > 0, f"{get_status.value[0]}<=0"
                 assert (
                     get_status.value[0]
                     <= ntokens_left), f"{get_status.value[0]}>{ntokens_left}"
-                slices[spec.block_shape_token_dim] = slice(
-                    0, get_status.value[0])
-                assert torch.equal(get_status.value[1],
-                                   kv_tensors[tuple(slices)])
+                get_handle = get_status.value[1]
+                get_tensors = get_handle.to_tensors()
+                for pt, gt in zip(token_tensors, get_tensors):
+                    assert torch.equal(pt, gt)
                 results.append(1)
+                get_handle.release()
             else:
                 results.append(0)
 
+        recorder = cache._recorder
+
+        skips = ["out_of_memory", "denied", "not_found"]
+        for reason, num in recorder.put_metrics.num_errors_by_reason.items():
+            if num > 0 and reason not in skips:
+                raise AssertionError(f"PUT {reason}: {num}")
+
+        for reason, num in recorder.get_metrics.num_errors_by_reason.items():
+            if num > 0 and reason not in skips:
+                raise AssertionError(f"GET {reason}: {num}")
         num_oks = sum(results)
         assert num_oks > 0, f"{num_oks}<=0"
 

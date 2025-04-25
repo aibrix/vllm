@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+import weakref
 from dataclasses import dataclass
 from threading import Lock
-from typing import Iterable, Tuple
+from typing import Any, Callable, Iterable, Tuple
 
 import torch
 from sortedcontainers import SortedDict, SortedList
@@ -9,12 +10,17 @@ from sortedcontainers import SortedDict, SortedList
 from ..status import Status, StatusCodes
 from .ref_counted_obj import RefCountedObj
 
+REGISTER_DESCRIPTOR_ATTR_NAME = '___register_descriptor___'
+
 
 @dataclass
 class MemoryRegionIntl:
     slab: torch.Tensor
     addr: int
     length: int
+
+    def data_ptr(self) -> int:
+        return self.slab.data_ptr() + self.addr
 
     @staticmethod
     def is_appendable(src: "MemoryRegionIntl",
@@ -72,8 +78,22 @@ class MemoryRegion(RefCountedObj):
         """Memoryview protocol support"""
         return memoryview(self.slab[self.addr:self.addr + self.length].numpy())
 
+    def fill(self, data: bytes) -> None:
+        assert len(data) == self.length
+        self.slab[self.addr:self.addr + self.length].copy_(
+            torch.frombuffer(data, dtype=torch.uint8))
+
+    def tobytes(self) -> bytes:
+        tensor = self.slab[self.addr:self.addr + self.length]
+        if tensor.is_cuda:
+            tensor = tensor.cpu()
+        return tensor.numpy().tobytes()
+
     def data_ptr(self) -> int:
         return self.slab.data_ptr() + self.addr
+
+    def register_descriptor(self) -> Any:
+        return getattr(self.slab, REGISTER_DESCRIPTOR_ATTR_NAME, None)
 
     @staticmethod
     def split(mr: "MemoryRegion",
@@ -101,17 +121,22 @@ class MemoryRegion(RefCountedObj):
         if self._use_finalizer:
             self.allocator._finalize_mr(self.slab, self.addr, self.length)
 
-    def to_tensor(self, mr_dtype: torch.dtype,
-                  mr_shape: Tuple[int, ...]) -> torch.Tensor:
+    def to_tensor(self,
+                  mr_dtype: torch.dtype = None,
+                  mr_shape: Tuple[int, ...] = None) -> torch.Tensor:
         """Convert MR to tensor"""
-        return (self.slab[self.addr:self.addr +
-                          self.length].view(mr_dtype).view(*mr_shape))
+        ret = self.slab[self.addr:self.addr + self.length]
+        if mr_dtype is not None:
+            ret = ret.view(mr_dtype)
+        if mr_shape is not None:
+            ret = ret.view(*mr_shape)
+        return ret
 
     @staticmethod
     def to_tensors(
         mrs: Iterable["MemoryRegion"],
-        mr_dtype: torch.dtype,
-        mr_shape: Tuple[int, ...],
+        mr_dtype: torch.dtype = None,
+        mr_shape: Tuple[int, ...] = None,
     ) -> Iterable[torch.Tensor]:
         """Convert MRs to tensors. Contiguous MRs are supposed to form
         a single tensor.
@@ -142,14 +167,13 @@ class TensorPoolAllocator:
         assert mr_nbytes > 0, "mr_nbytes must be greater than 0"
         assert mr_nbytes % 2 == 0, "mr_nbytes must be a multiple of 2"
 
-        self.capacity_nbytes: int = capacity_nbytes
+        self.capacity_nbytes: int = 0
         self._used_nbytes: int = 0
         self.mr_nbytes: int = mr_nbytes
         self.device: str = "cpu" if device is None else device
         self.pin_memory: bool = pin_memory
 
-        self._mr_list = SortedList([],
-                                   key=lambda x: x.slab.data_ptr() + x.addr)
+        self._mr_list = SortedList([], key=lambda x: x.data_ptr())
         # Each item is a list of memory regions having the same length
         self._lookup_table = SortedDict()
 
@@ -173,6 +197,15 @@ class TensorPoolAllocator:
     def __str__(self) -> str:
         return self.__repr__()
 
+    def register(self, register_fn: Callable[[int, int], Status[Any]]) -> None:
+        for slab in self._slabs:
+            status = register_fn(slab.data_ptr(), slab.numel())
+            if not status.is_ok():
+                return status
+            else:
+                setattr(slab, REGISTER_DESCRIPTOR_ATTR_NAME,
+                        weakref.ref(status.value))
+
     def increase(self, size_nbytes: int) -> None:
         assert size_nbytes > 0, "size_nbytes must be greater than 0"
         assert (
@@ -185,7 +218,7 @@ class TensorPoolAllocator:
         if size_nbytes % slab_nbytes != 0:
             nslabs += 1
         with self._lock:
-            self.capacity_nbytes += nslabs * self.SLAB_MAX_NBYTES
+            self.capacity_nbytes += nslabs * slab_nbytes
             for i in range(nslabs):
                 slab = torch.empty(
                     slab_nbytes,
@@ -200,6 +233,9 @@ class TensorPoolAllocator:
     def alloc(self, size: int) -> Status[Iterable[MemoryRegion]]:
         assert size % self.mr_nbytes == 0
         num_mrs = size // self.mr_nbytes
+        if num_mrs == 0:
+            return Status(StatusCodes.INVALID)
+
         allocated = 0
         with self._lock:
             mrs = []
@@ -209,9 +245,9 @@ class TensorPoolAllocator:
                     mrs.extend(status.value)
                     allocated += len(status.value) * self.mr_nbytes
                 else:
-                    for mr in mrs:
-                        self._finalize_mr_unsafe(mr.slab, mr.addr, mr.length)
-                    return status
+                    if allocated == 0:
+                        return status
+                    return Status(value=mrs)
             return Status(value=mrs)
 
     def _alloc_unsafe(self,
@@ -248,8 +284,7 @@ class TensorPoolAllocator:
             self._mr_list.add(left_over_mr)
             self._lookup_table.setdefault(
                 left_over_mr.length,
-                SortedList(key=lambda x: x.slab.data_ptr() + x.addr)).add(
-                    left_over_mr)
+                SortedList(key=lambda x: x.data_ptr())).add(left_over_mr)
 
         mrs = [None] * (allocated // self.mr_nbytes)
         for offset in range(0, allocated, self.mr_nbytes):
@@ -301,8 +336,7 @@ class TensorPoolAllocator:
         # 3. insert curr into the list and lookup table
         self._mr_list.add(curr)
         self._lookup_table.setdefault(
-            curr.length,
-            SortedList(key=lambda x: x.slab.data_ptr() + x.addr)).add(curr)
+            curr.length, SortedList(key=lambda x: x.data_ptr())).add(curr)
 
     @property
     def num_memory_regions(self) -> int:

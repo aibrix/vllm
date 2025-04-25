@@ -6,18 +6,7 @@ import pytest
 import torch
 
 from ..l1 import L1Cache
-from ..memory import TensorPoolAllocator
-from .conftest import CACHE_DTYPE
-
-
-def get_allocator(capacity, shape, dtype):
-    mr_nbytes = torch.Size(shape).numel() * dtype.itemsize
-    # use a small slab size for testing
-    TensorPoolAllocator.SLAB_MAX_NBYTES = mr_nbytes * 8
-    capacity_nbytes = capacity * mr_nbytes
-    allocator = TensorPoolAllocator(capacity_nbytes=capacity_nbytes,
-                                    mr_nbytes=mr_nbytes)
-    return allocator
+from .conftest import CACHE_DTYPE, get_allocator, release_mrs
 
 
 def test_cache_initialization(cache_conf_fixture):
@@ -55,16 +44,19 @@ def test_put_and_get_aligned(cache_conf_fixture):
     assert put_status.is_ok()
     assert put_status.value == 2
 
-    get_status = cache.get(None, tokens)
+    get_status = cache.acquire(None, tokens)
     assert tokens == origin_tokens
     assert get_status.is_ok()
     assert len(get_status.value) == 2
-    cat = torch.cat(get_status.value, dim=spec.block_shape_token_dim)
+    mrs = get_status.value
+    tensors = [mr.to_tensor(spec.block_dtype, spec.block_shape) for mr in mrs]
+    cat = torch.cat(tensors, dim=spec.block_shape_token_dim)
     assert cat.shape == kv_tensors.shape
     assert torch.equal(cat, kv_tensors)
     exists_status = cache.exists(None, tokens)
     assert exists_status.is_ok()
     assert exists_status.value == 2
+    release_mrs(mrs)
 
 
 def test_put_and_get_unaligned(cache_conf_fixture):
@@ -86,18 +78,21 @@ def test_put_and_get_unaligned(cache_conf_fixture):
     assert put_status.is_ok()
     assert put_status.value == 2
 
-    get_status = cache.get(None, tokens)
+    get_status = cache.acquire(None, tokens)
     assert get_status.is_ok()
     assert len(get_status.value) == 2
+    mrs = get_status.value
+    tensors = [mr.to_tensor(spec.block_dtype, spec.block_shape) for mr in mrs]
     slices = [slice(None)] * len(shape)
     slices[spec.block_shape_token_dim] = slice(0, 32)
     assert torch.equal(
-        torch.cat(get_status.value, dim=spec.block_shape_token_dim),
+        torch.cat(tensors, dim=spec.block_shape_token_dim),
         kv_tensors[tuple(slices)],
     )
     exists_status = cache.exists(None, tokens)
     assert exists_status.is_ok()
     assert exists_status.value == 2
+    release_mrs(mrs)
 
 
 @pytest.mark.parametrize("eviction_policy", ["FIFO", "LRU", "S3FIFO"])
@@ -128,33 +123,42 @@ def test_put_and_get_with_prefix(cache_conf_fixture, eviction_policy):
     assert put_status.is_ok()
     assert put_status.value == 2
 
-    get_status = cache.get(None, tokens0)
+    get_status = cache.acquire(None, tokens0)
     assert get_status.is_ok()
-    assert torch.equal(
-        torch.cat(get_status.value, dim=spec.block_shape_token_dim),
-        kv_tensors0)
+    mrs = get_status.value
+    tensors = [mr.to_tensor(spec.block_dtype, spec.block_shape) for mr in mrs]
+    assert torch.equal(torch.cat(tensors, dim=spec.block_shape_token_dim),
+                       kv_tensors0)
+    release_mrs(mrs)
 
-    get_status = cache.get(tokens0, tokens1)
+    get_status = cache.acquire(tokens0, tokens1)
     assert get_status.is_ok()
+    mrs = get_status.value
+    tensors = [mr.to_tensor(spec.block_dtype, spec.block_shape) for mr in mrs]
     slices = [slice(None)] * len(shape)
     slices[spec.block_shape_token_dim] = slice(0, 32)
     assert torch.equal(
-        torch.cat(get_status.value, dim=spec.block_shape_token_dim),
+        torch.cat(tensors, dim=spec.block_shape_token_dim),
         kv_tensors1[tuple(slices)],
     )
     exists_status = cache.exists(tokens0, tokens1)
     assert exists_status.is_ok()
     assert exists_status.value == 2
+    release_mrs(mrs)
 
-    get_status = cache.get(None, tokens0 + tokens1)
+    get_status = cache.acquire(None, tokens0 + tokens1)
     assert get_status.is_ok()
-    chunks = torch.chunk(
-        torch.cat(get_status.value, dim=spec.block_shape_token_dim),
-        2,
+    mrs = get_status.value
+    tensors = [mr.to_tensor(spec.block_dtype, spec.block_shape) for mr in mrs]
+    tensors0 = torch.cat(tensors[:len(tokens0) // 16],
+                         dim=spec.block_shape_token_dim)
+    tensors1 = torch.cat(
+        tensors[len(tokens0) // 16:len(tokens0 + tokens1) // 16],
         dim=spec.block_shape_token_dim,
     )
-    assert torch.equal(chunks[0], kv_tensors0)
-    assert torch.equal(chunks[1], kv_tensors1[tuple(slices)])
+    assert torch.equal(tensors0, kv_tensors0)
+    assert torch.equal(tensors1, kv_tensors1[tuple(slices)])
+    release_mrs(mrs)
 
 
 @pytest.mark.parametrize("eviction_policy", ["FIFO", "LRU", "S3FIFO"])
@@ -178,13 +182,18 @@ def test_duplicated_puts(cache_conf_fixture, eviction_policy):
         assert put_status.is_ok()
         assert put_status.value == 2
 
-        get_status = cache.get(None, tokens)
+        get_status = cache.acquire(None, tokens)
         assert get_status.is_ok()
+        mrs = get_status.value
+        tensors = [
+            mr.to_tensor(spec.block_dtype, spec.block_shape) for mr in mrs
+        ]
         assert torch.equal(
-            torch.cat(get_status.value, dim=spec.block_shape_token_dim),
+            torch.cat(tensors, dim=spec.block_shape_token_dim),
             kv_tensors,
         )
         assert len(cache) == 2
+        release_mrs(mrs)
 
 
 @pytest.mark.parametrize("eviction_policy", ["FIFO", "LRU", "S3FIFO"])
@@ -248,7 +257,9 @@ def test_stress_cache(cache_conf_fixture, eviction_policy):
         assert put_status.is_ok()
         assert (put_status.value >= 0 and put_status.value
                 <= prefix_kv_tensors.shape[spec.block_shape_token_dim])
-        cache.get(None, prefix_tokens)
+        status = cache.acquire(None, prefix_tokens)
+        if status.is_ok():
+            release_mrs(status.value)
 
         ntokens = random.randint(16, 1024)
         tokens = [j for j in range(ntokens)]
@@ -262,7 +273,9 @@ def test_stress_cache(cache_conf_fixture, eviction_policy):
         assert put_status.is_ok()
         assert (put_status.value >= 0 and put_status.value
                 <= kv_tensors.shape[spec.block_shape_token_dim])
-        cache.get(prefix_tokens, tokens)
+        status = cache.acquire(prefix_tokens, tokens)
+        if status.is_ok():
+            release_mrs(status.value)
         query[i] = (prefix_tokens, tokens, kv_tensors)
 
     # check if fragmentation ratio is acceptable
@@ -281,17 +294,22 @@ def test_stress_cache(cache_conf_fixture, eviction_policy):
                       spec.block_ntokens if len(tokens) -
                       j > spec.block_ntokens else spec.block_ntokens)
 
-            get_status = cache.get(prefix_tokens, tokens[j:j + length])
+            get_status = cache.acquire(prefix_tokens, tokens[j:j + length])
             if get_status.is_ok():
                 assert len(get_status.value) > 0
+                mrs = get_status.value
+                tensors = [
+                    mr.to_tensor(spec.block_dtype, spec.block_shape)
+                    for mr in mrs
+                ]
                 slices = [slice(None)] * len(shape)
                 slices[spec.block_shape_token_dim] = slice(
                     j, j + len(get_status.value) * spec.block_ntokens)
                 assert torch.equal(
-                    torch.cat(get_status.value,
-                              dim=spec.block_shape_token_dim),
+                    torch.cat(tensors, dim=spec.block_shape_token_dim),
                     kv_tensors[tuple(slices)],
                 )
+                release_mrs(mrs)
                 results.append(1)
                 exists_status = cache.exists(prefix_tokens,
                                              tokens[j:j + length])

@@ -290,7 +290,7 @@ class L1Cache(MeasurableBase):
             The status of the put operation and the number of blocks.
         """
         num_tokens = len(tokens)
-        num_blocks = sum(mr.length for mr in kv_mrs) // self.block_nbytes
+        num_blocks = len(kv_mrs)
 
         if with_check:
             if prefix is not None and len(prefix) % self.block_ntokens != 0:
@@ -326,40 +326,6 @@ class L1Cache(MeasurableBase):
 
         return Status(StatusCodes.OK, bi)
 
-    @nvtx_range("get", "kv_cache_ol.L1Cache")
-    @MeasurableBase.measure(MetricRecorder.OP.GET)
-    def get(
-        self,
-        prefix: Iterable[int] | None,
-        tokens: Iterable[int],
-    ) -> Status[Iterable[torch.Tensor]]:
-        """Get kv tensors from the cache.
-        Args:
-            prefix (Iterable[int] | None): The prefix tokens of the kv tensors.
-            tokens (Iterable[int]): The tokens of the kv tensors.
-        Returns:
-            The kv tensors corresponding to the tokens.
-        """
-        return self._get_impl("get", prefix, tokens)
-
-    @nvtx_range("peak", "kv_cache_ol.L1Cache")
-    @MeasurableBase.measure(MetricRecorder.OP.GET)
-    def peak(
-        self,
-        prefix: Iterable[int] | None,
-        tokens: Iterable[int],
-    ) -> Status[Iterable[torch.Tensor]]:
-        """Peak the kv tensors from the cache. Peak does not update the
-        eviction policy.
-
-        Args:
-            prefix (Iterable[int] | None): The prefix tokens of the kv tensors.
-            tokens (Iterable[int]): The tokens of the kv tensors.
-        Returns:
-            The kv tensors corresponding to the tokens.
-        """
-        return self._get_impl("peak", prefix, tokens)
-
     @nvtx_range("acquire", "kv_cache_ol.L1Cache")
     @MeasurableBase.measure(MetricRecorder.OP.ACQUIRE)
     def acquire(
@@ -376,33 +342,12 @@ class L1Cache(MeasurableBase):
         Returns:
             The memory regions corresponding to the tokens.
         """
-        return self._get_impl("get", prefix, tokens, zero_copy=True)
-
-    def _get_impl(
-        self,
-        name: str,
-        prefix: Iterable[int] | None,
-        tokens: Iterable[int],
-        zero_copy: bool = False,
-    ) -> Status[Iterable[torch.Tensor | MemoryRegion]]:
-        """Get/peak the kv tensors from the cache. Peak does not update the
-        eviction policy.
-
-        Args:
-            name (str): get or peak.
-            prefix (Iterable[int] | None): The prefix tokens of the kv tensors.
-            tokens (Iterable[int]): The tokens of the kv tensors.
-            zero_copy (bool): whether to return cache handle to support
-                              zero-copy.
-        Returns:
-            The kv tensors / memory regions corresponding to the tokens.
-        """
         if prefix is not None and len(prefix) % self.block_ntokens != 0:
             return Status(StatusCodes.INVALID)
 
         mrs = []
         for key in self._cache_block_keys(prefix, tokens):
-            status = getattr(self._eviction_policy, name)(key)
+            status = self._eviction_policy.get(key)
             if status.is_ok():
                 mrs.append(status.value)
             else:
@@ -411,25 +356,7 @@ class L1Cache(MeasurableBase):
         if len(mrs) == 0:
             return Status(StatusCodes.NOT_FOUND)
 
-        if zero_copy:
-            return Status(value=mrs)
-
-        tensors = []
-        with cpu_perf_timer() as get_tensor_clone_dur_ms:
-            block_mr_shape = [s for s in self.block_shape]
-            block_mr_shape[self.block_shape_token_dim] = self.block_ntokens
-            for mr in mrs:
-                tensor = mr.to_tensor(self.block_dtype, block_mr_shape).clone()
-                tensors.append(tensor)
-        log_every_n_seconds(
-            logger,
-            logging.INFO,
-            f"Cloning tensor takes {get_tensor_clone_dur_ms():.4f} ms",
-            n_seconds=10,
-        )
-
-        [mr.ref_down() for mr in mrs]
-        return Status(value=tensors)
+        return Status(value=mrs)
 
     @nvtx_range("delete", "kv_cache_ol.L1Cache")
     def delete(self, prefix: Iterable[int] | None,

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-from .connector import (Connector, ConnectorFeature,
-                        ConnectorRegisterDescriptor, ConnectorSGEntry)
+from .connector import Connector, ConnectorFeature, ConnectorRegisterDescriptor
 
 __all__ = [
-    "Connector", "ConnectorFeature", "ConnectorRegisterDescriptor",
-    "ConnectorSGEntry"
+    "Connector",
+    "ConnectorFeature",
+    "ConnectorRegisterDescriptor",
 ]

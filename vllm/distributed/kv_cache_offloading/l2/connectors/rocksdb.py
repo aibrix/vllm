@@ -7,8 +7,9 @@ import torch
 
 from ... import envs
 from ...common import AsyncBase
+from ...memory import MemoryRegion
 from ...status import Status, StatusCodes
-from ...utils import bytes_to_tensor, ensure_dir_exist, tensor_to_bytes
+from ...utils import ensure_dir_exist
 from . import Connector, ConnectorFeature
 
 
@@ -16,7 +17,7 @@ from . import Connector, ConnectorFeature
                       get="_get",
                       put="_put",
                       delete="_delete")
-class RocksDBConnector(Connector[bytes, torch.Tensor], AsyncBase):
+class RocksDBConnector(Connector[str, torch.Tensor], AsyncBase):
     """RocksDB connector."""
 
     def __init__(
@@ -84,30 +85,29 @@ class RocksDBConnector(Connector[bytes, torch.Tensor], AsyncBase):
         return Status(StatusCodes.OK)
 
     @Status.capture_exception
-    def _exists(self, key: bytes) -> Status:
+    def _exists(self, key: str) -> Status:
         """Check if key is in the store."""
         if key in self.store:
             return Status(StatusCodes.OK)
         return Status(StatusCodes.NOT_FOUND)
 
     @Status.capture_exception
-    def _get(self, key: bytes) -> Status[torch.Tensor]:
+    def _get(self, key: str, mr: MemoryRegion) -> Status:
         """Get a value."""
         val = self.store.get(key)
         if val is None:
             return Status(StatusCodes.NOT_FOUND)
-        tensor = bytes_to_tensor(val)
-        return Status(value=tensor)
-
-    @Status.capture_exception
-    def _put(self, key: bytes, value: torch.Tensor) -> Status:
-        """Put a key value pair"""
-        val = tensor_to_bytes(value)
-        self.store.put(key, val)
+        mr.fill(val)
         return Status(StatusCodes.OK)
 
     @Status.capture_exception
-    def _delete(self, key: bytes) -> Status:
+    def _put(self, key: str, mr: MemoryRegion) -> Status:
+        """Put a key value pair"""
+        self.store.put(key, mr.tobytes())
+        return Status(StatusCodes.OK)
+
+    @Status.capture_exception
+    def _delete(self, key: str) -> Status:
         """Delete a key."""
         self.store.delete(key)
         return Status(StatusCodes.OK)

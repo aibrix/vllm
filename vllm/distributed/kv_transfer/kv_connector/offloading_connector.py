@@ -681,7 +681,10 @@ class OffloadingConnector(KVConnectorBase):
                 exists_status = self.cache.exists(chunk_prefix, chunk_tokens)
                 if exists_status.is_ok():
                     num_existing_tokens = exists_status.value
-                    if num_existing_tokens == chunk_size:
+                    logger.info(
+                        "Request[id=%s] send(%d) encounters %d existing tokens",
+                        seq_request_id, length, num_existing_tokens)
+                    if chunk_size - num_existing_tokens < self.block_ntokens:
                         continue
                     else:
                         # partially exists
@@ -891,12 +894,7 @@ class OffloadingConnector(KVConnectorBase):
                                         next_tokens)
 
                 # get KV caches from offloading service
-                if self.cache_feature.zero_copy:
-                    status = self.cache.acquire(chunk_prefix, chunk_tokens)
-                else:
-                    status = self.cache.get(chunk_prefix,
-                                            chunk_tokens,
-                                            concat=False)
+                status = self.cache.acquire(chunk_prefix, chunk_tokens)
 
                 if not status.is_ok():
                     if not status.is_not_found():
@@ -906,11 +904,8 @@ class OffloadingConnector(KVConnectorBase):
                             str(status))
                     break
 
-                if self.cache_feature.zero_copy:
-                    num_fetched_tokens, handle = status.value
-                    kv_blocks = handle.to_tensors()
-                else:
-                    num_fetched_tokens, kv_blocks = status.value
+                num_fetched_tokens, handle = status.value
+                kv_blocks = handle.to_tensors()
 
                 offset = len(chunk_prefix) - seq_context_len
                 length = num_fetched_tokens
@@ -945,9 +940,8 @@ class OffloadingConnector(KVConnectorBase):
                 # reset shift_len
                 shift_len = 0
 
-                if self.cache_feature.zero_copy:
-                    # release handle
-                    handle.release()
+                # release handle
+                handle.release()
 
                 if num_fetched_tokens < len(chunk_tokens):
                     # didn't receive all tokens for current chunk, break

@@ -14,8 +14,7 @@ import torch.distributed as dist
 import uvloop
 
 from . import envs
-from .cache_handle import (KVCacheHandle, MemoryRegionKVCacheHandle,
-                           ObjectPoolKVCacheHandle)
+from .cache_handle import KVCacheHandle, MemoryRegionKVCacheHandle
 from .common import nvtx_range
 from .common.absl_logging import getLogger, log_every_n_seconds
 from .config import KVCacheConfig
@@ -25,7 +24,6 @@ from .memory import MemoryRegion, TensorPoolAllocator
 from .metrics import KVCacheMetrics, MeasurableBase, MetricRecorder
 from .spec import KVCacheBlockLayout, KVCacheBlockSpec
 from .status import Status, StatusCodes
-from .utils import cpu_perf_timer, in_place_pin_memory
 
 logger = getLogger(__name__)
 
@@ -88,16 +86,13 @@ class KVCacheManager(ABC):
         """
         pass
 
-    @classmethod
+    @abstractmethod
     def allocate(
         self,
         nblocks: int,
     ) -> Status[KVCacheHandle]:
-        """(Optional) Allocate a cache handle that points to buffers owned
+        """Allocate a cache handle that points to buffers owned
         by the kv cache service.
-
-        Only the kv cache services supporting zero-copy need to implement
-        this method.
 
         Args:
             nblocks: The number of blocks to allocate.
@@ -106,15 +101,14 @@ class KVCacheManager(ABC):
         """
         raise NotImplementedError
 
-    @classmethod
+    @abstractmethod
     def acquire(
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-    ) -> Status[Tuple[int, Iterable[KVCacheHandle]]]:
-        """(Optional) Acquire cache handle of the kv tensors for the given
-        prefix and tokens. Only the kv cache services supporting zero-copy
-        need to implement this method.
+    ) -> Status[Tuple[int, KVCacheHandle]]:
+        """Acquire cache handle of the kv tensors for the given prefix and
+        tokens.
 
         The returned cache handle pointing to buffers owned by the kv cache
         service. We can use "KVCacheHandle.to_tensors()" to get tensors sharing
@@ -146,36 +140,11 @@ class KVCacheManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get(
-        self,
-        prefix: Iterable[int] | None,
-        tokens: Iterable[int],
-        concat: bool = True,
-    ) -> Status[Tuple[int, torch.Tensor | Iterable[torch.Tensor]]]:
-        """Get kv tensors from the kv cache service.
-
-        Args:
-            prefix: The prefix of the kv cache. E.g., [1, 2, 3]
-            tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
-            concat: Whether to concatenate the kv tensors.
-        Returns:
-            Number of tokens have been fetched from the kv cache service.
-            The kv tensors corresponding to the tokens:
-                Its layout matches the layout of the kv cache service.
-
-                For example, if the layout is NCLD, then:
-                The k, v tensors for i-th token at the j-th layer are
-                kv_tensors[i][0[j] and kv_tensors[i][1[j], respectively.
-
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def put(
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-        kv_tensors: torch.Tensor | KVCacheHandle,
+        kv_tensors: KVCacheHandle,
     ) -> Status[int]:
         """Put kv tensors to the kv cache service.
 
@@ -183,7 +152,7 @@ class KVCacheManager(ABC):
             prefix: The prefix of the kv cache. E.g., [1, 2, 3]
             tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
             kv_tensors:
-                The kv tensors to put into the kv cache.
+                Cache handle of the kv tensors to put into the kv cache.
 
                 The layout of kv_tensors must match the layout of the
                 kv cache service.
@@ -356,30 +325,32 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                 metrics=self._metrics.l2,
             )
 
+            # more capacity for async/sync load
             if self._l2_inflight_quota > 0:
                 more_capacity = (
                     self._l2_inflight_quota * self.block_nbytes \
                         // self.block_ntokens
                 )
             else:
-                more_capacity = self.block_nbytes
-
-            if self._l2_cache._backend.feature.rdma:
-                more_capacity += (
+                more_capacity = (
                     self._chunk_size * self.block_nbytes \
-                        // self.block_nbytes
+                        // self.block_ntokens
                 )
+
+            # more capacity for get
+            more_capacity += (
+                2 * self._chunk_size * self.block_nbytes \
+                    // self.block_ntokens
+            )
 
             self._allocator.increase(more_capacity)
 
             if self._l2_cache._backend.feature.rdma:
-                for slab in self._allocator._slabs:
-                    status = self._l2_cache.register_mr(
-                        slab.data_ptr(), slab.numel())
-                    if not status.is_ok():
-                        logger.fatal(
-                            f"Failed to register slab with "
-                            f"{self._l2_cache._backend.name}'s register func")
+                status = self._allocator.register(self._l2_cache.register_mr)
+                if not status.is_ok():
+                    logger.fatal(
+                        f"Failed to register slab with "
+                        f"{self._l2_cache._backend.name}'s register func")
 
             # new an event loop to carry out L2Cache ops
             self._event_loop = asyncio.new_event_loop()
@@ -416,10 +387,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         Returns:
             The feature of the kv cache.
         """
-        if self._l1_cache is not None or \
-            self._l2_cache._backend.feature.rdma:
-            return KVCacheFeature(zero_copy=True)
-        return KVCacheFeature()
+        return KVCacheFeature(zero_copy=True)
 
     @property
     def chunk_size(self) -> int:
@@ -496,7 +464,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
     def _l2_ingestion_async_callback(
             self,
             key_pair: Hashable,
-            value: (torch.Tensor | MemoryRegion | KVCacheHandle),
+            value: (MemoryRegion | KVCacheHandle),
     ) -> Status:
         """Ingest the kv tensors to the L2Cache.
         Args:
@@ -521,7 +489,6 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             self._l2_inflight_writes += 1
 
         prefix, tokens = key_pair
-        tensor = value
 
         def _done_callback(
             future: asyncio.Future,
@@ -540,7 +507,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
 
         # Async write to L2Cache
         future = asyncio.run_coroutine_threadsafe(
-            self._l2_cache.put(prefix, tokens, tensor), self._event_loop)
+            self._l2_cache.put(prefix, tokens, value), self._event_loop)
         future.add_done_callback(functools.partial(_done_callback,
                                                    value=value))
         return Status(StatusCodes.OK, len(tokens))
@@ -548,7 +515,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
     def _l2_ingestion_sync_callback(
             self,
             key_pair: Hashable,
-            value: (torch.Tensor | MemoryRegion | KVCacheHandle),
+            value: (MemoryRegion | KVCacheHandle),
     ) -> Status:
         """Ingest the kv tensors to the L2Cache.
         Args:
@@ -559,9 +526,8 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             been ingested.
         """
         prefix, tokens = key_pair
-        tensor = value
         future = asyncio.run_coroutine_threadsafe(
-            self._l2_cache.put(prefix, tokens, tensor), self._event_loop)
+            self._l2_cache.put(prefix, tokens, value), self._event_loop)
         # wait until the write is done
         status = future.result()
 
@@ -588,10 +554,9 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-    ) -> Status[Tuple[int, Iterable[KVCacheHandle]]]:
-        """(Optional) Acquire cache handle of the kv tensors for the given
-        prefix and tokens. Only the kv cache services supporting zero-copy
-        need to implement this method.
+    ) -> Status[Tuple[int, KVCacheHandle]]:
+        """Acquire cache handle of the kv tensors for the given prefix and
+        tokens.
 
         The returned cache handle pointing to buffers owned by the kv cache
         service. We can use "KVCacheHandle.to_tensors()" to get tensors
@@ -604,12 +569,9 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
         Returns:
             Number of tokens have been fetched from the kv cache service.
-            The cache handles corresponding to the given tokens.
+            The cache handle corresponding to the given tokens.
         """
-        if self._l1_cache is None:
-            raise NotImplementedError
-
-        status = self._get_impl(prefix, tokens, zero_copy=True)
+        status = self._get_impl(prefix, tokens)
         if not status.is_ok():
             return status
 
@@ -707,60 +669,10 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             if not future.done():
                 future.cancel()
 
-    @nvtx_range("get", "KVCacheManager")
-    @MeasurableBase.measure(MetricRecorder.OP.GET)
-    def get(
-        self,
-        prefix: Iterable[int] | None,
-        tokens: Iterable[int],
-        concat: bool = True,
-    ) -> Status[Tuple[int, torch.Tensor | Iterable[torch.Tensor]]]:
-        """Get kv tensors from the kv cache service.
-
-        Args:
-            prefix: The prefix of the kv cache. E.g., [1, 2, 3]
-            tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
-            concat: Whether to concatenate the kv tensors.
-        Returns:
-            Number of tokens have been fetched from the kv cache service.
-            The kv tensors corresponding to the tokens:
-                Its layout matches the layout of the kv cache service.
-
-                For example, if the layout is NCLD, then:
-                The k, v tensors for i-th token at the j-th layer are
-                kv_tensors[i][0[j] and kv_tensors[i][1[j], respectively.
-        """
-        status = self._get_impl(prefix, tokens)
-        if not status.is_ok():
-            return status
-
-        if not concat:
-            for i, x in enumerate(status.value):
-                status.value[i] = in_place_pin_memory(x)
-
-            return Status(value=(len(status.value) * self.block_ntokens,
-                                 status.value))
-
-        mrs_and_tensors = status.value
-        result = None
-        with cpu_perf_timer() as get_tensor_cat_dur_ms:
-            result = self._merge_kv_tensors(*mrs_and_tensors)
-            result = in_place_pin_memory(result)
-
-        log_every_n_seconds(
-            logger,
-            logging.INFO,
-            f"Concatenating tensors takes {get_tensor_cat_dur_ms():.4f} ms",
-            n_seconds=10,
-        )
-        return Status(value=(len(mrs_and_tensors) * self.block_ntokens,
-                             result))
-
     def _get_impl(
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-        zero_copy: bool = False,
     ) -> Status[Iterable[torch.Tensor | MemoryRegion]]:
         """Get kv tensors from the kv cache service.
 
@@ -800,7 +712,6 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                 return l1_status
 
         assert self._l2_cache is not None
-        use_rdma = self._l2_cache._backend.feature.rdma
         # fetch missing kv tensors from L2Cache
         prefix_curr = [t for t in prefix] if prefix is not None else []
         prefix_curr.extend(tokens[:num_fetched_blocks * self.block_ntokens])
@@ -808,45 +719,39 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         timeout_s = (num_missing_blocks * self.block_ntokens *
                      self._l2_cache_per_token_timeout_ms) / 1000
 
-        mrs = None
-        if use_rdma:
-            nblocks_curr = len(tokens_curr) // self.block_ntokens
-            status = self._allocator.alloc(nblocks_curr * self.block_nbytes)
-            if not status.is_ok():
-                return status if num_fetched_blocks == 0 else l1_status
-            mrs = status.value
+        # allocate MRs to hold fetched tensors
+        nblocks_curr = len(tokens_curr) // self.block_ntokens
+        status = self._allocator.alloc(nblocks_curr * self.block_nbytes)
+        if not status.is_ok():
+            return status if num_fetched_blocks == 0 else l1_status
+        mrs = status.value
+        tokens_curr = tokens_curr[:len(mrs) * self.block_ntokens]
+
         future = asyncio.run_coroutine_threadsafe(
             self._l2_cache.get(prefix_curr, tokens_curr, mrs),
             self._event_loop)
         try:
             status = future.result(timeout=timeout_s)
             if not status.is_ok():
-                if use_rdma:
-                    self._release(mrs)
                 return status if num_fetched_blocks == 0 else l1_status
 
-            if use_rdma:
-                self._release(mrs[len(status.value):])
+            l2_fetched_mrs = mrs[:status.value]
+            mrs = mrs[status.value:]
 
             # put the fetched kv tensors to L1Cache
             if self._l1_cache is not None:
-                # discard its status
-                self._l1_cache.put(prefix_curr, tokens_curr, status.value)
+                for mr in l2_fetched_mrs:
+                    mr.ref_up()
+                mrs_to_release = l2_fetched_mrs
+                put_tokens_curr = tokens_curr[:len(l2_fetched_mrs) *
+                                              self.block_ntokens]
+                status = self._l1_cache.put(prefix_curr, put_tokens_curr,
+                                            l2_fetched_mrs)
+                if status.is_ok():
+                    mrs_to_release = l2_fetched_mrs[status.value:]
+                self._release(mrs_to_release)
 
-            if zero_copy:
-                if use_rdma:
-                    self._release(mrs[len(status.value):])
-                    return Status(value=fetched_mrs + status.value)
-                else:
-                    # get the cache handles
-                    acquire_status = self._l1_cache.acquire(
-                        prefix_curr, tokens_curr)
-                    if acquire_status.is_ok():
-                        return Status(value=fetched_mrs + acquire_status.value)
-                    else:
-                        return Status(value=fetched_mrs)
-
-            return Status(value=fetched_mrs + status.value)
+            return Status(value=fetched_mrs + l2_fetched_mrs)
         except asyncio.CancelledError:
             # cancelled
             return (Status(StatusCodes.CANCELLED)
@@ -860,6 +765,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             return (Status(StatusCodes.ERROR, e)
                     if num_fetched_blocks == 0 else l1_status)
         finally:
+            self._release(mrs)
             if not future.done():
                 future.cancel()
 
@@ -884,34 +790,6 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                     and num_missing_blocks >= self._double_get_threshold[0])
         return False
 
-    def _merge_kv_tensors(
-        self,
-        *args: torch.Tensor | MemoryRegion,
-    ) -> torch.Tensor:
-        """Merge two or more kv tensors.
-        Args:
-            *args: KV tensors.
-        Returns:
-            The merged kv tensor.
-        """
-        if args is None:
-            return None
-
-        tensors_or_tuples = []
-        for mr_or_tensor in args:
-            if isinstance(mr_or_tensor, MemoryRegion):
-                tensors_or_tuples.append(
-                    mr_or_tensor.to_tensor(self.block_dtype, self.block_shape))
-            else:
-                tensors_or_tuples.append(mr_or_tensor)
-
-        if len(tensors_or_tuples) == 1:
-            self._release(args)
-            return tensors_or_tuples[0]
-
-        self._release(args)
-        return torch.cat(tensors_or_tuples, dim=self.block_shape_token_dim)
-
     def _release(
         self,
         mr_or_handle_or_tensors: Iterable[torch.Tensor | MemoryRegion
@@ -930,11 +808,8 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         self,
         nblocks: int,
     ) -> Status[KVCacheHandle]:
-        """(Optional) Allocate a cache handle that points to buffers
-        owned by the kv cache service.
-
-        Only the kv cache services supporting zero-copy need to implement
-        this method.
+        """Allocate a cache handle that points to buffers owned by the kv
+        cache service.
 
         Args:
             nblocks: The number of blocks to allocate.
@@ -947,7 +822,10 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             # l2 cache only, async put: returns OOM if no inflight quota
             status = None
             with self._lock:
-                if self._l2_inflight_writes >= self._l2_inflight_quota:
+                nblocks = min(
+                    nblocks,
+                    self._l2_inflight_quota - self._l2_inflight_writes)
+                if nblocks <= 0:
                     status = Status(StatusCodes.OUT_OF_MEMORY)
             if status is None:
                 status = self._allocator.alloc(self.block_nbytes * nblocks)
@@ -966,7 +844,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-        kv_tensors: torch.Tensor | KVCacheHandle,
+        kv_tensors: KVCacheHandle,
     ) -> Status[int]:
         """Put kv tensors to the kv cache service.
 
@@ -974,7 +852,7 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             prefix: The prefix of the kv cache. E.g., [1, 2, 3]
             tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
             kv_tensors:
-                The kv tensors to put into the kv cache.
+                Cache handle of the kv tensors to put into the kv cache.
 
                 The layout of kv_tensors must match the layout of the
                 kv cache service.
@@ -991,20 +869,14 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         # eviction policy to asynchronously ingest kv tensors to L2Cache.
         # Otherwise, we ingest kv tensors to L2Cache directly.
         if self._l1_cache is not None:
-            if isinstance(kv_tensors, ObjectPoolKVCacheHandle):
-                handle = kv_tensors
-                kv_tensors = kv_tensors._tensors
-                status = self._l1_cache.put(prefix, tokens, kv_tensors)
-                # return all tensors back to the object pool
-                handle.release()
-            elif isinstance(kv_tensors, MemoryRegionKVCacheHandle):
+            if isinstance(kv_tensors, MemoryRegionKVCacheHandle):
                 handle = kv_tensors
                 kv_tensors = kv_tensors._mrs
                 status = self._l1_cache.put(prefix, tokens, kv_tensors)
                 # release mrs that are not put to L1Cache
                 self._release(handle._mrs[status.value:])
             else:
-                status = self._l1_cache.put(prefix, tokens, kv_tensors)
+                raise ValueError("Unsupported kv tensors type")
 
             if not status.is_ok():
                 return status
@@ -1123,57 +995,15 @@ class GroupAwareKVCacheManager(BaseKVCacheManager):
     def __str__(self) -> str:
         return self.__repr__()
 
-    @nvtx_range("get", "GroupAwareKVCacheManager")
-    @MeasurableBase.measure(MetricRecorder.OP.GET)
-    def get(
-        self,
-        prefix: Iterable[int] | None,
-        tokens: Iterable[int],
-        concat: bool = True,
-    ) -> Status[Tuple[int, torch.Tensor | Iterable[torch.Tensor]]]:
-        """Get kv tensors from the kv cache service.
-
-        Args:
-            prefix: The prefix of the kv cache. E.g., [1, 2, 3]
-            tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
-            concat: Whether to concatenate the kv tensors.
-        Returns:
-            Number of tokens have been fetched from the kv cache service.
-            The kv tensors corresponding to the tokens:
-                Its layout matches the layout of the kv cache service.
-
-                For example, if the layout is NCLD, then:
-                The k, v tensors for i-th token at the j-th layer are
-                kv_tensors[i][0[j] and kv_tensors[i][1[j], respectively.
-        """
-        status = self._get_impl(prefix, tokens)
-        if not status.is_ok():
-            return status
-
-        if not concat:
-            return status
-
-        with cpu_perf_timer() as get_tensor_cat_dur_ms:
-            result = self._merge_kv_tensors(*status.value[1])
-
-        log_every_n_seconds(
-            logger,
-            logging.INFO,
-            f"Concatenating tensors takes {get_tensor_cat_dur_ms():.4f} ms",
-            n_seconds=10,
-        )
-        return Status(value=(status.value[0], result))
-
     @nvtx_range("acquire", "GroupAwareKVCacheManager")
     @MeasurableBase.measure(MetricRecorder.OP.ACQUIRE)
     def acquire(
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-    ) -> Status[Tuple[int, Iterable[KVCacheHandle]]]:
-        """(Optional) Acquire cache handle of the kv tensors for the given
-        prefix and tokens. Only the kv cache services supporting zero-copy
-        need to implement this method.
+    ) -> Status[Tuple[int, KVCacheHandle]]:
+        """Acquire cache handle of the kv tensors for the given prefix and
+        tokens.
 
         The returned cache handle pointing to buffers owned by the kv cache
         service. We can use "KVCacheHandle.to_tensors()" to get tensors sharing
@@ -1186,9 +1016,9 @@ class GroupAwareKVCacheManager(BaseKVCacheManager):
             tokens: The tokens of the kv cache. E.g., [4, 5, 6, 7]
         Returns:
             Number of tokens have been fetched from the kv cache service.
-            The cache handles corresponding to the given tokens.
+            The cache handle corresponding to the given tokens.
         """
-        status = self._get_impl(prefix, tokens, zero_copy=True)
+        status = self._get_impl(prefix, tokens)
         if not status.is_ok():
             return status
         handle = MemoryRegionKVCacheHandle(self.block_dtype, self.block_shape,
@@ -1199,7 +1029,6 @@ class GroupAwareKVCacheManager(BaseKVCacheManager):
         self,
         prefix: Iterable[int] | None,
         tokens: Iterable[int],
-        zero_copy: bool = False,
     ) -> Status[Tuple[int, Iterable[torch.Tensor | KVCacheHandle]]]:
         """Get kv tensors / cache handles.
 
@@ -1225,9 +1054,7 @@ class GroupAwareKVCacheManager(BaseKVCacheManager):
             if next_tokens and len(next_tokens) >= 0:
                 # prefetch
                 super().prefetch(chunk_prefix + next_tokens, next_tokens)
-            status = super()._get_impl(chunk_prefix,
-                                       chunk_tokens,
-                                       zero_copy=zero_copy)
+            status = super()._get_impl(chunk_prefix, chunk_tokens)
             # we only care about the error code and num of blocks
             coll_status = (Status(
                 value=len(status.value)) if status.is_ok() else status)

@@ -345,13 +345,6 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
 
             self._allocator.increase(more_capacity)
 
-            if self._l2_cache._backend.feature.rdma:
-                status = self._allocator.register(self._l2_cache.register_mr)
-                if not status.is_ok():
-                    logger.fatal(
-                        f"Failed to register slab with "
-                        f"{self._l2_cache._backend.name}'s register func")
-
             # new an event loop to carry out L2Cache ops
             self._event_loop = asyncio.new_event_loop()
             self._thread = threading.Thread(
@@ -363,6 +356,14 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             # launch L2Cache
             status = self._l2_cache.open()
             status.raise_if_has_exception()
+
+            if self._l2_cache._backend.feature.rdma:
+                status = self._allocator.register(self._l2_cache.register_mr)
+                if not status.is_ok():
+                    logger.fatal(
+                        f"Failed to register slab with "
+                        f"{self._l2_cache._backend.name}'s register func, "
+                        f"error={status}")
 
             # register l1 cache callback
             if self._l1_cache is not None:

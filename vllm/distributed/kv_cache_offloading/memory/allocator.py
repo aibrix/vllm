@@ -197,7 +197,9 @@ class TensorPoolAllocator:
     def __str__(self) -> str:
         return self.__repr__()
 
-    def register(self, register_fn: Callable[[int, int], Status[Any]]) -> None:
+    def register(
+            self, register_fn: Callable[[int, int],
+                                        Status[Any]]) -> Status[Any]:
         for slab in self._slabs:
             status = register_fn(slab.data_ptr(), slab.numel())
             if not status.is_ok():
@@ -205,6 +207,7 @@ class TensorPoolAllocator:
             else:
                 setattr(slab, REGISTER_DESCRIPTOR_ATTR_NAME,
                         weakref.ref(status.value))
+            return status
 
     def increase(self, size_nbytes: int) -> None:
         assert size_nbytes > 0, "size_nbytes must be greater than 0"

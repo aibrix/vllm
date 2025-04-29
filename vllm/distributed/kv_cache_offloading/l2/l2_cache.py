@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import itertools
+import logging
 from concurrent.futures import Executor
-from typing import Iterable, Iterator, Tuple
+from typing import Any, Iterable, Iterator, Tuple
 
 import torch
 
 from ..cache_handle import KVCacheHandle
 from ..common import nvtx_range
-from ..common.absl_logging import getLogger
+from ..common.absl_logging import getLogger, log_every_n_seconds
 from ..memory import MemoryRegion
 from ..metrics import L2CacheMetrics, MeasurableBase, MetricRecorder
 from ..spec import KVCacheBlockLayout, KVCacheBlockSpec
@@ -68,7 +69,8 @@ class L2Cache(MeasurableBase):
                     partition_id)
 
     def __repr__(self) -> str:
-        return f"L2Cache(backend={self._backend.name})"
+        backend_name = "None" if self._backend is None else self._backend.name
+        return f"L2Cache(backend={backend_name})"
 
     def __str__(self) -> str:
         return self.__repr__()
@@ -89,13 +91,14 @@ class L2Cache(MeasurableBase):
             return self._backend.close()
         return Status(StatusCodes.OK)
 
-    def register_mr(self, addr: int, length: int) -> Status:
+    def register_mr(self, addr: int, length: int) -> Status[Any]:
         if not self._backend.feature.rdma:
             raise NotImplementedError
         status = self._backend.register_mr(addr, length)
         if not status.is_ok():
             return status
         self._register_descs.append(status.value)
+        return status
 
     @nvtx_range("prefetch", "kv_cache_ol.L2Cache")
     async def prefetch(
@@ -231,9 +234,10 @@ class L2Cache(MeasurableBase):
         num_processed_blocks = 0
         for batch in block_batches:
             num_blocks_in_batch = len(batch)
-            statuses = await self._backend.mput(*batch)
+            statuses = await self._backend.mput(*zip(*batch))
 
-            if all(status.is_ok() for status in statuses):
+            if isinstance(statuses, list) and all(status.is_ok()
+                                                  for status in statuses):
                 # all success, continue to the next batch
                 num_processed_blocks += num_blocks_in_batch
                 continue
@@ -244,6 +248,15 @@ class L2Cache(MeasurableBase):
             else:
                 # this is the first batch and at least one block in
                 # current batch is failed, return error.
+                if isinstance(statuses, Status):
+                    log_every_n_seconds(
+                        logger,
+                        logging.ERROR,
+                        f"mput failed: {statuses}",
+                        n_seconds=3,
+                    )
+                    return statuses
+
                 failures = [
                     status for status in statuses if not status.is_ok()
                 ]
@@ -310,8 +323,6 @@ class L2Cache(MeasurableBase):
             return Status(StatusCodes.INVALID)
 
         assert len(mrs) == len(tokens) // self.block_ntokens
-        if self._backend.feature.mput_mget:
-            return await self._gather(prefix, tokens, mrs)
 
         keys = [key for _, key in self._cache_block_keys(prefix, tokens)]
         # use mput if mput_mget is enabled
@@ -327,9 +338,17 @@ class L2Cache(MeasurableBase):
                                                 MemoryRegion]]) -> Status[int]:
         nr = 0
         for batch in block_batches:
-            statuses = await self._backend.mget(*batch)
+            statuses = await self._backend.mget(*zip(*batch))
 
             should_break = False
+            if isinstance(statuses, Status):
+                log_every_n_seconds(
+                    logger,
+                    logging.ERROR,
+                    f"mget failed: {statuses}",
+                    n_seconds=3,
+                )
+                statuses = [statuses]
             for status in statuses:
                 if not status.is_ok():
                     should_break = True

@@ -35,7 +35,6 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
         config = infinistore.ClientConfig(
             host_addr=envs.VLLM_KV_CACHE_OL_INFINISTORE_HOST_ADDR,
             service_port=envs.VLLM_KV_CACHE_OL_INFINISTORE_SERVICE_PORT,
-            log_level="info",
             connection_type=envs.VLLM_KV_CACHE_OL_INFINISTORE_CONNECTION_TYPE,
             ib_port=envs.VLLM_KV_CACHE_OL_INFINISTORE_IB_PORT,
             link_type=envs.VLLM_KV_CACHE_OL_INFINISTORE_LINK_TYPE,
@@ -51,13 +50,17 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
     def feature(self) -> ConnectorFeature:
         feature = ConnectorFeature()
         if self.config is not None and \
-            self.config.connection_type is infinistore.TYPE_RDMA:
+            self.config.connection_type == infinistore.TYPE_RDMA:
             feature.mput_mget = True
             feature.rdma = True
         return feature
 
     def _key(self, key: str) -> str:
         return key.hex() + self.key_suffix
+
+    def _thread_open(self) -> Status:
+        global thread_conn
+        thread_conn = infinistore.InfinityConnection(self.config)
 
     @Status.capture_exception
     def open(self) -> Status:
@@ -104,7 +107,7 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
         lists = []
         for key, mr in zip(keys, mrs):
             if (len(lists) == 0
-                    or lists[-1][0].base_addr != mr.slab.data_ptr()
+                    or lists[-1][0][1].data_ptr() != mr.slab.data_ptr()
                     or len(lists[-1]) >= batch_size):
                 lists.append([(key, mr)])
             else:
@@ -144,7 +147,7 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
                   key: str,
                   mr: MemoryRegion = None) -> Status[torch.Tensor]:
         """Get a value."""
-        if self.config.connection_type is infinistore.TYPE_RDMA:
+        if self.config.connection_type == infinistore.TYPE_RDMA:
             return await self._rdma_get(key, mr)
         else:
             tcp_get = functools.partial(self._tcp_get, key)
@@ -162,8 +165,9 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
     async def _rdma_get(self, key: str, mr: MemoryRegion) -> Status:
         """Get a value via RDMA."""
         try:
-            await self.conn.rdma_read_cache_async([(self._key(key), 0)],
-                                                  mr.length, mr.data_ptr())
+            await self.conn.rdma_read_cache_async([(self._key(key), mr.addr)],
+                                                  mr.length,
+                                                  mr.slab.data_ptr())
         except infinistore.InfiniStoreKeyNotFound:
             return Status(StatusCodes.NOT_FOUND)
         return Status(StatusCodes.OK)
@@ -171,7 +175,7 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
     @Status.capture_exception
     async def put(self, key: str, mr: MemoryRegion) -> Status:
         """Put a key value pair"""
-        if self.config.connection_type is infinistore.TYPE_RDMA:
+        if self.config.connection_type == infinistore.TYPE_RDMA:
             return await self._rdma_put(key, mr)
         else:
             tcp_put = functools.partial(self._tcp_put, key, mr)

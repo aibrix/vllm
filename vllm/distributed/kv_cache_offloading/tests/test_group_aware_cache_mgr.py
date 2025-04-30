@@ -13,14 +13,14 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 
 from .. import GroupAwareKVCacheManager, KVCacheBlockLayout, KVCacheConfig
-from .conftest import (TEMP_ROOT, discard_all_vllm_envs, get_cache_conf,
+from .conftest import (TEMP_ROOT, discard_all_aibrix_envs, get_cache_conf,
                        randomize_cache_handle)
 
 
 @pytest.fixture(params=["l1", "l2_sync", "l2_async", "l1_l2_sync"],
                 scope="function")
 def envs(request):
-    discard_all_vllm_envs()
+    discard_all_aibrix_envs()
 
     os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "1"
 

@@ -53,7 +53,7 @@ OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
 }
 
 
-class OffloadingConnectorComputeMetrics(Metrics):
+class AIBrixOffloadingConnectorComputeMetrics(Metrics):
     """Compute metrics."""
 
     num_tokens: List[int] = []
@@ -97,7 +97,7 @@ class OffloadingConnectorComputeMetrics(Metrics):
         return summary
 
 
-class OffloadingConnectorOpMetrics(Metrics):
+class AIBrixOffloadingConnectorOpMetrics(Metrics):
     """Op metrics."""
 
     class OP(enum.Enum):
@@ -165,7 +165,7 @@ class OffloadingConnectorOpMetrics(Metrics):
                                      iter_len if iter_len > 0 else 0)
         summary = f"{self._op.name}: Num. of ops: {self.num_ops}, " \
                   f"Total num. of tokens: {self.total_tokens}, "
-        if self._op is OffloadingConnectorOpMetrics.OP.SEND:
+        if self._op is AIBrixOffloadingConnectorOpMetrics.OP.SEND:
             summary += f"Total num. of sent tokens: " \
                        f"{self.total_sent_or_recved_tokens}, "
         else:
@@ -175,7 +175,7 @@ class OffloadingConnectorOpMetrics(Metrics):
                    f"avg={avg_prefixes:.2f}, " \
                    f"Num. of tokens (iter): total={total_tokens}, " \
                    f"avg={avg_tokens:.2f}"
-        if self._op is OffloadingConnectorOpMetrics.OP.SEND:
+        if self._op is AIBrixOffloadingConnectorOpMetrics.OP.SEND:
             summary += f", Num. of sent tokens (iter): " \
                        f"total={total_sent_or_recved_tokens}, " \
                        f"avg={avg_sent_or_recved_tokens:.2f}"
@@ -196,14 +196,14 @@ class OffloadingConnectorOpMetrics(Metrics):
                 summary += f", model_input rebuild latency (iter, ms): " \
                            f"total={total_rebuild_lat_ms:.2f}, " \
                            f"avg={avg_rebuild_lat_ms:.2f}"
-        if self._op is OffloadingConnectorOpMetrics.OP.RECV:
+        if self._op is AIBrixOffloadingConnectorOpMetrics.OP.RECV:
             hit_rate = (self.total_sent_or_recved_tokens * 100 /
                         self.total_tokens) if self.total_tokens > 0 else 0
             summary += f", Hit rate: {hit_rate:.2f}%"
         return summary
 
 
-class OffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
+class AIBrixOffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
     OP_TYPE_LABELNAME = "op_type"
 
     def __init__(self, *, prefix, labelnames, counter_cls, gauge_cls,
@@ -264,12 +264,12 @@ class OffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
     def export(
         self,
         labels: Dict[str, str],
-        metrics: OffloadingConnectorOpMetrics
-        | OffloadingConnectorComputeMetrics,
+        metrics: AIBrixOffloadingConnectorOpMetrics
+        | AIBrixOffloadingConnectorComputeMetrics,
     ) -> None:
         labels = labels.copy()
 
-        if isinstance(metrics, OffloadingConnectorOpMetrics):
+        if isinstance(metrics, AIBrixOffloadingConnectorOpMetrics):
             labels[self.OP_TYPE_LABELNAME] = metrics._op.name.lower()
             self._export_op_metrics(labels, metrics)
         else:
@@ -279,7 +279,7 @@ class OffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
     def _export_op_metrics(
         self,
         labels: Dict[str, str],
-        metrics: OffloadingConnectorOpMetrics,
+        metrics: AIBrixOffloadingConnectorOpMetrics,
     ) -> None:
         self._export_counter(self.counter_num_ops, labels,
                              len(metrics.num_prefixes))
@@ -287,7 +287,7 @@ class OffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
                                metrics.num_prefixes)
         self._export_histogram(self.histogram_iteration_tokens, labels,
                                metrics.num_tokens)
-        if metrics._op is OffloadingConnectorOpMetrics.OP.SEND:
+        if metrics._op is AIBrixOffloadingConnectorOpMetrics.OP.SEND:
             self._export_histogram(self.histogram_iteration_sent_tokens,
                                    labels, metrics.num_sent_or_recved_tokens)
         else:
@@ -302,7 +302,7 @@ class OffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
     def _export_compute_metrics(
         self,
         labels: Dict[str, str],
-        metrics: OffloadingConnectorComputeMetrics,
+        metrics: AIBrixOffloadingConnectorComputeMetrics,
     ) -> None:
         self._export_histogram(self.histogram_iteration_tokens, labels,
                                metrics.num_tokens)
@@ -311,20 +311,20 @@ class OffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
                                    metrics.op_lat_ms)
 
 
-class OffloadingConnectorMetrics(KVTransferMetrics):
+class AIBrixOffloadingConnectorMetrics(KVTransferMetrics):
 
     def __init__(self, metrics: KVCacheMetrics) -> None:
         self._cache_metrics = metrics
         self._time_measurement_enabled = (
             self._cache_metrics.time_measurement_enabled)
-        self._compute_metrics = OffloadingConnectorComputeMetrics(
+        self._compute_metrics = AIBrixOffloadingConnectorComputeMetrics(
             enable_time_measurement=self._time_measurement_enabled)
-        self._send_metrics = OffloadingConnectorOpMetrics(
-            OffloadingConnectorOpMetrics.OP.SEND,
+        self._send_metrics = AIBrixOffloadingConnectorOpMetrics(
+            AIBrixOffloadingConnectorOpMetrics.OP.SEND,
             enable_time_measurement=self._time_measurement_enabled,
         )
-        self._recv_metrics = OffloadingConnectorOpMetrics(
-            OffloadingConnectorOpMetrics.OP.RECV,
+        self._recv_metrics = AIBrixOffloadingConnectorOpMetrics(
+            AIBrixOffloadingConnectorOpMetrics.OP.RECV,
             enable_time_measurement=self._time_measurement_enabled,
         )
 
@@ -339,15 +339,15 @@ class OffloadingConnectorMetrics(KVTransferMetrics):
         self._recv_metrics.reset()
 
     def __str__(self) -> str:
-        return f"OffloadingConnector metrics: " \
+        return f"AIBrixOffloadingConnector metrics: " \
                f"{self._compute_metrics.summary()}" \
                f"\n\t{self._send_metrics.summary()}" \
                f"\n\t{self._recv_metrics.summary()}" \
                f"\n\t{self._cache_metrics.summary()}"
 
 
-class OffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
-    """Metrics for OffloadingConnector."""
+class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
+    """Metrics for AIBrixOffloadingConnector."""
 
     def __init__(self, *, prefix, labelnames, gauge_cls, counter_cls,
                  histogram_cls):
@@ -359,7 +359,7 @@ class OffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
             histogram_cls=histogram_cls,
         )
         self.ol_connector_op_metrics_exporter = \
-            OffloadingConnectorOpMetricsExporter(
+            AIBrixOffloadingConnectorOpMetricsExporter(
             prefix=prefix,
             labelnames=labelnames,
             gauge_cls=gauge_cls,
@@ -392,7 +392,7 @@ class OffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
 
 
 @dataclasses.dataclass
-class OffloadingConnectorCachedMeta:
+class AIBrixOffloadingConnectorCachedMeta:
     context_tokens: List[int] = dataclasses.field(default_factory=list)
     context_tokens_offset: int = 0
 
@@ -401,12 +401,12 @@ class OffloadingConnectorCachedMeta:
     # recv always returns nothing for simplicity. Suppose query_len = 511:
     #
     # - In the first iteration, since no tokens are received, we need to send
-    #   all 511 tokens. However, in OffloadingConnector, the length is aligned
-    #   to 496, and the remaining 15 tokens are ignored.
+    #   all 511 tokens. However, in AIBrixOffloadingConnector, the length is
+    #   aligned to 496, and the remaining 15 tokens are ignored.
     # - In the second iteration, query_len is likely 511 again, while
     #   context_len is 511. To prevent a gap in the storage layer caused by
-    #   skipping 15 tokens in the first iteration, OffloadingConnector shifts
-    #   context_len to 496 and attempts to send (15 + 511) tokens.
+    #   skipping 15 tokens in the first iteration, AIBrixOffloadingConnector
+    #   shifts context_len to 496 and attempts to send (15 + 511) tokens.
     #
     # To handle this correctly, we need to determine the slot mapping for those
     # 15 tokens. The actual number varies from 1 to 15 but is always less than
@@ -427,9 +427,9 @@ class OffloadingConnectorCachedMeta:
         self.context_tokens_offset += length
 
 
-class OffloadingConnector(KVConnectorBase):
-    """OffloadingConnector is a KVConnector that offloads KV caches and hidden
-    states to the kv cache offloading service.
+class AIBrixOffloadingConnector(KVConnectorBase):
+    """AIBrixOffloadingConnector is a KVConnector that offloads KV caches
+    and hidden states to the kv cache offloading service.
     """
 
     def __init__(
@@ -506,8 +506,9 @@ class OffloadingConnector(KVConnectorBase):
         self.cache_feature = self.cache.feature
         self.kv_cache_dtype = kv_cache_dtype
 
-        self._connector_cache: Dict[str, OffloadingConnectorCachedMeta] = {}
-        self._metrics = OffloadingConnectorMetrics(self.cache.metrics)
+        self._connector_cache: Dict[str,
+                                    AIBrixOffloadingConnectorCachedMeta] = {}
+        self._metrics = AIBrixOffloadingConnectorMetrics(self.cache.metrics)
         # meta to track compute perf
         self._compute_start_event = torch.cuda.Event(enable_timing=True)
         self._compute_end_event = torch.cuda.Event(enable_timing=True)
@@ -518,7 +519,7 @@ class OffloadingConnector(KVConnectorBase):
         return self._metrics
 
     def get_metrics_exporter_cls(self):
-        return OffloadingConnectorMetricsExporter
+        return AIBrixOffloadingConnectorMetricsExporter
 
     def close(self) -> None:
         if self.cache:
@@ -571,7 +572,7 @@ class OffloadingConnector(KVConnectorBase):
     ) -> None:
         if self._connector_cache[seq_request_id] is None:
             self._connector_cache[
-                seq_request_id] = OffloadingConnectorCachedMeta(seq_len)
+                seq_request_id] = AIBrixOffloadingConnectorCachedMeta(seq_len)
         seq_request_cache = self._connector_cache[seq_request_id]
         if kv_transfer_context_tokens is not None:
             assert seq_request_cache.context_tokens_offset == 0
@@ -627,7 +628,6 @@ class OffloadingConnector(KVConnectorBase):
             return
 
         num_prefills = attn_metadata.num_prefills
-        input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.seq_lens[:num_prefills]
         query_lens = model_input.query_lens[:num_prefills]
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
@@ -668,13 +668,13 @@ class OffloadingConnector(KVConnectorBase):
             # skip if there are not enough tokens to send after alignment
             if prompt_len == seq_lens[seq_idx]:
                 # If chunked prefill is not enabled or this is the last
-                # chunk, we use a larger skip threashold
-                skip_threashold = OFFLOADING_CONNECTOR_SKIP_THRESHOLD
+                # chunk, we use a larger skip threshold
+                skip_threshold = OFFLOADING_CONNECTOR_SKIP_THRESHOLD
             else:
                 # This is an intermediate chunk, only skip if this is not
                 # a full block
-                skip_threashold = 1
-            if aligned_query_len <= skip_threashold * self.block_ntokens:
+                skip_threshold = 1
+            if aligned_query_len <= skip_threshold * self.block_ntokens:
                 continue
 
             assert len(
@@ -884,13 +884,13 @@ class OffloadingConnector(KVConnectorBase):
             # skip if there are not enough tokens to receive after alignment
             if prompt_len == seq_lens[seq_idx]:
                 # If chunked prefill is not enabled or this is the last
-                # chunk, we use a larger skip threashold
-                skip_threashold = OFFLOADING_CONNECTOR_SKIP_THRESHOLD
+                # chunk, we use a larger skip threshold
+                skip_threshold = OFFLOADING_CONNECTOR_SKIP_THRESHOLD
             else:
                 # This is an intermediate chunk, only skip if this is not
                 # a full block
-                skip_threashold = 1
-            if aligned_query_len <= skip_threashold * self.block_ntokens:
+                skip_threshold = 1
+            if aligned_query_len <= skip_threshold * self.block_ntokens:
                 continue
 
             seq_cached_meta = self._connector_cache[seq_request_id]

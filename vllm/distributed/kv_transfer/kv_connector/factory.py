@@ -107,6 +107,6 @@ KVConnectorFactory.register_connector(
     "LMCacheConnectorV1")
 
 KVConnectorFactory.register_connector(
-    "OffloadingConnector",
-    "vllm.distributed.kv_transfer.kv_connector.offloading_connector",
-    "OffloadingConnector")
+    "AIBrixOffloadingConnector",
+    "vllm.distributed.kv_transfer.kv_connector.aibrix_offloading_connector",
+    "AIBrixOffloadingConnector")

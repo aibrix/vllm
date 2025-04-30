@@ -9,13 +9,14 @@ import torch
 
 from .. import BaseKVCacheManager, KVCacheConfig
 from ..memory import TensorPoolAllocator
-from .conftest import TEMP_ROOT, discard_all_vllm_envs, randomize_cache_handle
+from .conftest import (TEMP_ROOT, discard_all_aibrix_envs,
+                       randomize_cache_handle)
 
 
 @pytest.fixture(params=["l1", "l2_sync", "l2_async", "l1_l2_sync"],
                 scope="function")
 def cache_mgr_fixture(cache_conf_fixture, request):
-    discard_all_vllm_envs()
+    discard_all_aibrix_envs()
 
     os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "1"
 

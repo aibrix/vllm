@@ -15,12 +15,12 @@ CACHE_DTYPE = torch.bfloat16
 TEMP_ROOT = os.path.join(os.path.expanduser("."), ".test_dir")
 
 
-def discard_all_vllm_envs():
-    # Find all environment variables that start with "VLLM_"
-    vllm_keys = [key for key in os.environ if key.startswith("VLLM_")]
+def discard_all_aibrix_envs():
+    # Find all environment variables that start with "AIBRIX_"
+    aibrix_keys = [key for key in os.environ if key.startswith("AIBRIX_")]
 
     # Remove them from the environment
-    for key in vllm_keys:
+    for key in aibrix_keys:
         del os.environ[key]
 
 

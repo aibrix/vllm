@@ -111,6 +111,8 @@ class ModelInputForGPU(ModelRunnerInputBase):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "seq_lens": self.seq_lens,
+            "query_lens": self.query_lens,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
@@ -164,6 +166,8 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "seq_lens": self.seq_lens,
+            "query_lens": self.query_lens,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
             "multi_modal_kwargs": self.multi_modal_kwargs,
@@ -1687,8 +1691,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if self.vllm_config.kv_transfer_config is not None:
             kv_transfer_metadata = KVTransferMetadata.prepare(
                 seq_group_metadata_list,
-                model_input.seq_lens,
-                model_input.query_lens,
                 self.kv_transfer_metadata_cache,
             )
             # attach seq_group_metadata_list for rebuilding model_input

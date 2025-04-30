@@ -945,20 +945,21 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         Returns:
             chunk prefix tokens, chunk tokens, next chunk tokens, and all tokens
         """
-        not_none_prefix = tuple() if prefix is None else tuple(prefix)
+        not_none_prefix = tuple(prefix or [])
         all = tuple(not_none_prefix + tuple(tokens))
 
         cache_key_len = len(not_none_prefix)
         num_tokens = len(tokens)
         aligned_num_tokens = num_tokens - num_tokens % self.block_ntokens
         num_chunks = -(-aligned_num_tokens // self._chunk_size)
-        for i in range(num_chunks):
+        for _ in range(num_chunks):
+            chunk_end = cache_key_len + self._chunk_size
+            next_chunk_end = chunk_end + self._chunk_size
             yield (
                 all[:cache_key_len],
-                all[cache_key_len:cache_key_len + self._chunk_size],
-                all[cache_key_len + self._chunk_size:cache_key_len +
-                    2 * self._chunk_size] if cache_key_len +
-                2 * self._chunk_size < len(all) else tuple(),
+                all[cache_key_len:chunk_end],
+                all[chunk_end:next_chunk_end]
+                if next_chunk_end < len(all) else tuple(),
                 all,
             )
             cache_key_len += self._chunk_size

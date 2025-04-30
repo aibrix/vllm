@@ -48,7 +48,7 @@ def _init_attn_metadata_from_tensor_dict(
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
         if field.name in tensor_dict:
-            if field.name == "input_positions":
+            if field.name in ["input_positions", "seq_lens"]:
                 valid_attn_kwargs[field.name] = tensor_dict[field.name]
             else:
                 valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
@@ -102,9 +102,9 @@ def _init_kv_transfer_metadata_from_tensor_dict(
 
     kv_transfer_metadata = tensor_dict.pop("kv_transfer_metadata", None)
     if kv_transfer_metadata is not None:
-        seq_groups, seq_lens, query_lens = kv_transfer_metadata
+        seq_groups = kv_transfer_metadata
         tensor_dict["kv_transfer_metadata"] = KVTransferMetadata(
-            seq_groups=seq_groups, seq_lens=seq_lens, query_lens=query_lens)
+            seq_groups=seq_groups)
     return tensor_dict
 
 
@@ -116,11 +116,7 @@ def _add_kv_transfer_metadata_broadcastable_dict(
     KVTransferMetadata fields.
     """
     if kv_transfer_metadata is not None:
-        tensor_dict["kv_transfer_metadata"] = (
-            kv_transfer_metadata.seq_groups,
-            kv_transfer_metadata.seq_lens,
-            kv_transfer_metadata.query_lens,
-        )
+        tensor_dict["kv_transfer_metadata"] = kv_transfer_metadata.seq_groups
 
 
 def _init_frozen_model_input_from_tensor_dict(

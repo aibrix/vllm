@@ -383,12 +383,12 @@ class L1Cache(MeasurableBase):
         Returns:
             The cache block keys of the kv tensors.
         """
-        not_none_prefix = tuple() if prefix is None else tuple(prefix)
+        not_none_prefix = tuple(prefix or [])
         all = tuple(not_none_prefix + tuple(tokens))
 
         cache_key_len = len(not_none_prefix)
         num_blocks = len(tokens) // self.block_ntokens
-        for i in range(num_blocks):
+        for _ in range(num_blocks):
             yield (
                 all[:cache_key_len],
                 all[cache_key_len:cache_key_len + self.block_ntokens],

@@ -57,12 +57,8 @@ class KVTransferMetadata:
     def __init__(
         self,
         seq_groups: List[SequenceGroupToKVTransfer],
-        seq_lens: List[int],
-        query_lens: List[int],
     ) -> None:
         self.seq_groups = seq_groups
-        self.seq_lens = seq_lens
-        self.query_lens = query_lens
         # only driver has seq_group_metadata_list and runner
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = None
         self.runner: GPUModelRunnerBase = None
@@ -70,8 +66,6 @@ class KVTransferMetadata:
     @staticmethod
     def prepare(
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        seq_lens: List[int],
-        query_lens: List[int],
         cache: Optional[KVTransferMetadataCache] = None,
     ) -> "KVTransferMetadata":
         """
@@ -109,11 +103,8 @@ class KVTransferMetadata:
         if cache is not None:
             cache.reset()
 
-        metadata = KVTransferMetadata(seq_groups=seq_groups,
-                                      seq_lens=seq_lens,
-                                      query_lens=query_lens)
+        metadata = KVTransferMetadata(seq_groups=seq_groups)
         return metadata
 
     def __repr__(self) -> str:
-        return f"KVTransferMetadata(seq_groups={self.seq_groups}, " \
-               f"seq_lens={self.seq_lens}, query_lens={self.query_lens})"
+        return f"KVTransferMetadata(seq_groups={self.seq_groups})"

@@ -519,7 +519,7 @@ class OffloadingConnector(KVConnectorBase):
                 self._connector_cache.pop(req_id)
 
         # remove decode requests
-        seq_lens = model_input.kv_transfer_metadata.seq_lens
+        seq_lens = model_input.seq_lens
         num_prefills = model_input.attn_metadata.num_prefills
         request_ids = list(model_input.request_ids_to_seq_ids.keys())
         for seq_idx, _ in enumerate(seq_lens):
@@ -600,8 +600,8 @@ class OffloadingConnector(KVConnectorBase):
 
         num_prefills = attn_metadata.num_prefills
         input_tokens_tensor = model_input.input_tokens
-        seq_lens = kv_transfer_metadata.seq_lens[:num_prefills]
-        query_lens = kv_transfer_metadata.query_lens[:num_prefills]
+        seq_lens = model_input.seq_lens[:num_prefills]
+        query_lens = model_input.query_lens[:num_prefills]
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
@@ -799,8 +799,8 @@ class OffloadingConnector(KVConnectorBase):
 
         num_prefills = attn_metadata.num_prefills
         input_tokens_tensor = model_input.input_tokens
-        seq_lens = kv_transfer_metadata.seq_lens[:num_prefills]
-        query_lens = kv_transfer_metadata.query_lens[:num_prefills]
+        seq_lens = model_input.seq_lens[:num_prefills]
+        query_lens = model_input.query_lens[:num_prefills]
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
@@ -979,8 +979,7 @@ class OffloadingConnector(KVConnectorBase):
 
         if self._metrics.time_measurement_enabled:
             self._compute_start_event.record()
-            self._compute_total = sum(
-                kv_transfer_metadata.query_lens) - sum(reused_lens)
+            self._compute_total = sum(query_lens) - sum(reused_lens)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 

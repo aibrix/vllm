@@ -394,6 +394,7 @@ class OffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
 @dataclasses.dataclass
 class OffloadingConnectorCachedMeta:
     context_tokens: List[int] = dataclasses.field(default_factory=list)
+    context_tokens_offset: int = 0
 
     # When chunked prefill is enabled, the query length in each iteration may
     # not be divisible by block_size. Consider the following example, assuming
@@ -412,6 +413,18 @@ class OffloadingConnectorCachedMeta:
     # block_size. Therefore, we store the slot mapping of the last block in the
     # metadata.
     last_block_slot_mapping: Optional[torch.Tensor] = None
+
+    def __init__(self, seq_len: int) -> None:
+        self.context_tokens = [-1] * seq_len
+
+    def get_context_tokens(self) -> List[int]:
+        return self.context_tokens[:self.context_tokens_offset]
+
+    def extend_context_tokens(self, tokens: List[int]) -> None:
+        offset = self.context_tokens_offset
+        length = len(tokens)
+        self.context_tokens[offset:offset + length] = tokens
+        self.context_tokens_offset += length
 
 
 class OffloadingConnector(KVConnectorBase):
@@ -551,22 +564,22 @@ class OffloadingConnector(KVConnectorBase):
     def _update_request_cache(
         self,
         seq_request_id: str,
+        seq_len: int,
         seq_input_tokens: List[int],
         seq_slot_mapping: torch.Tensor,
         kv_transfer_context_tokens: List[int],
     ) -> None:
         if self._connector_cache[seq_request_id] is None:
             self._connector_cache[
-                seq_request_id] = OffloadingConnectorCachedMeta()
+                seq_request_id] = OffloadingConnectorCachedMeta(seq_len)
+        seq_request_cache = self._connector_cache[seq_request_id]
         if kv_transfer_context_tokens is not None:
-            self._connector_cache[seq_request_id].context_tokens.extend(
-                kv_transfer_context_tokens)
-        self._connector_cache[seq_request_id].context_tokens.extend(
-            seq_input_tokens)
+            assert seq_request_cache.context_tokens_offset == 0
+            seq_request_cache.extend_context_tokens(kv_transfer_context_tokens)
+        seq_request_cache.extend_context_tokens(seq_input_tokens)
         last_block_len = min(self.block_ntokens, seq_slot_mapping.shape[0])
-        self._connector_cache[
-            seq_request_id].last_block_slot_mapping = seq_slot_mapping[
-                -last_block_len:]
+        seq_request_cache.last_block_slot_mapping = seq_slot_mapping[
+            -last_block_len:]
 
     def _get_chunk_slot_mapping(
         self,
@@ -581,7 +594,7 @@ class OffloadingConnector(KVConnectorBase):
             seq_last_block_slot_mapping = self._connector_cache[
                 seq_request_id].last_block_slot_mapping
             assert seq_last_block_slot_mapping is not None
-            offset = max(offset, -seq_last_block_slot_mapping.shape[0])
+            assert -offset <= seq_last_block_slot_mapping.shape[0]
             prepend_slot_mapping = seq_last_block_slot_mapping[offset:]
             chunk_slot_mapping = torch.cat(
                 (prepend_slot_mapping, chunk_slot_mapping))
@@ -637,8 +650,13 @@ class OffloadingConnector(KVConnectorBase):
             seq_request_id = request_ids[seq_idx]
             seq_context_len = seq_lens[seq_idx] - query_len
             seq_slot_mapping = slot_mapping[start_pos:end_pos]
-            seq_input_tokens = (
-                input_tokens_tensor[start_pos:end_pos].cpu().tolist())
+            seq_cached_meta = self._connector_cache[seq_request_id]
+            assert seq_cached_meta is not None
+            seq_all_tokens = seq_cached_meta.get_context_tokens()
+            assert seq_all_tokens is not None
+            assert len(seq_all_tokens) == seq_lens[
+                seq_idx], f"{len(seq_all_tokens)}!={seq_lens[seq_idx]}"
+            prompt_len = kv_transfer_metadata.seq_groups[seq_idx].prompt_len
 
             # align to block boundary
             aligned_context_len = round_down(seq_context_len,
@@ -646,31 +664,25 @@ class OffloadingConnector(KVConnectorBase):
             actual_query_len = seq_context_len + query_len - aligned_context_len
             aligned_query_len = round_down(actual_query_len,
                                            self.block_ntokens)
-            shift_len = seq_context_len - aligned_context_len
 
             # skip if there are not enough tokens to send after alignment
-            if (aligned_query_len <= OFFLOADING_CONNECTOR_SKIP_THRESHOLD *
-                    self.block_ntokens):
+            if prompt_len == seq_lens[seq_idx]:
+                # If chunked prefill is not enabled or this is the last
+                # chunk, we use a larger skip threashold
+                skip_threashold = OFFLOADING_CONNECTOR_SKIP_THRESHOLD
+            else:
+                # This is an intermediate chunk, only skip if this is not
+                # a full block
+                skip_threashold = 1
+            if aligned_query_len <= skip_threashold * self.block_ntokens:
                 continue
 
-            prompt_len = kv_transfer_metadata.seq_groups[seq_idx].prompt_len
-            if seq_context_len > 0:
-                seq_cached_meta = self._connector_cache[seq_request_id]
-                assert seq_cached_meta is not None
-                seq_context_tokens = seq_cached_meta.context_tokens
-                assert seq_context_tokens is not None
-            else:
-                seq_context_tokens = []
+            assert len(
+                seq_all_tokens) >= aligned_context_len + aligned_query_len
 
-            assert len(seq_context_tokens) >= aligned_context_len
-
-            prefix = seq_context_tokens[:aligned_context_len]
-            tokens = seq_input_tokens[:aligned_query_len]
-            if shift_len > 0:
-                prepend_tokens = seq_context_tokens[
-                    aligned_context_len:aligned_context_len + shift_len]
-                tokens = (prepend_tokens +
-                          tokens[:aligned_query_len - shift_len])
+            prefix = seq_all_tokens[:aligned_context_len]
+            tokens = seq_all_tokens[aligned_context_len:aligned_context_len +
+                                    aligned_query_len]
 
             if self._metrics.time_measurement_enabled:
                 start = torch.cuda.Event(enable_timing=True)
@@ -863,33 +875,37 @@ class OffloadingConnector(KVConnectorBase):
 
             self._update_request_cache(
                 seq_request_id,
+                seq_lens[seq_idx],
                 seq_input_tokens,
                 seq_slot_mapping,
                 kv_transfer_metadata.seq_groups[seq_idx].context_tokens,
             )
 
             # skip if there are not enough tokens to receive after alignment
-            if (aligned_query_len <= OFFLOADING_CONNECTOR_SKIP_THRESHOLD *
-                    self.block_ntokens):
+            if prompt_len == seq_lens[seq_idx]:
+                # If chunked prefill is not enabled or this is the last
+                # chunk, we use a larger skip threashold
+                skip_threashold = OFFLOADING_CONNECTOR_SKIP_THRESHOLD
+            else:
+                # This is an intermediate chunk, only skip if this is not
+                # a full block
+                skip_threashold = 1
+            if aligned_query_len <= skip_threashold * self.block_ntokens:
                 continue
 
-            if seq_context_len > 0:
-                seq_cached_meta = self._connector_cache[seq_request_id]
-                assert seq_cached_meta is not None
-                seq_context_tokens = seq_cached_meta.context_tokens
-                assert seq_context_tokens is not None
-            else:
-                seq_context_tokens = []
+            seq_cached_meta = self._connector_cache[seq_request_id]
+            assert seq_cached_meta is not None
+            seq_all_tokens = seq_cached_meta.get_context_tokens()
+            assert seq_all_tokens is not None
+            assert len(seq_all_tokens) == seq_lens[
+                seq_idx], f"{len(seq_all_tokens)}!={seq_lens[seq_idx]}"
 
-            assert len(seq_context_tokens) >= aligned_context_len
+            assert len(
+                seq_all_tokens) >= aligned_context_len + aligned_query_len
 
-            prefix = seq_context_tokens[:aligned_context_len]
-            tokens = seq_input_tokens[:aligned_query_len]
-            if shift_len > 0:
-                prepend_tokens = seq_context_tokens[
-                    aligned_context_len:aligned_context_len + shift_len]
-                tokens = (prepend_tokens +
-                          tokens[:aligned_query_len - shift_len])
+            prefix = seq_all_tokens[:aligned_context_len]
+            tokens = seq_all_tokens[aligned_context_len:aligned_context_len +
+                                    aligned_query_len]
 
             if self._metrics.time_measurement_enabled:
                 start = torch.cuda.Event(enable_timing=True)

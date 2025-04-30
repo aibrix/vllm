@@ -51,7 +51,8 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
         feature = ConnectorFeature()
         if self.config is not None and \
             self.config.connection_type == infinistore.TYPE_RDMA:
-            feature.mput_mget = True
+            # InfiniStore has a 4MB size limit
+            # feature.mput_mget = True
             feature.rdma = True
         return feature
 

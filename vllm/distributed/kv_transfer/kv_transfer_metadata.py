@@ -91,10 +91,18 @@ class KVTransferMetadata:
             # prefill sequence group only has one sequence
             if seq_group_metadata.is_prompt:
                 seq_id = seq_ids[0]
+                nblocks = len(seq_group_metadata.computed_block_nums or [])
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 context_len = seq_data.get_num_cached_tokens()
-                if context_len > 0:
-                    # prefix caching is enabled
+                # prefix caching:
+                #     context_len > 0 and nblocks > 0
+                # chunked prefill intermediate steps:
+                #     context_len > 0 and nblocks == 0
+                #
+                # We only carry context_tokens for prefix caching since
+                # chunked prefill intermediate steps can use the cached
+                # context tokens in the offloading connector.
+                if context_len > 0 and nblocks > 0:
                     seq_groups[-1].context_tokens = seq_data.get_token_ids(
                     )[:context_len]
 

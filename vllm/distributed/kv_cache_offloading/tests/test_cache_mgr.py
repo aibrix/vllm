@@ -17,52 +17,52 @@ from .conftest import TEMP_ROOT, discard_all_vllm_envs, randomize_cache_handle
 def cache_mgr_fixture(cache_conf_fixture, request):
     discard_all_vllm_envs()
 
-    os.environ["VLLM_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "1"
+    os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "1"
 
     if request.param == "l1":
         # enable l1 and disable l2
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "1"
-        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = ""
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_ENABLED"] = "1"
+        os.environ["AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND"] = ""
 
         # let allocator use host memory
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_DEVICE"] = "cpu"
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_PIN_MEMORY"] = "0"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_DEVICE"] = "cpu"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_PIN_MEMORY"] = "0"
     elif request.param == "l2_sync":
         # enable l2 and disable l1
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "0"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_ENABLED"] = "0"
 
-        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
+        os.environ["AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
         os.environ[
-            "VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS"] = "0"
+            "AIBRIX_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS"] = "0"
 
         # rocksdb envs
-        os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+        os.environ["AIBRIX_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
     elif request.param == "l2_async":
         # enable l2 and disable l1
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "0"
-        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_ENABLED"] = "0"
+        os.environ["AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
 
         # rocksdb envs
-        os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+        os.environ["AIBRIX_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
 
     elif request.param == "l1_l2_sync":
         # enable both l1 and l2
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_ENABLED"] = "1"
-        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_ENABLED"] = "1"
+        os.environ["AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND"] = "ROCKSDB"
 
         # let allocator use host memory
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_DEVICE"] = "cpu"
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_PIN_MEMORY"] = "0"
-        os.environ["VLLM_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "0.01"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_DEVICE"] = "cpu"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_PIN_MEMORY"] = "0"
+        os.environ["AIBRIX_KV_CACHE_OL_L1_CACHE_CAPACITY_GB"] = "0.01"
 
-        os.environ["VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_TYPE"] = "EVICTED"
+        os.environ["AIBRIX_KV_CACHE_OL_L2_CACHE_INGESTION_TYPE"] = "EVICTED"
         os.environ[
-            "VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS"] = "0"
+            "AIBRIX_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS"] = "0"
         # always use double get
-        os.environ["VLLM_KV_CACHE_OL_DOUBLE_GET_THRESHOLD"] = "0"
+        os.environ["AIBRIX_KV_CACHE_OL_DOUBLE_GET_THRESHOLD"] = "0"
 
         # rocksdb envs
-        os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+        os.environ["AIBRIX_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
 
     if os.path.exists(TEMP_ROOT):
         shutil.rmtree(TEMP_ROOT, ignore_errors=True)

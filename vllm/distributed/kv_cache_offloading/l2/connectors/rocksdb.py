@@ -36,26 +36,27 @@ class RocksDBConnector(Connector[str, torch.Tensor], AsyncBase):
     @classmethod
     def from_envs(cls, conn_id: str, executor: Executor) -> "RocksDBConnector":
         """Create a connector from environment variables."""
-        root = envs.VLLM_KV_CACHE_OL_ROCKSDB_ROOT
+        root = envs.AIBRIX_KV_CACHE_OL_ROCKSDB_ROOT
         root = os.path.join(os.path.expanduser(root), conn_id)
         opts = rocksdict.Options(raw_mode=True)
         opts.create_if_missing(True)
         opts.create_missing_column_families(True)
         opts.set_write_buffer_size(
-            envs.VLLM_KV_CACHE_OL_ROCKSDB_WRITE_BUFFER_SIZE)
+            envs.AIBRIX_KV_CACHE_OL_ROCKSDB_WRITE_BUFFER_SIZE)
         opts.set_target_file_size_base(
-            envs.VLLM_KV_CACHE_OL_ROCKSDB_TARGET_FILE_SIZE_BASE)
+            envs.AIBRIX_KV_CACHE_OL_ROCKSDB_TARGET_FILE_SIZE_BASE)
         opts.set_max_write_buffer_number(
-            envs.VLLM_KV_CACHE_OL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER)
+            envs.AIBRIX_KV_CACHE_OL_ROCKSDB_MAX_WRITE_BUFFER_NUMBER)
         opts.set_max_background_jobs(
-            envs.VLLM_KV_CACHE_OL_ROCKSDB_MAX_BACKGROUND_JOBS)
+            envs.AIBRIX_KV_CACHE_OL_ROCKSDB_MAX_BACKGROUND_JOBS)
         opts.set_max_total_wal_size(
-            envs.VLLM_KV_CACHE_OL_ROCKSDB_MAX_TOTAL_WAL_SIZE)
+            envs.AIBRIX_KV_CACHE_OL_ROCKSDB_MAX_TOTAL_WAL_SIZE)
         opts.set_wal_dir(os.path.join(os.path.expanduser(root), "wal"))
         opts.set_db_log_dir(os.path.join(os.path.expanduser(root), "db"))
         access_type = rocksdict.AccessType.read_write()
         # use TTL to manage the life cycle of the data in the KV cache
-        access_type = access_type.with_ttl(envs.VLLM_KV_CACHE_OL_ROCKSDB_TTL_S)
+        access_type = access_type.with_ttl(
+            envs.AIBRIX_KV_CACHE_OL_ROCKSDB_TTL_S)
         return cls(root, opts, access_type, executor)
 
     @property

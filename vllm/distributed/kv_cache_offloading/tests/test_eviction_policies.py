@@ -7,8 +7,8 @@ import torch
 from ..l1.eviction_policy import FIFO, LRU, S3FIFO
 
 # S3FIFO envs
-os.environ["VLLM_KV_CACHE_OL_S3FIFO_SMALL_TO_MAIN_PROMO_THRESHOLD"] = "1"
-os.environ["VLLM_KV_CACHE_OL_S3FIFO_SMALL_FIFO_CAPACITY_RATIO"] = "0.1"
+os.environ["AIBRIX_KV_CACHE_OL_S3FIFO_SMALL_TO_MAIN_PROMO_THRESHOLD"] = "1"
+os.environ["AIBRIX_KV_CACHE_OL_S3FIFO_SMALL_FIFO_CAPACITY_RATIO"] = "0.1"
 
 
 def tensors_equal_unordered(tuple1, tuple2):

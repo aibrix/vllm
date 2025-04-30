@@ -84,9 +84,9 @@ class S3FIFO(BaseEvictionPolicy[S3FIFONode, V]):
         )
 
         self._small_to_main_promo_threshold: int = (
-            envs.VLLM_KV_CACHE_OL_S3FIFO_SMALL_TO_MAIN_PROMO_THRESHOLD)
+            envs.AIBRIX_KV_CACHE_OL_S3FIFO_SMALL_TO_MAIN_PROMO_THRESHOLD)
         self._small_fifo_capacity_ratio: float = (
-            envs.VLLM_KV_CACHE_OL_S3FIFO_SMALL_FIFO_CAPACITY_RATIO)
+            envs.AIBRIX_KV_CACHE_OL_S3FIFO_SMALL_FIFO_CAPACITY_RATIO)
 
         self._small_fifo_capacity: int = (capacity *
                                           self._small_fifo_capacity_ratio)
@@ -102,12 +102,12 @@ class S3FIFO(BaseEvictionPolicy[S3FIFONode, V]):
         assert all([
             self._small_to_main_promo_threshold >= 1,
             self._small_to_main_promo_threshold <= 3,
-        ]), ("VLLM_KV_CACHE_OL_S3FIFO_SMALL_TO_MAIN_PROMO_THRESHOLD "
+        ]), ("AIBRIX_KV_CACHE_OL_S3FIFO_SMALL_TO_MAIN_PROMO_THRESHOLD "
              "must be in [1, 3]")
         assert all([
             self._small_fifo_capacity_ratio > 0,
             self._small_fifo_capacity_ratio < 1,
-        ]), ("VLLM_KV_CACHE_OL_S3FIFO_SMALL_FIFO_CAPACITY_RATIO "
+        ]), ("AIBRIX_KV_CACHE_OL_S3FIFO_SMALL_FIFO_CAPACITY_RATIO "
              "must be in (0, 1)")
 
     def __len__(self) -> int:

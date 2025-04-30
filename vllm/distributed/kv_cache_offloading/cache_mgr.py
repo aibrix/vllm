@@ -238,19 +238,19 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
         self._metrics: KVCacheMetrics = None
 
         self._double_get_threshold: Tuple[
-            int, float] = envs.VLLM_KV_CACHE_OL_DOUBLE_GET_THRESHOLD
+            int, float] = envs.AIBRIX_KV_CACHE_OL_DOUBLE_GET_THRESHOLD
         self._l2_cache_per_token_timeout_ms: int = (
-            envs.VLLM_KV_CACHE_OL_L2_CACHE_PER_TOKEN_TIMEOUT_MS)
+            envs.AIBRIX_KV_CACHE_OL_L2_CACHE_PER_TOKEN_TIMEOUT_MS)
 
-        self._chunk_size: int = envs.VLLM_KV_CACHE_OL_CHUNK_SIZE
+        self._chunk_size: int = envs.AIBRIX_KV_CACHE_OL_CHUNK_SIZE
 
         if self._chunk_size % self.block_ntokens != 0:
             self._chunk_size = (self._chunk_size -
                                 self._chunk_size % self.block_ntokens)
             logger.warning(
-                ("VLLM_KV_CACHE_OL_CHUNK_SIZE=%d is not divisible by "
+                ("AIBRIX_KV_CACHE_OL_CHUNK_SIZE=%d is not divisible by "
                  "block_ntokens=%d, aligned to %d"),
-                envs.VLLM_KV_CACHE_OL_CHUNK_SIZE, self.block_ntokens,
+                envs.AIBRIX_KV_CACHE_OL_CHUNK_SIZE, self.block_ntokens,
                 self._chunk_size)
 
         if self._chunk_size < 4 * self.block_ntokens:
@@ -258,19 +258,19 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
                            4 * self.block_ntokens)
             self._chunk_size = 4 * self.block_ntokens
 
-        device: str = envs.VLLM_KV_CACHE_OL_DEVICE
+        device: str = envs.AIBRIX_KV_CACHE_OL_DEVICE
         pin_memory: bool = (device == "cpu")
 
-        enable_l1: bool = envs.VLLM_KV_CACHE_OL_L1_CACHE_ENABLED
-        enable_l2: bool = len(envs.VLLM_KV_CACHE_OL_L2_CACHE_BACKEND) > 0
-        capacity_nbytes: int = int(envs.VLLM_KV_CACHE_OL_L1_CACHE_CAPACITY_GB *
-                                   1024**3)
+        enable_l1: bool = envs.AIBRIX_KV_CACHE_OL_L1_CACHE_ENABLED
+        enable_l2: bool = len(envs.AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND) > 0
+        capacity_nbytes: int = int(
+            envs.AIBRIX_KV_CACHE_OL_L1_CACHE_CAPACITY_GB * 1024**3)
         capacity: int = capacity_nbytes // self.block_nbytes
-        if envs.VLLM_KV_CACHE_OL_METRICS_ENABLED:
+        if envs.AIBRIX_KV_CACHE_OL_METRICS_ENABLED:
             enable_time_measurement = (
-                envs.VLLM_KV_CACHE_OL_TIME_MEASUREMENT_ENABLED)
+                envs.AIBRIX_KV_CACHE_OL_TIME_MEASUREMENT_ENABLED)
             enable_breakdown_measurement = (
-                envs.VLLM_KV_CACHE_OL_BREAKDOWN_MEASUREMENT_ENABLED)
+                envs.AIBRIX_KV_CACHE_OL_BREAKDOWN_MEASUREMENT_ENABLED)
             self._metrics = KVCacheMetrics(
                 block_ntokens=self.block_ntokens,
                 capacity=capacity,
@@ -290,8 +290,8 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
 
         if enable_l1:
             eviction_policy: str = (
-                envs.VLLM_KV_CACHE_OL_L1_CACHE_EVICTION_POLICY)
-            evict_size: int = envs.VLLM_KV_CACHE_OL_L1_CACHE_EVICT_SIZE
+                envs.AIBRIX_KV_CACHE_OL_L1_CACHE_EVICTION_POLICY)
+            evict_size: int = envs.AIBRIX_KV_CACHE_OL_L1_CACHE_EVICT_SIZE
             self._allocator.increase(capacity * self.block_nbytes)
 
             self._l1_cache = L1Cache(
@@ -304,17 +304,18 @@ class BaseKVCacheManager(KVCacheManager, MeasurableBase):
             )
 
         if enable_l2:
-            backend_name: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_BACKEND
-            namespace: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_NAMESPACE
-            # compression: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_COMPRESSION
-            ingestion_type: str = envs.VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_TYPE
-            op_batch: int = envs.VLLM_KV_CACHE_OL_L2_CACHE_OP_BATCH
+            backend_name: str = envs.AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND
+            namespace: str = envs.AIBRIX_KV_CACHE_OL_L2_CACHE_NAMESPACE
+            # compression: str = envs.AIBRIX_KV_CACHE_OL_L2_CACHE_COMPRESSION
+            ingestion_type: str = (
+                envs.AIBRIX_KV_CACHE_OL_L2_CACHE_INGESTION_TYPE)
+            op_batch: int = envs.AIBRIX_KV_CACHE_OL_L2_CACHE_OP_BATCH
             self._executor = ThreadPoolExecutor(
-                envs.VLLM_KV_CACHE_OL_L2_CACHE_NUM_ASYNC_WORKERS,
+                envs.AIBRIX_KV_CACHE_OL_L2_CACHE_NUM_ASYNC_WORKERS,
                 thread_name_prefix="l2_cache_")
             self._l2_inflight_quota = (
-                envs.VLLM_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS //
-                self.block_ntokens)
+                envs.AIBRIX_KV_CACHE_OL_L2_CACHE_INGESTION_MAX_INFLIGHT_TOKENS
+                // self.block_ntokens)
 
             self._l2_cache = L2Cache(
                 backend_name=backend_name,

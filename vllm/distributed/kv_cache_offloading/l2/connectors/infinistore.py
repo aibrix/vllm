@@ -33,12 +33,13 @@ class InfiniStoreConnector(Connector[str, torch.Tensor], AsyncBase):
                   executor: Executor) -> "InfiniStoreConnector":
         """Create a connector from environment variables."""
         config = infinistore.ClientConfig(
-            host_addr=envs.VLLM_KV_CACHE_OL_INFINISTORE_HOST_ADDR,
-            service_port=envs.VLLM_KV_CACHE_OL_INFINISTORE_SERVICE_PORT,
-            connection_type=envs.VLLM_KV_CACHE_OL_INFINISTORE_CONNECTION_TYPE,
-            ib_port=envs.VLLM_KV_CACHE_OL_INFINISTORE_IB_PORT,
-            link_type=envs.VLLM_KV_CACHE_OL_INFINISTORE_LINK_TYPE,
-            dev_name=envs.VLLM_KV_CACHE_OL_INFINISTORE_DEV_NAME,
+            host_addr=envs.AIBRIX_KV_CACHE_OL_INFINISTORE_HOST_ADDR,
+            service_port=envs.AIBRIX_KV_CACHE_OL_INFINISTORE_SERVICE_PORT,
+            connection_type=envs.
+            AIBRIX_KV_CACHE_OL_INFINISTORE_CONNECTION_TYPE,
+            ib_port=envs.AIBRIX_KV_CACHE_OL_INFINISTORE_IB_PORT,
+            link_type=envs.AIBRIX_KV_CACHE_OL_INFINISTORE_LINK_TYPE,
+            dev_name=envs.AIBRIX_KV_CACHE_OL_INFINISTORE_DEV_NAME,
         )
         return cls(config, conn_id, executor)
 

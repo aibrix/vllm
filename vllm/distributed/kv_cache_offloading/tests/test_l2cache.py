@@ -13,7 +13,7 @@ from .conftest import (CACHE_DTYPE, TEMP_ROOT, get_allocator, randomize_mrs,
                        release_mrs)
 
 # rocksdb envs
-os.environ["VLLM_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
+os.environ["AIBRIX_KV_CACHE_OL_ROCKSDB_ROOT"] = TEMP_ROOT
 
 
 @pytest.fixture

@@ -57,10 +57,10 @@ class HPKVConnector(Connector[str, torch.Tensor], AsyncBase):
     def from_envs(cls, conn_id: str, executor: Executor) -> "HPKVConnector":
         """Create a connector from environment variables."""
         config = HPKVConfig(
-            remote_addr=envs.VLLM_KV_CACHE_OL_HPKV_REMOTE_ADDR,
-            remote_port=envs.VLLM_KV_CACHE_OL_HPKV_REMOTE_PORT,
-            local_addr=envs.VLLM_KV_CACHE_OL_HPKV_LOCAL_ADDR,
-            local_port=envs.VLLM_KV_CACHE_OL_HPKV_LOCAL_PORT,
+            remote_addr=envs.AIBRIX_KV_CACHE_OL_HPKV_REMOTE_ADDR,
+            remote_port=envs.AIBRIX_KV_CACHE_OL_HPKV_REMOTE_PORT,
+            local_addr=envs.AIBRIX_KV_CACHE_OL_HPKV_LOCAL_ADDR,
+            local_port=envs.AIBRIX_KV_CACHE_OL_HPKV_LOCAL_PORT,
         )
         return cls(config, conn_id, executor)
 

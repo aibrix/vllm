@@ -44,8 +44,8 @@ class MockConnector(Connector[str, torch.Tensor], AsyncBase):
     def from_envs(cls, conn_id: str, executor: Executor) -> "MockConnector":
         """Create a connector from environment variables."""
         config = MockConfig(
-            use_rdma=envs.VLLM_KV_CACHE_OL_MOCK_USE_RDMA,
-            use_mput_mget=envs.VLLM_KV_CACHE_OL_MOCK_USE_MPUT_MGET,
+            use_rdma=envs.AIBRIX_KV_CACHE_OL_MOCK_USE_RDMA,
+            use_mput_mget=envs.AIBRIX_KV_CACHE_OL_MOCK_USE_MPUT_MGET,
         )
         return cls(config, executor)
 

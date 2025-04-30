@@ -105,6 +105,8 @@ class OffloadingConnectorOpMetrics(Metrics):
         RECV = enum.auto()
 
     num_ops: int = 0
+    total_tokens: int = 0
+    total_sent_or_recved_tokens: int = 0
     num_prefixes: List[int] = []
     num_tokens: List[int] = []
     num_sent_or_recved_tokens: List[int] = []
@@ -134,6 +136,8 @@ class OffloadingConnectorOpMetrics(Metrics):
         lat_ms: int,
     ) -> None:
         self.num_ops += 1
+        self.total_tokens += num_tokens
+        self.total_sent_or_recved_tokens += num_sent_or_recved_tokens
         self.num_sent_or_recved_tokens.append(num_sent_or_recved_tokens)
         self.num_prefixes.append(num_prefix)
         self.num_tokens.append(num_tokens)
@@ -160,10 +164,17 @@ class OffloadingConnectorOpMetrics(Metrics):
         avg_sent_or_recved_tokens = (total_sent_or_recved_tokens /
                                      iter_len if iter_len > 0 else 0)
         summary = f"{self._op.name}: Num. of ops: {self.num_ops}, " \
-                  f"Num. of prefixes (iter): total={total_prefixes}, " \
-                  f"avg={avg_prefixes:.2f}, " \
-                  f"Num. of tokens (iter): total={total_tokens}, " \
-                  f"avg={avg_tokens:.2f}"
+                  f"Total num. of tokens: {self.total_tokens}, "
+        if self._op is OffloadingConnectorOpMetrics.OP.SEND:
+            summary += f"Total num. of sent tokens: " \
+                       f"{self.total_sent_or_recved_tokens}, "
+        else:
+            summary += f"Total num. of received tokens: " \
+                       f"{self.total_sent_or_recved_tokens}, "
+        summary += f"Num. of prefixes (iter): total={total_prefixes}, " \
+                   f"avg={avg_prefixes:.2f}, " \
+                   f"Num. of tokens (iter): total={total_tokens}, " \
+                   f"avg={avg_tokens:.2f}"
         if self._op is OffloadingConnectorOpMetrics.OP.SEND:
             summary += f", Num. of sent tokens (iter): " \
                        f"total={total_sent_or_recved_tokens}, " \
@@ -185,6 +196,10 @@ class OffloadingConnectorOpMetrics(Metrics):
                 summary += f", model_input rebuild latency (iter, ms): " \
                            f"total={total_rebuild_lat_ms:.2f}, " \
                            f"avg={avg_rebuild_lat_ms:.2f}"
+        if self._op is OffloadingConnectorOpMetrics.OP.RECV:
+            hit_rate = (self.total_sent_or_recved_tokens * 100 /
+                        self.total_tokens) if self.total_tokens > 0 else 0
+            summary += f", Hit rate: {hit_rate:.2f}%"
         return summary
 
 

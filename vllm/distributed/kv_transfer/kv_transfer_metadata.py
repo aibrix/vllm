@@ -60,8 +60,9 @@ class KVTransferMetadata:
     ) -> None:
         self.seq_groups = seq_groups
         # only driver has seq_group_metadata_list and runner
-        self.seq_group_metadata_list: List[SequenceGroupMetadata] = None
-        self.runner: GPUModelRunnerBase = None
+        self.seq_group_metadata_list: Optional[
+            List[SequenceGroupMetadata]] = None
+        self.runner: Optional[GPUModelRunnerBase] = None
 
     @staticmethod
     def prepare(

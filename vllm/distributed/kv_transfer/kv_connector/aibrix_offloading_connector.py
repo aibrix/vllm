@@ -8,6 +8,15 @@ import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
+from aibrix_kvcache import (BaseKVCacheManager, GroupAwareKVCacheManager,
+                            KVCacheBlockLayout, KVCacheBlockSpec,
+                            KVCacheConfig, KVCacheMetrics, KVCacheTensorSpec)
+from aibrix_kvcache.common.absl_logging import (getLogger, log_every_n_seconds,
+                                                log_if)
+from aibrix_kvcache.metrics import (MS_BUCKETS, TOKEN_BUCKETS,
+                                    BaseMetricsExporter,
+                                    KVCacheMetricsExporter, Metrics)
+from aibrix_kvcache.utils import perf_timer
 
 from vllm._custom_ops import (reshape_and_cache_multi_layer,
                               reshape_and_offload_multi_layer)
@@ -16,19 +25,6 @@ from vllm.attention.backends.flash_attn import FlashAttentionBackend
 # from vllm.attention.backends.flashinfer import FlashInferBackend
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.distributed import broadcast_tensor_dict, get_tp_group
-from vllm.distributed.kv_cache_offloading import (BaseKVCacheManager,
-                                                  GroupAwareKVCacheManager,
-                                                  KVCacheBlockLayout,
-                                                  KVCacheBlockSpec,
-                                                  KVCacheConfig,
-                                                  KVCacheMetrics,
-                                                  KVCacheTensorSpec)
-from vllm.distributed.kv_cache_offloading.common.absl_logging import (
-    getLogger, log_every_n_seconds, log_if)
-from vllm.distributed.kv_cache_offloading.metrics import (
-    MS_BUCKETS, TOKEN_BUCKETS, BaseMetricsExporter, KVCacheMetricsExporter,
-    Metrics)
-from vllm.distributed.kv_cache_offloading.utils import perf_timer
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_transfer_metrics import (
     KVTransferMetrics, KVTransferMetricsExporter)
@@ -57,7 +53,7 @@ class AIBrixOffloadingConnectorComputeMetrics(Metrics):
     """Compute metrics."""
 
     num_tokens: List[int] = []
-    op_lat_ms: List[int] = None
+    op_lat_ms: Optional[List[int]] = None
 
     def __init__(
         self,
@@ -110,9 +106,9 @@ class AIBrixOffloadingConnectorOpMetrics(Metrics):
     num_prefixes: List[int] = []
     num_tokens: List[int] = []
     num_sent_or_recved_tokens: List[int] = []
-    op_lat_ms: List[int] = None
+    op_lat_ms: Optional[List[int]] = None
     # tracks the latency of rebuilding model_input
-    rebuild_lat_ms: List[int] = None
+    rebuild_lat_ms: Optional[List[int]] = None
 
     def __init__(
         self,

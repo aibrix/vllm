@@ -665,6 +665,28 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
                  &reshape_and_cache_flash);
 
+  cache_ops.def(
+      "reshape_and_cache_multi_layer(Tensor[] offload_kv_cache_blocks,"
+      "                              Tensor(b!)[] key_caches,"
+      "                              Tensor slot_mapping,"
+      "                              SymInt block_size,"
+      "                              str kv_cache_dtype,"
+      "                              Tensor[] k_scales, Tensor[] v_scales,"
+      "                              str layout) -> ()");
+  cache_ops.impl("reshape_and_cache_multi_layer", torch::kCUDA,
+                 &reshape_and_cache_multi_layer);
+
+  cache_ops.def(
+      "reshape_and_offload_multi_layer(Tensor(a!)[] offload_kv_cache_blocks,"
+      "                                Tensor[] key_caches,"
+      "                                Tensor slot_mapping,"
+      "                                SymInt block_size,"
+      "                                str kv_cache_dtype,"
+      "                                Tensor[] k_scales, Tensor[] v_scales,"
+      "                                str layout) -> ()");
+  cache_ops.impl("reshape_and_offload_multi_layer", torch::kCUDA,
+                 &reshape_and_offload_multi_layer);
+
   // Concat kv_c and k_pe and cache them.
   cache_ops.def(
       "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"

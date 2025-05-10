@@ -1653,6 +1653,50 @@ def reshape_and_cache_flash(
                                                    v_scale)
 
 
+def reshape_and_cache_multi_layer(
+    offload_kv_cache_blocks: list[torch.Tensor],
+    kv_caches: list[torch.Tensor],
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    kv_cache_dtype: str,
+    k_scales: list[torch.Tensor],
+    v_scales: list[torch.Tensor],
+    layout: str,
+) -> None:
+    torch.ops._C_cache_ops.reshape_and_cache_multi_layer(
+        offload_kv_cache_blocks,
+        kv_caches,
+        slot_mapping,
+        block_size,
+        kv_cache_dtype,
+        k_scales,
+        v_scales,
+        layout,
+    )
+
+
+def reshape_and_offload_multi_layer(
+    offload_kv_cache_blocks: list[torch.Tensor],
+    kv_caches: list[torch.Tensor],
+    slot_mapping: torch.Tensor,
+    block_size: int,
+    kv_cache_dtype: str,
+    k_scales: list[torch.Tensor],
+    v_scales: list[torch.Tensor],
+    layout: str,
+) -> None:
+    torch.ops._C_cache_ops.reshape_and_offload_multi_layer(
+        offload_kv_cache_blocks,
+        kv_caches,
+        slot_mapping,
+        block_size,
+        kv_cache_dtype,
+        k_scales,
+        v_scales,
+        layout,
+    )
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,

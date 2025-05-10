@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
+from vllm.distributed.kv_transfer.kv_transfer_metrics import KVTransferMetrics
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -66,6 +67,7 @@ class Stats:
     max_lora: str
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+    kv_transfer_metrics: Optional["KVTransferMetrics"] = None
 
 
 class StatLoggerBase(ABC):

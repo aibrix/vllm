@@ -9,6 +9,8 @@ This implementation is a shim wrapper on two APIs exposed by `kv_connector`:
 from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
+    from .kv_transfer_metrics import (KVTransferMetrics,
+                                      KVTransferMetricsExporter)
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
     from vllm.config import VllmConfig
 
@@ -49,6 +51,23 @@ class KVTransferAgent:
 
         self.connector = KVConnectorFactory.create_connector_v0(
             rank, local_rank, config)
+
+    @property
+    def metrics(self) -> "KVTransferMetrics":
+        """
+        Get the metrics object associated with the connector.
+        Returns:
+            KVTransferMetrics: The metrics object.
+        """
+        return self.connector.metrics
+
+    def get_metrics_exporter_cls(self) -> "KVTransferMetricsExporter":
+        """
+        Get the metrics object associated with the connector.
+        Returns:
+            KVTransferMetrics: The metrics object.
+        """
+        return self.connector.get_metrics_exporter_cls()
 
     def send_kv_caches_and_hidden_states(
         self,

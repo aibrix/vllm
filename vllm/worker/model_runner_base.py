@@ -17,6 +17,8 @@ from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
     from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.distributed.kv_transfer.kv_transfer_metadata import (
+        KVTransferMetadata)
     from vllm.model_executor import SamplingMetadata
 
 logger = init_logger(__name__)
@@ -47,7 +49,7 @@ def _init_attn_metadata_from_tensor_dict(
     valid_attn_kwargs = {}
     for field in dataclasses.fields(attn_backend.get_metadata_cls()):
         if field.name in tensor_dict:
-            if field.name == "input_positions":
+            if field.name in ["input_positions", "seq_lens"]:
                 valid_attn_kwargs[field.name] = tensor_dict[field.name]
             else:
                 valid_attn_kwargs[field.name] = tensor_dict.pop(field.name)
@@ -88,6 +90,34 @@ def _add_sampling_metadata_broadcastable_dict(
     if sampling_metadata is not None:
         tensor_dict["selected_token_indices"] = (
             sampling_metadata.selected_token_indices)
+
+
+def _init_kv_transfer_metadata_from_tensor_dict(
+        tensor_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Helper method to initialize KVTransferMetadata based on broadcastable
+    KVTransferMetadata fields.
+    """
+    from vllm.distributed.kv_transfer.kv_transfer_metadata import (
+        KVTransferMetadata)
+
+    kv_transfer_metadata = tensor_dict.pop("kv_transfer_metadata", None)
+    if kv_transfer_metadata is not None:
+        seq_groups = kv_transfer_metadata
+        tensor_dict["kv_transfer_metadata"] = KVTransferMetadata(
+            seq_groups=seq_groups)
+    return tensor_dict
+
+
+def _add_kv_transfer_metadata_broadcastable_dict(
+        tensor_dict: Dict[str, Any],
+        kv_transfer_metadata: Optional["KVTransferMetadata"]) -> None:
+    """
+    Helper method to update tensor_dict with broadcastable
+    KVTransferMetadata fields.
+    """
+    if kv_transfer_metadata is not None:
+        tensor_dict["kv_transfer_metadata"] = kv_transfer_metadata.seq_groups
 
 
 def _init_frozen_model_input_from_tensor_dict(

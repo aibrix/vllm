@@ -574,12 +574,20 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             self._connector_cache[
                 seq_request_id] = AIBrixOffloadingConnectorCachedMeta(seq_len)
         seq_request_cache = self._connector_cache[seq_request_id]
+        kv_transfer_context_tokens = kv_transfer_context_tokens or []
+        if seq_len == len(kv_transfer_context_tokens):
+            # when using prefix caching, if all tokens are cached,
+            # we will leave a token in `seq_input_tokens` to avoid
+            # erroneous behavior. In this case, we need to ignore
+            # the token in `seq_input_tokens`.
+            # See `_compute_for_prefix_cache_hit` for more details.
+            seq_input_tokens = []
         if seq_len != len(seq_request_cache.get_context_tokens()) + len(
-                kv_transfer_context_tokens or []) + len(seq_input_tokens):
+                kv_transfer_context_tokens) + len(seq_input_tokens):
             # this is a preempted request to be recomputed, let's drop
             # the context tokens
             seq_request_cache.clear_context_tokens()
-        if kv_transfer_context_tokens is not None:
+        if len(kv_transfer_context_tokens) > 0:
             assert seq_request_cache.context_tokens_offset == 0
             seq_request_cache.extend_context_tokens(kv_transfer_context_tokens)
         seq_request_cache.extend_context_tokens(seq_input_tokens)
@@ -945,8 +953,6 @@ class AIBrixOffloadingConnector(KVConnectorBase):
 
                 offset = len(chunk_prefix) - seq_context_len
                 length = num_fetched_tokens
-
-                # TODO: partial hit, update connector cache
 
                 chunk_slot_mapping = self._get_chunk_slot_mapping(
                     seq_request_id, seq_slot_mapping, offset, length)

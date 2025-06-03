@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import torch
 from aibrix_kvcache import (BaseKVCacheManager, GroupAwareKVCacheManager,
                             KVCacheBlockLayout, KVCacheBlockSpec,
-                            KVCacheConfig, KVCacheMetrics, KVCacheTensorSpec)
+                            KVCacheConfig, KVCacheMetrics, KVCacheTensorSpec,
+                            ModelSpec)
 from aibrix_kvcache.common.absl_logging import (getLogger, log_every_n_seconds,
                                                 log_if)
 from aibrix_kvcache.metrics import (MS_BUCKETS, TOKEN_BUCKETS,
@@ -481,7 +482,9 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             ),
         )
 
-        config = KVCacheConfig(block_spec=block_spec)
+        config = KVCacheConfig(block_spec=block_spec,
+                               model_spec=ModelSpec(
+                                   model_config.max_model_len))
 
         if parallel_config.tensor_parallel_size == 1:
             self.cache = BaseKVCacheManager(config=config)
@@ -737,7 +740,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                             new_chunk_prefix_len:new_chunk_prefix_len + length]
 
                 # allocate space for KV caches
-                status = self.cache.allocate(length // self.block_ntokens)
+                status = self.cache.allocate_for(chunk_prefix, chunk_tokens)
                 if not status.is_ok():
                     log_every_n_seconds(logger, logging.ERROR,
                                         "Failed to allocate : %s", 3,

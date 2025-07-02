@@ -382,6 +382,8 @@ class KVCacheManager:
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request."""
+        if not self.enable_caching:
+            return
         block_hashes = self.req_to_block_hashes[request.request_id]
         self.coordinator.cache_blocks(request, block_hashes,
                                       num_computed_tokens)

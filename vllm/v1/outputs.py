@@ -103,7 +103,7 @@ class ModelRunnerOutput:
 
     # [req_ids]
     finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    finished_recving: Optional[set[str | tuple[str, int]]] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],

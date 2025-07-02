@@ -326,7 +326,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
+    def _update_states(self, scheduler_output: "SchedulerOutput",
+                       load_results: dict[str, int]) -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -381,6 +382,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+
+            num_loaded_tokens = load_results.get(req_id, 0)
+            if num_loaded_tokens > 0:
+                num_scheduled_tokens = \
+                    scheduler_output.num_scheduled_tokens[req_id]
+                if num_loaded_tokens == num_scheduled_tokens:
+                    num_loaded_tokens -= 1
+
+                new_req_data.num_computed_tokens += num_loaded_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= \
+                    num_loaded_tokens
+                scheduler_output.total_num_scheduled_tokens -= \
+                    num_loaded_tokens
+
             sampling_params = new_req_data.sampling_params
             if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
@@ -445,9 +460,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id = req_data.req_id
             req_state = self.requests[req_id]
 
+            num_loaded_tokens = load_results.get(req_id, 0)
+            if num_loaded_tokens > 0:
+                num_scheduled_tokens = \
+                    scheduler_output.num_scheduled_tokens[req_id]
+                if num_loaded_tokens == num_scheduled_tokens:
+                    num_loaded_tokens -= 1
+
+                req_data.num_computed_tokens += num_loaded_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= \
+                    num_loaded_tokens
+                scheduler_output.total_num_scheduled_tokens -= \
+                    num_loaded_tokens
+
             # Update the cached states.
-            num_computed_tokens = req_data.num_computed_tokens
-            req_state.num_computed_tokens = num_computed_tokens
+            num_computed_tokens = req_data.num_computed_tokens - \
+                num_loaded_tokens
+            new_num_computed_tokens = req_data.num_computed_tokens
+            req_state.num_computed_tokens = new_num_computed_tokens
             # Add the sampled token(s) from the previous step (if any).
             # This doesn't include "unverified" tokens like spec decode tokens.
             num_new_tokens = (num_computed_tokens +
@@ -482,7 +512,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                num_computed_tokens)
+                new_num_computed_tokens)
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
             # Add new_token_ids to token_ids_cpu.
@@ -1174,7 +1204,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
 
-        self._update_states(scheduler_output)
+        load_results = {}
+        if has_kv_transfer_group():
+            load_results = \
+                self.kv_connector_load_before_update(scheduler_output)
+
+        self._update_states(scheduler_output, load_results)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
@@ -1507,6 +1542,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             finished_recving=finished_recving,
         )
 
+    def kv_connector_load_before_update(
+            self, scheduler_output: "SchedulerOutput") -> dict[str, int]:
+        kv_connector = get_kv_transfer_group()
+        assert isinstance(kv_connector, KVConnectorBase_V1)
+        assert scheduler_output.kv_connector_metadata is not None
+        kv_connector.bind_connector_metadata(
+            scheduler_output.kv_connector_metadata)
+        return kv_connector.start_load_kv_before_update()
+
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
@@ -1547,7 +1591,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @staticmethod
     def get_finished_kv_transfers(
         scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str | tuple[str, int]]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)

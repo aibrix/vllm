@@ -46,6 +46,9 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
+    from ...kv_transfer_metrics import (KVTransferMetrics,
+                                        KVTransferMetricsExporter)
+
 logger = init_logger(__name__)
 
 
@@ -78,6 +81,21 @@ class KVConnectorBase_V1(ABC):
     @property
     def role(self) -> KVConnectorRole:
         return self._role
+
+    @property
+    def metrics(self) -> 'KVTransferMetrics':
+        """
+        Get the metrics object associated with the connector.
+        Returns:
+            KVTransferMetrics: The metrics object.
+        """
+        return None
+
+    def get_metrics_exporter_cls(self) -> 'KVTransferMetricsExporter':
+        """
+        Get the metrics exporter class associated with the connector.
+        """
+        return None
 
     # ==============================
     # Worker-side methods
@@ -123,6 +141,20 @@ class KVConnectorBase_V1(ABC):
             dictionary of layer names, kv cache
         """
         return
+
+    def start_load_kv_before_update(self, **kwargs) -> dict[str, int]:
+        """
+        Start loading the KV cache from the connector to vLLM's paged
+        KV buffer before gpu runner updating its states.
+
+        Args:
+            **kwargs: additional arguments for the load operation
+
+        Returns:
+            dict[str, int]: a dictionary of request ids and the number of
+            tokens loaded for each request.
+        """
+        return {}
 
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
@@ -187,7 +219,7 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str | tuple[str, int]]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -195,7 +227,8 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ids of requests that have finished asynchronous transfer
             (requests that previously returned True from request_finished()),
-            tuple of (sending/saving ids, recving/loading ids).
+            tuple of (sending/saving ids, recving/loading ids or
+            (recving/loading id, num. of recv'ed/loaded tokens) pairs).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """

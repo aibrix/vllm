@@ -105,7 +105,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids: set[str] = set()
 
         # KV Connector: requests in process of async KV loading or recving
-        self.finished_recving_kv_req_ids: set[str] = set()
+        self.finished_recving_kv_req_ids: dict[str, Any] = {}
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -251,6 +251,7 @@ class Scheduler(SchedulerInterface):
                     self.kv_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
+                    preempted_req.num_allocated_tokens = 0
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
@@ -264,6 +265,9 @@ class Scheduler(SchedulerInterface):
                 else:
                     # The request can be scheduled.
                     can_schedule = True
+                    request.num_allocated_tokens += (
+                        len(new_blocks.get_unhashed_block_ids()) *
+                        self.block_size)
                     break
             if not can_schedule:
                 break
@@ -362,7 +366,8 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
 
                 # Get already-cached tokens.
-                if request.num_computed_tokens == 0:
+                if (request.num_computed_tokens == 0
+                        and request.num_allocated_tokens == 0):
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
@@ -427,6 +432,9 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
+
+                request.num_allocated_tokens += (
+                    len(new_blocks.get_unhashed_block_ids()) * self.block_size)
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1008,9 +1016,18 @@ class Scheduler(SchedulerInterface):
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
 
-        # Now that the blocks are ready, actually cache them.
         (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
-        num_computed_tokens = len(block_ids) * self.block_size
+        num_xferred_tokens_or_bool = self.finished_recving_kv_req_ids.pop(
+            request.request_id)
+        # Now that the blocks are ready, actually cache them.
+        if isinstance(num_xferred_tokens_or_bool, bool):
+            num_computed_tokens = len(block_ids) * self.block_size
+        else:
+            # If `get_finished` returns the number of actually transferred
+            # tokens, we use it as num_computed_tokens.
+            num_cached_tokens = (len(block_ids) * self.block_size -
+                                 request.num_allocated_tokens)
+            num_computed_tokens = num_cached_tokens + num_xferred_tokens_or_bool
         # Handle the case where num request tokens less then one block.
         num_computed_tokens = min(num_computed_tokens, request.num_tokens)
         if num_computed_tokens == request.num_tokens:
@@ -1019,9 +1036,9 @@ class Scheduler(SchedulerInterface):
 
         # Update the request state for scheduling.
         request.num_computed_tokens = num_computed_tokens
+        request.num_cached_tokens = num_computed_tokens
 
         # Return that we are ready.
-        self.finished_recving_kv_req_ids.remove(request.request_id)
         return True
 
     def _update_from_kv_xfer_finished(self,
@@ -1036,9 +1053,25 @@ class Scheduler(SchedulerInterface):
             scheduler the request during the next step.
         """
         # KV Connector:: update recv and send status from last step.
-        for req_id in (model_runner_output.finished_recving or ()):
-            logger.debug("Finished recving KV transfer for request %s", req_id)
-            self.finished_recving_kv_req_ids.add(req_id)
+        for item in (model_runner_output.finished_recving or ()):
+            if isinstance(item, str):
+                req_id = item
+                self.finished_recving_kv_req_ids[req_id] = True
+                logger.debug(
+                    "Finished recving KV transfer for request %s",
+                    req_id,
+                )
+            else:
+                req_id, num_xferred_tokens = item
+                self.finished_recving_kv_req_ids[req_id] = num_xferred_tokens
+                logger.debug(
+                    "Finished recving KV transfer for request %s, "
+                    "num of transferred tokens %d",
+                    req_id,
+                    num_xferred_tokens,
+                )
         for req_id in (model_runner_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            self._free_blocks(self.requests[req_id])
+            if self.requests[req_id].is_finished():
+                # If the request is already finished, we can free the blocks
+                self._free_blocks(self.requests[req_id])

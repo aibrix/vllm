@@ -1847,7 +1847,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         bypass_model_exec = False
         if self.need_recv_kv(model_input, kv_caches):
             # attach runner for rebuilding model_input
-            model_input.kv_transfer_metadata.runner = weakref.proxy(self)
+            model_input.kv_transfer_metadata.runner = weakref.proxy(
+                self)  # type: ignore
             hidden_or_intermediate_states, bypass_model_exec, model_input = \
                 get_kv_transfer_group().recv_kv_caches_and_hidden_states(
                     # model is used to know which layer the current worker

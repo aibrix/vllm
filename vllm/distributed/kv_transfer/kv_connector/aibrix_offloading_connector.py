@@ -5,22 +5,23 @@ import enum
 import itertools
 import logging
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from aibrix_kvcache import (BaseKVCacheManager, GroupAwareKVCacheManager,
                             KVCacheBlockLayout, KVCacheBlockSpec,
                             KVCacheConfig, KVCacheMetrics, KVCacheTensorSpec,
-                            ModelSpec)
+                            ModelSpec, TokenListView)
+from aibrix_kvcache._custom_ops import (reshape_and_cache_multi_layer,
+                                        reshape_and_offload_multi_layer)
 from aibrix_kvcache.common.absl_logging import (getLogger, log_every_n_seconds,
                                                 log_if)
 from aibrix_kvcache.metrics import (MS_BUCKETS, TOKEN_BUCKETS,
                                     BaseMetricsExporter,
                                     KVCacheMetricsExporter, Metrics)
+from aibrix_kvcache.profiling import tag_wrapper
 from aibrix_kvcache.utils import perf_timer
 
-from vllm._custom_ops import (reshape_and_cache_multi_layer,
-                              reshape_and_offload_multi_layer)
 from vllm.attention import get_attn_backend
 from vllm.attention.backends.flash_attn import FlashAttentionBackend
 # from vllm.attention.backends.flashinfer import FlashInferBackend
@@ -53,8 +54,8 @@ OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
 class AIBrixOffloadingConnectorComputeMetrics(Metrics):
     """Compute metrics."""
 
-    num_tokens: List[int] = []
-    op_lat_ms: Optional[List[int]] = None
+    num_tokens: list[int] = []
+    op_lat_ms: Optional[list[int]] = None
 
     def __init__(
         self,
@@ -104,12 +105,12 @@ class AIBrixOffloadingConnectorOpMetrics(Metrics):
     num_ops: int = 0
     total_tokens: int = 0
     total_sent_or_recved_tokens: int = 0
-    num_prefixes: List[int] = []
-    num_tokens: List[int] = []
-    num_sent_or_recved_tokens: List[int] = []
-    op_lat_ms: Optional[List[int]] = None
+    num_prefixes: list[int] = []
+    num_tokens: list[int] = []
+    num_sent_or_recved_tokens: list[int] = []
+    op_lat_ms: Optional[list[int]] = None
     # tracks the latency of rebuilding model_input
-    rebuild_lat_ms: Optional[List[int]] = None
+    rebuild_lat_ms: Optional[list[int]] = None
 
     def __init__(
         self,
@@ -260,7 +261,7 @@ class AIBrixOffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
 
     def export(
         self,
-        labels: Dict[str, str],
+        labels: dict[str, str],
         metrics: AIBrixOffloadingConnectorOpMetrics
         | AIBrixOffloadingConnectorComputeMetrics,
     ) -> None:
@@ -275,7 +276,7 @@ class AIBrixOffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
 
     def _export_op_metrics(
         self,
-        labels: Dict[str, str],
+        labels: dict[str, str],
         metrics: AIBrixOffloadingConnectorOpMetrics,
     ) -> None:
         self._export_counter(self.counter_num_ops, labels,
@@ -298,7 +299,7 @@ class AIBrixOffloadingConnectorOpMetricsExporter(BaseMetricsExporter):
 
     def _export_compute_metrics(
         self,
-        labels: Dict[str, str],
+        labels: dict[str, str],
         metrics: AIBrixOffloadingConnectorComputeMetrics,
     ) -> None:
         self._export_histogram(self.histogram_iteration_tokens, labels,
@@ -368,7 +369,7 @@ class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
         self,
         *,
         metrics: KVTransferMetrics,
-        labels: Dict[str, str],
+        labels: dict[str, str],
     ):
         self.kv_cache_metrics_exporter.export(
             metrics=metrics._cache_metrics,
@@ -390,8 +391,9 @@ class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
 
 @dataclasses.dataclass
 class AIBrixOffloadingConnectorCachedMeta:
-    context_tokens: List[int] = dataclasses.field(default_factory=list)
+    context_tokens: list[int] = dataclasses.field(default_factory=list)
     context_tokens_offset: int = 0
+    context_tokens_view: Optional[TokenListView] = None
 
     # When chunked prefill is enabled, the query length in each iteration may
     # not be divisible by block_size. Consider the following example, assuming
@@ -414,18 +416,25 @@ class AIBrixOffloadingConnectorCachedMeta:
     def __init__(self, seq_len: int) -> None:
         self.context_tokens = [-1] * seq_len
 
-    def get_context_tokens(self) -> List[int]:
+    def get_context_tokens(self) -> list[int]:
         return self.context_tokens[:self.context_tokens_offset]
 
-    def extend_context_tokens(self, tokens: List[int]) -> None:
+    def get_context_tokens_view(self) -> TokenListView:
+        if self.context_tokens_view is None:
+            self.context_tokens_view = TokenListView(self.get_context_tokens())
+        return self.context_tokens_view
+
+    def extend_context_tokens(self, tokens: list[int]) -> None:
         offset = self.context_tokens_offset
         length = len(tokens)
         self.context_tokens[offset:offset + length] = tokens
         self.context_tokens_offset += length
+        self.context_tokens_view = None
 
     def clear_context_tokens(self) -> None:
         self.context_tokens.clear()
         self.context_tokens_offset = 0
+        self.context_tokens_view = None
 
 
 class AIBrixOffloadingConnector(KVConnectorBase):
@@ -449,9 +458,10 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         num_attention_heads = model_config.get_num_attention_heads(
             parallel_config) * tp_size
         head_size = int(hidden_size / num_attention_heads)
+        tp_rank = get_tp_group().rank_in_group
 
         kv_head_ids = list(
-            range(num_kv_heads * rank, num_kv_heads * (rank + 1)))
+            range(num_kv_heads * tp_rank, num_kv_heads * (tp_rank + 1)))
         layer_ids = list(
             range(*model_config.get_layers_start_end_indices(parallel_config)))
         num_layers = len(layer_ids)
@@ -493,7 +503,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             self.cache = GroupAwareKVCacheManager(config=config,
                                                   process_group=pg)
 
-        self.rank = rank
+        self.rank = tp_rank
         self.head_size = head_size
         self.tp_size = tp_size
         self.num_kv_heads = num_kv_heads
@@ -509,13 +519,16 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         self.cache_feature = self.cache.feature
         self.kv_cache_dtype = kv_cache_dtype
 
-        self._connector_cache: Dict[str,
+        self._connector_cache: dict[str,
                                     AIBrixOffloadingConnectorCachedMeta] = {}
         self._metrics = AIBrixOffloadingConnectorMetrics(self.cache.metrics)
         # meta to track compute perf
         self._compute_start_event = torch.cuda.Event(enable_timing=True)
         self._compute_end_event = torch.cuda.Event(enable_timing=True)
         self._compute_total_tokens = 0
+
+        self.k_scales: Optional[list[torch.Tensor]] = None
+        self.v_scales: Optional[list[torch.Tensor]] = None
 
     @property
     def metrics(self) -> KVTransferMetrics:
@@ -569,9 +582,9 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         self,
         seq_request_id: str,
         seq_len: int,
-        seq_input_tokens: List[int],
+        seq_input_tokens: list[int],
         seq_slot_mapping: torch.Tensor,
-        kv_transfer_context_tokens: List[int],
+        kv_transfer_context_tokens: list[int],
     ) -> None:
         if self._connector_cache[seq_request_id] is None:
             self._connector_cache[
@@ -621,11 +634,23 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         assert chunk_slot_mapping.shape[0] == length
         return chunk_slot_mapping
 
+    def _ensure_kv_scales(self, model_executable: torch.nn.Module) -> None:
+        if self.k_scales is None:
+            start_layer = model_executable.model.start_layer
+            end_layer = model_executable.model.end_layer
+            layers = model_executable.model.layers[start_layer:end_layer]
+            self.k_scales = [layer.self_attn.attn._k_scale for layer in layers]
+            self.v_scales = [layer.self_attn.attn._v_scale for layer in layers]
+
+    @tag_wrapper({
+        "connector": "AIBrixOffloadingConnector",
+        "func": "send_kv_caches_and_hidden_states"
+    })
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              "IntermediateTensors"],
     ) -> None:
@@ -643,6 +668,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         if attn_metadata.num_prefills <= 0:
             return
 
+        self._ensure_kv_scales(model_executable)
         num_prefills = attn_metadata.num_prefills
         seq_lens = model_input.seq_lens[:num_prefills]
         query_lens = model_input.query_lens[:num_prefills]
@@ -668,7 +694,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             seq_slot_mapping = slot_mapping[start_pos:end_pos]
             seq_cached_meta = self._connector_cache[seq_request_id]
             assert seq_cached_meta is not None
-            seq_all_tokens = seq_cached_meta.get_context_tokens()
+            seq_all_tokens = seq_cached_meta.get_context_tokens_view()
             assert seq_all_tokens is not None
             assert len(seq_all_tokens) == seq_lens[
                 seq_idx], f"{len(seq_all_tokens)}!={seq_lens[seq_idx]}"
@@ -753,10 +779,6 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                 chunk_slot_mapping = self._get_chunk_slot_mapping(
                     seq_request_id, seq_slot_mapping, offset, length)
 
-                layers = model_executable.model.layers[start_layer:end_layer]
-                k_scales = [layer.self_attn.attn._k_scale for layer in layers]
-                v_scales = [layer.self_attn.attn._v_scale for layer in layers]
-
                 with perf_timer() as get_kernel_offload_dur_ms:
                     reshape_and_offload_multi_layer(
                         tensors,
@@ -764,8 +786,8 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                         chunk_slot_mapping,
                         self.block_ntokens,
                         self.kv_cache_dtype,
-                        k_scales,
-                        v_scales,
+                        self.k_scales,
+                        self.v_scales,
                         self.block_layout.name,
                     )
 
@@ -806,12 +828,16 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                                                 aligned_query_len, total_sent,
                                                 lat_ms)
 
+    @tag_wrapper({
+        "connector": "AIBrixOffloadingConnector",
+        "func": "recv_kv_caches_and_hidden_states"
+    })
     def recv_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        kv_caches: List[torch.Tensor],
-    ) -> Tuple[
+        kv_caches: list[torch.Tensor],
+    ) -> tuple[
             Union[torch.Tensor, "IntermediateTensors"],
             bool,
             "ModelInputForGPUWithSamplingMetadata",
@@ -840,6 +866,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         if attn_metadata.num_prefills <= 0:
             return hidden_or_intermediate_states, bypass_model_exec, model_input
 
+        self._ensure_kv_scales(model_executable)
         num_prefills = attn_metadata.num_prefills
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.seq_lens[:num_prefills]
@@ -852,9 +879,6 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         if kv_transfer_metadata.seq_group_metadata_list is not None:
             assert len(request_ids) == len(
                 kv_transfer_metadata.seq_group_metadata_list)
-
-        assert list(range(start_layer, end_layer)) == self.layer_ids, (
-            f"{list(range(start_layer, end_layer))} != {self.layer_ids}")
 
         model_config = model_executable.model.config
         num_kv_heads = int(model_config.num_key_value_heads / self.tp_size)
@@ -911,7 +935,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
 
             seq_cached_meta = self._connector_cache[seq_request_id]
             assert seq_cached_meta is not None
-            seq_all_tokens = seq_cached_meta.get_context_tokens()
+            seq_all_tokens = seq_cached_meta.get_context_tokens_view()
             assert seq_all_tokens is not None
             assert len(seq_all_tokens) == seq_lens[
                 seq_idx], f"{len(seq_all_tokens)}!={seq_lens[seq_idx]}"
@@ -960,10 +984,6 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                 chunk_slot_mapping = self._get_chunk_slot_mapping(
                     seq_request_id, seq_slot_mapping, offset, length)
 
-                layers = model_executable.model.layers[start_layer:end_layer]
-                k_scales = [layer.self_attn.attn._k_scale for layer in layers]
-                v_scales = [layer.self_attn.attn._v_scale for layer in layers]
-
                 with perf_timer() as get_kernel_onload_dur_ms:
                     reshape_and_cache_multi_layer(
                         kv_blocks,
@@ -971,8 +991,8 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                         chunk_slot_mapping,
                         self.block_ntokens,
                         self.kv_cache_dtype,
-                        k_scales,
-                        v_scales,
+                        self.k_scales,
+                        self.v_scales,
                         self.block_layout.name,
                     )
 
@@ -1031,7 +1051,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
     def _rebuild_model_input(
         self,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        reused_lens: List[int],
+        reused_lens: list[int],
     ) -> "ModelInputForGPUWithSamplingMetadata":
         seq_group_metadata_list = (
             model_input.kv_transfer_metadata.seq_group_metadata_list)
@@ -1069,7 +1089,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
     def _driver_rebuild_model_input(
         self,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        reused_lens: List[int],
+        reused_lens: list[int],
     ) -> "ModelInputForGPUWithSamplingMetadata":
         seq_group_metadata_list = (
             model_input.kv_transfer_metadata.seq_group_metadata_list)

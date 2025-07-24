@@ -50,7 +50,6 @@ OFFLOADING_CONNECTOR_SKIP_THRESHOLD = 8
 OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
     FlashAttentionBackend.get_name(): KVCacheBlockLayout.LCND,
 }
-OFFLOADING_CONNECTOR_MAX_PENDING_REQUESTS_DEFAULT = 32
 
 T = TypeVar('T')
 
@@ -434,7 +433,7 @@ class AIBrixOffloadingConnectorScheduler:
 
     def __init__(self, config: "VllmConfig"):
         self.kv_role = config.kv_transfer_config.kv_role
-        self.block_ntokens = config.cache_config.block_size
+        self.engine_block_ntokens = config.cache_config.block_size
 
         self._scheduler_meta = AIBrixOffloadingConnectorMetadata({})
 
@@ -561,9 +560,10 @@ class AIBrixOffloadingConnectorScheduler:
     def _block_ids_to_slot_mapping(self, block_ids: list[int]) -> torch.Tensor:
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
-        block_offsets = torch.arange(0, self.block_ntokens)
-        slot_mapping = block_offsets.reshape((1, self.block_ntokens)) + \
-                block_ids_tensor.reshape((num_blocks, 1)) * self.block_ntokens
+        block_offsets = torch.arange(0, self.engine_block_ntokens)
+        slot_mapping = block_offsets.reshape((1, self.engine_block_ntokens)) + \
+                block_ids_tensor.reshape((num_blocks, 1)) * \
+                    self.engine_block_ntokens
         return slot_mapping.flatten()
 
 
@@ -664,7 +664,8 @@ class AIBrixOffloadingConnectorWorker:
         self.num_layers = num_layers
         self.kv_head_ids = kv_head_ids
         self.layer_ids = layer_ids
-        self.block_ntokens = block_ntokens
+        self.engine_block_ntokens = block_ntokens
+        self.cache_block_ntokens = self.cache.block_size
         self.block_dtype = block_dtype
         self.block_shape = block_spec.block_shape
         self.block_spec = block_spec
@@ -683,6 +684,12 @@ class AIBrixOffloadingConnectorWorker:
 
         # metrics
         self._metrics = AIBrixOffloadingConnectorMetrics(self.cache.metrics)
+        logger.info(
+            "AIBrixOffloadingConnector is initialized, "
+            "engine_block_ntokens=%d, cache_block_ntokens=%d",
+            self.engine_block_ntokens,
+            self.cache_block_ntokens,
+        )
 
     def __del__(self) -> None:
         if getattr(self, "cache", None) is not None:
@@ -753,16 +760,18 @@ class AIBrixOffloadingConnectorWorker:
             non_blocking=True)
 
         # align to block boundary
-        aligned_context_len = round_down(seq_context_len, self.block_ntokens)
+        aligned_context_len = round_down(seq_context_len,
+                                         self.cache_block_ntokens)
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(actual_query_len, self.block_ntokens)
+        aligned_query_len = round_down(actual_query_len,
+                                       self.cache_block_ntokens)
         shift_len = seq_context_len - aligned_context_len
 
         assert prompt_len >= aligned_context_len + aligned_query_len, \
             f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
 
         if aligned_query_len < OFFLOADING_CONNECTOR_SKIP_THRESHOLD * \
-                self.block_ntokens:
+                self.engine_block_ntokens:
             logger.debug(
                 "Skip Request[id=%s, context_len=%d, query_len=%d]",
                 seq_request_id,
@@ -818,7 +827,7 @@ class AIBrixOffloadingConnectorWorker:
                     kv_blocks,
                     self.layers_kv_caches,
                     chunk_slot_mapping,
-                    self.block_ntokens,
+                    self.engine_block_ntokens,
                     self.kv_cache_dtype,
                     self.k_scales,
                     self.v_scales,
@@ -898,9 +907,11 @@ class AIBrixOffloadingConnectorWorker:
         query_len = seq_request_meta.query_len
 
         # align to block boundary
-        aligned_context_len = round_down(seq_context_len, self.block_ntokens)
+        aligned_context_len = round_down(seq_context_len,
+                                         self.cache_block_ntokens)
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(actual_query_len, self.block_ntokens)
+        aligned_query_len = round_down(actual_query_len,
+                                       self.cache_block_ntokens)
 
         assert prompt_len >= aligned_context_len + aligned_query_len, \
             f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
@@ -936,7 +947,7 @@ class AIBrixOffloadingConnectorWorker:
                 logger.info(
                     "Request[id=%s] send(%d) encounters %d existing tokens",
                     seq_request_id, length, num_existing_tokens)
-                if chunk_size - num_existing_tokens < self.block_ntokens:
+                if chunk_size - num_existing_tokens < self.cache_block_ntokens:
                     continue
                 else:
                     # partially exists
@@ -956,7 +967,7 @@ class AIBrixOffloadingConnectorWorker:
                 break
             handle = status.value
             tensors = handle.to_tensors()
-            length = len(tensors) * self.block_ntokens
+            length = len(tensors) * self.cache_block_ntokens
 
             chunk_slot_mapping = seq_slot_mapping[offset:offset + length]
 
@@ -965,7 +976,7 @@ class AIBrixOffloadingConnectorWorker:
                     tensors,
                     self.layers_kv_caches,
                     chunk_slot_mapping,
-                    self.block_ntokens,
+                    self.engine_block_ntokens,
                     self.kv_cache_dtype,
                     self.k_scales,
                     self.v_scales,
@@ -1025,23 +1036,6 @@ class AIBrixOffloadingConnector(KVConnectorBase_V1):
                 config)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = AIBrixOffloadingConnectorWorker(config)
-
-    @delegate_to("connector_worker")
-    @property
-    def metrics(self) -> 'KVTransferMetrics':
-        """
-        Get the metrics object associated with the connector.
-        Returns:
-            KVTransferMetrics: The metrics object.
-        """
-        pass
-
-    @delegate_to("connector_worker")
-    def get_metrics_exporter_cls(self) -> 'KVTransferMetricsExporter':
-        """
-        Get the metrics exporter class associated with the connector.
-        """
-        pass
 
     # ==============================
     # Worker-side methods

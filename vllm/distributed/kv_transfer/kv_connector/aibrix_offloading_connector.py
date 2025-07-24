@@ -510,7 +510,8 @@ class AIBrixOffloadingConnector(KVConnectorBase):
         self.num_layers = num_layers
         self.kv_head_ids = kv_head_ids
         self.layer_ids = layer_ids
-        self.block_ntokens = block_ntokens
+        self.engine_block_ntokens = block_ntokens
+        self.cache_block_ntokens = self.cache.block_size
         self.block_dtype = block_dtype
         self.block_shape = block_spec.block_shape
         self.block_spec = block_spec
@@ -529,6 +530,13 @@ class AIBrixOffloadingConnector(KVConnectorBase):
 
         self.k_scales: Optional[list[torch.Tensor]] = None
         self.v_scales: Optional[list[torch.Tensor]] = None
+
+        logger.info(
+            "AIBrixOffloadingConnector is initialized, "
+            "engine_block_ntokens=%d, cache_block_ntokens=%d",
+            self.engine_block_ntokens,
+            self.cache_block_ntokens,
+        )
 
     @property
     def metrics(self) -> KVTransferMetrics:
@@ -607,7 +615,8 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             assert seq_request_cache.context_tokens_offset == 0
             seq_request_cache.extend_context_tokens(kv_transfer_context_tokens)
         seq_request_cache.extend_context_tokens(seq_input_tokens)
-        last_block_len = min(self.block_ntokens, seq_slot_mapping.shape[0])
+        last_block_len = min(self.cache_block_ntokens,
+                             seq_slot_mapping.shape[0])
         seq_request_cache.last_block_slot_mapping = seq_slot_mapping[
             -last_block_len:]
 
@@ -702,10 +711,10 @@ class AIBrixOffloadingConnector(KVConnectorBase):
 
             # align to block boundary
             aligned_context_len = round_down(seq_context_len,
-                                             self.block_ntokens)
+                                             self.cache_block_ntokens)
             actual_query_len = seq_context_len + query_len - aligned_context_len
             aligned_query_len = round_down(actual_query_len,
-                                           self.block_ntokens)
+                                           self.cache_block_ntokens)
 
             # skip if there are not enough tokens to send after alignment
             if prompt_len == seq_lens[seq_idx]:
@@ -716,7 +725,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                 # This is an intermediate chunk, only skip if this is not
                 # a full block
                 skip_threshold = 1
-            if aligned_query_len <= skip_threshold * self.block_ntokens:
+            if aligned_query_len <= skip_threshold * self.engine_block_ntokens:
                 continue
 
             assert len(
@@ -753,7 +762,8 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                     logger.info(
                         "Request[id=%s] send(%d) encounters %d existing tokens",
                         seq_request_id, length, num_existing_tokens)
-                    if chunk_size - num_existing_tokens < self.block_ntokens:
+                    if chunk_size - num_existing_tokens < \
+                        self.cache_block_ntokens:
                         continue
                     else:
                         # partially exists
@@ -774,7 +784,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                     break
                 handle = status.value
                 tensors = handle.to_tensors()
-                length = len(tensors) * self.block_ntokens
+                length = len(tensors) * self.cache_block_ntokens
 
                 chunk_slot_mapping = self._get_chunk_slot_mapping(
                     seq_request_id, seq_slot_mapping, offset, length)
@@ -784,7 +794,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                         tensors,
                         kv_caches[start_layer:end_layer],
                         chunk_slot_mapping,
-                        self.block_ntokens,
+                        self.engine_block_ntokens,
                         self.kv_cache_dtype,
                         self.k_scales,
                         self.v_scales,
@@ -907,10 +917,10 @@ class AIBrixOffloadingConnector(KVConnectorBase):
 
             # align to block boundary
             aligned_context_len = round_down(seq_context_len,
-                                             self.block_ntokens)
+                                             self.cache_block_ntokens)
             actual_query_len = seq_context_len + query_len - aligned_context_len
             aligned_query_len = round_down(actual_query_len,
-                                           self.block_ntokens)
+                                           self.cache_block_ntokens)
             shift_len = seq_context_len - aligned_context_len
 
             self._update_request_cache(
@@ -930,7 +940,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                 # This is an intermediate chunk, only skip if this is not
                 # a full block
                 skip_threshold = 1
-            if aligned_query_len <= skip_threshold * self.block_ntokens:
+            if aligned_query_len <= skip_threshold * self.engine_block_ntokens:
                 continue
 
             seq_cached_meta = self._connector_cache[seq_request_id]
@@ -989,7 +999,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                         kv_blocks,
                         kv_caches[start_layer:end_layer],
                         chunk_slot_mapping,
-                        self.block_ntokens,
+                        self.engine_block_ntokens,
                         self.kv_cache_dtype,
                         self.k_scales,
                         self.v_scales,
@@ -1112,7 +1122,7 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             backup[offset] = seq_group_metadata.computed_block_nums
             context_len = seq_lens[offset] - query_lens[offset]
             context_len += reused_lens[offset]
-            num_blocks = context_len // self.block_ntokens
+            num_blocks = context_len // self.engine_block_ntokens
             seq_group_metadata.computed_block_nums = copy.deepcopy(
                 seq_group_metadata.computed_block_nums)
             seq_group_metadata.computed_block_nums.extend(

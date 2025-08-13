@@ -816,8 +816,11 @@ class AIBrixOffloadingConnector(KVConnectorBase):
                         "Failed to put to offloading service: %s", 3,
                         str(status))
                     break
-                else:
-                    total_sent += length
+
+                put_ntokens = status.get()
+                total_sent += put_ntokens
+                if put_ntokens != length:
+                    break
 
             log_if(
                 logger,

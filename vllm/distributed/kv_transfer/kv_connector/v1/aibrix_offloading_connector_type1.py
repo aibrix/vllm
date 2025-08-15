@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
-import dataclasses
 import enum
 import logging
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar
 
+import numpy as np
 import torch
+import torch.distributed as dist
 from aibrix_kvcache import (BaseKVCacheManager, GroupAwareKVCacheManager,
                             KVCacheBlockLayout, KVCacheBlockSpec,
                             KVCacheConfig, KVCacheMetrics, KVCacheTensorSpec,
@@ -23,6 +24,7 @@ from aibrix_kvcache.metrics import (MS_BUCKETS, TOKEN_BUCKETS,
 from aibrix_kvcache.profiling import tag_wrapper
 from aibrix_kvcache.utils import perf_timer
 
+import vllm.envs
 from vllm.attention import get_attn_backend
 # from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 # from vllm.v1.attention.backends.flex_attention import FlexAttentionBackend
@@ -75,6 +77,19 @@ def delegate_to(
         return wrapper
 
     return decorator
+
+
+class AIBrixOffloadingConnectorSyncGranularity(enum.Enum):
+    """The sync granularity used by AIBrix offloading connectors.
+    NONE: no synchronization among TP participants.
+    PER_OP: sync up the min num. of tokens fetched by each TP participant after
+            each GET/ACUQUIRE operation.
+    PER_BATCH: sync up the min num. of tokens fetched by each TP participant
+               after each batch.
+    """
+    NONE = enum.auto()
+    PER_OP = enum.auto()
+    PER_BATCH = enum.auto()
 
 
 class AIBrixOffloadingConnectorOpMetrics(Metrics):
@@ -334,6 +349,44 @@ class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
         )
 
 
+@dataclass
+class AIBrixOffloadingConnectorCachedMeta:
+    context_tokens: np.ndarray = field(default_factory=lambda: np.array([]))
+    context_tokens_offset: int = 0
+    context_tokens_view: Optional[TokenListView] = None
+
+    context_slot_mapping: Optional[torch.Tensor] = None
+    context_slot_mapping_offset: int = 0
+
+    def __init__(self, prompt_len: int) -> None:
+        self.context_tokens = np.empty(prompt_len, dtype=np.int32)
+        self.context_slot_mapping = torch.empty(
+            prompt_len,
+            dtype=torch.long,
+            device="cuda",
+        )
+
+    def get_context_tokens(self) -> list[int]:
+        return self.context_tokens[:self.context_tokens_offset]
+
+    def get_context_tokens_view(self) -> TokenListView:
+        if self.context_tokens_view is None:
+            self.context_tokens_view = TokenListView(self.get_context_tokens())
+        return self.context_tokens_view
+
+    def extend(self, tokens: list[int], slot_mapping: torch.Tensor) -> None:
+        offset = self.context_tokens_offset
+        length = len(tokens)
+        self.context_tokens[offset:offset + length] = tokens
+        self.context_tokens_offset += length
+        self.context_tokens_view = None
+
+        offset = self.context_slot_mapping_offset
+        leng = min(slot_mapping.shape[0], len(self.context_tokens) - offset)
+        self.context_slot_mapping[offset:offset + leng] = slot_mapping[:leng]
+        self.context_slot_mapping_offset += leng
+
+
 class AIBrixOffloadingConnectorRequestState(enum.IntEnum):
     INIT = enum.auto()
     WAITING_FOR_ALLOC = enum.auto()
@@ -343,17 +396,21 @@ class AIBrixOffloadingConnectorRequestState(enum.IntEnum):
     RECEIVING = enum.auto()
 
 
-@dataclasses.dataclass
+@dataclass
 class AIBrixOffloadingConnectorRequestMetadata(CachedPyObjectBase):
     req_id: str = ""
     prompt_len: int = -1
     context_len: int = -1
     query_len: int = -1  # num of tokens to send/recv
-    seq_token_ids: list[int] = dataclasses.field(default_factory=list)
-    seq_token_ids_view: Optional[TokenListView] = None
+    # 1. all token ids for a new request
+    # 2. new token ids for a cached request
+    seq_token_ids: list[int] = field(default_factory=list)
+    # 1. all slot mapping for a new request
+    # 2. new slot mapping for a cached request
     seq_slot_mapping: Optional[torch.Tensor] = None
     state: AIBrixOffloadingConnectorRequestState = (
         AIBrixOffloadingConnectorRequestState.INIT)
+    resumed_from_preemption: bool = False
 
     def __str__(self) -> str:
         return (f"AIBrixOffloadingConnectorRequestMetadata["
@@ -363,7 +420,8 @@ class AIBrixOffloadingConnectorRequestMetadata(CachedPyObjectBase):
                 f"query_len={self.query_len}, "
                 f"len(seq_token_ids)={len(self.seq_token_ids)}, "
                 f"seq_slot_mapping.shape={self.seq_slot_mapping.shape}, "
-                f"state={self.state.name}]")
+                f"state={self.state.name}, "
+                f"resumed_from_preemption={self.resumed_from_preemption}]")
 
     def __repr__(self):
         return self.__str__()
@@ -376,6 +434,7 @@ class AIBrixOffloadingConnectorMetadata(KVConnectorMetadata):
                                 AIBrixOffloadingConnectorRequestMetadata]):
         # Requests that need to load from external kvcache.
         self.requests = requests
+        self.finished_requests_ids: set[str] = set()
 
     def __getitem__(self,
                     key: str) -> AIBrixOffloadingConnectorRequestMetadata:
@@ -412,6 +471,10 @@ class AIBrixOffloadingConnectorMetadata(KVConnectorMetadata):
     ) -> AIBrixOffloadingConnectorRequestMetadata | None:
         return self.requests.pop(request_id, None)
 
+    def finish_request(self, request_id: str) -> None:
+        self.finished_requests_ids.add(request_id)
+        self.pop_request(request_id)
+
     def get(self, predicate: Callable) -> "AIBrixOffloadingConnectorMetadata":
         requests = {k: v for k, v in self.requests.items() if predicate(v)}
         return AIBrixOffloadingConnectorMetadata(requests=requests)
@@ -427,6 +490,7 @@ class AIBrixOffloadingConnectorMetadata(KVConnectorMetadata):
 
     def clear(self) -> None:
         self.requests.clear()
+        self.finished_requests_ids.clear()
 
 
 class AIBrixOffloadingConnectorScheduler:
@@ -488,9 +552,6 @@ class AIBrixOffloadingConnectorScheduler:
             if context_len >= prompt_len:
                 continue
 
-            (block_ids, ) = req.new_block_ids
-            new_slot_mapping = self._block_ids_to_slot_mapping(block_ids)
-
             if req.resumed_from_preemption:
                 logger.debug(
                     "Got preempt Request[id=%s, context_len=%d, query_len=%d]",
@@ -498,31 +559,29 @@ class AIBrixOffloadingConnectorScheduler:
                     context_len,
                     query_len,
                 )
-                seq_token_ids = req.new_token_ids
-                seq_slot_mapping = new_slot_mapping
+                new_token_len = seq_len
             else:
-                seq_token_ids = req_meta.seq_token_ids + req.new_token_ids
-                if new_slot_mapping.shape[0] > 0:
-                    seq_slot_mapping = torch.cat(
-                        [req_meta.seq_slot_mapping, new_slot_mapping])
-                else:
-                    seq_slot_mapping = req_meta.seq_slot_mapping
+                new_token_len = query_len
+
+            (block_ids, ) = req.new_block_ids
+            seq_token_ids = req.new_token_ids
+            seq_slot_mapping = self._block_ids_to_slot_mapping(block_ids)
 
             self._scheduler_meta.upsert_request(
                 req_id,
                 prompt_len=prompt_len,
                 context_len=context_len,
                 query_len=query_len,
-                seq_token_ids=seq_token_ids[:seq_len],
+                seq_token_ids=seq_token_ids[:new_token_len],
                 seq_slot_mapping=seq_slot_mapping,
                 state=AIBrixOffloadingConnectorRequestState.WAITING_FOR_RECV,
+                resumed_from_preemption=req.resumed_from_preemption,
             )
 
         # 4. keep requests that are in the WAITING_FOR_RECV state
-        meta = copy.deepcopy(
-            self._scheduler_meta.get(lambda req: req.state == \
+        meta = self._scheduler_meta.get(lambda req: req.state == \
                 AIBrixOffloadingConnectorRequestState.WAITING_FOR_RECV
-            ))
+            )
 
         logger.debug("SCHEDULER: build_connector_meta, meta=%s", meta.__dict__)
 
@@ -532,6 +591,10 @@ class AIBrixOffloadingConnectorScheduler:
                 req_id,
                 state=AIBrixOffloadingConnectorRequestState.RECEIVING,
             )
+
+        # 6. attach finished requests
+        meta.finished_requests_ids = self._scheduler_meta.finished_requests_ids
+        self._scheduler_meta.finished_requests_ids = set()
 
         logger.debug(
             "Num. of scheduled requests: %s",
@@ -550,11 +613,7 @@ class AIBrixOffloadingConnectorScheduler:
         req_id = request.request_id
         logger.debug("SCHEDULER: Request[id=%s] finished", req_id)
 
-        if req_id not in self._scheduler_meta:
-            return False, None
-
-        # use sync sending
-        self._scheduler_meta.pop_request(req_id)
+        self._scheduler_meta.finish_request(req_id)
         return False, None
 
     def _block_ids_to_slot_mapping(self, block_ids: list[int]) -> torch.Tensor:
@@ -618,6 +677,7 @@ class AIBrixOffloadingConnectorWorker:
                                   model_spec=ModelSpec(
                                       model_config.max_model_len))
 
+        self.kv_group: dist.ProcessGroup | None = None
         if parallel_config.tensor_parallel_size == 1:
             self.cache = BaseKVCacheManager(config=kv_config)
         else:
@@ -651,8 +711,24 @@ class AIBrixOffloadingConnectorWorker:
                 group_name="kvcache",
             )
             assert rank == kv_group.rank_in_group
-            self.cache = GroupAwareKVCacheManager(
-                config=kv_config, process_group=kv_group.cpu_group)
+
+            sync_granularity = vllm.envs.VLLM_AIBRIX_SYNC_GRANULARITY
+            if (AIBrixOffloadingConnectorSyncGranularity.NONE.name ==
+                    sync_granularity):
+                self.cache = BaseKVCacheManager(config=kv_config)
+            elif (AIBrixOffloadingConnectorSyncGranularity.PER_OP.name ==
+                  sync_granularity):
+                self.cache = GroupAwareKVCacheManager(
+                    config=kv_config, process_group=kv_group.cpu_group)
+            elif (AIBrixOffloadingConnectorSyncGranularity.PER_BATCH.name ==
+                  sync_granularity):
+                self.cache = BaseKVCacheManager(config=kv_config)
+                self.kv_group = kv_group.cpu_group
+                self._coll_tensor = torch.empty(
+                    (config.scheduler_config.max_num_seqs), dtype=torch.int32)
+            else:
+                raise ValueError(
+                    f"Unknown sync granularity {sync_granularity}")
 
         self.rank = rank
         self.head_size = head_size
@@ -679,6 +755,7 @@ class AIBrixOffloadingConnectorWorker:
         self.k_scales: list[torch.Tensor] | None = None
         self.v_scales: list[torch.Tensor] | None = None
 
+        self._meta_cache: dict[str, AIBrixOffloadingConnectorCachedMeta] = {}
         # metrics
         self._metrics = AIBrixOffloadingConnectorMetrics(self.cache.metrics)
         logger.info(
@@ -705,6 +782,23 @@ class AIBrixOffloadingConnectorWorker:
             f"{list(OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS.keys())}. "
             f"{self.attn_backend.get_name()} is used.")
 
+    def _update_meta_cache(
+        self,
+        metadata: AIBrixOffloadingConnectorMetadata,
+    ) -> None:
+        # remove finished requests
+        for req_id in metadata.finished_requests_ids:
+            if req_id in self._meta_cache:
+                self._meta_cache.pop(req_id)
+
+        for req_id, meta in metadata.items():
+            if req_id not in self._meta_cache or meta.resumed_from_preemption:
+                self._meta_cache[req_id] = AIBrixOffloadingConnectorCachedMeta(
+                    meta.prompt_len)
+
+            seq_meta_cache = self._meta_cache[req_id]
+            seq_meta_cache.extend(meta.seq_token_ids, meta.seq_slot_mapping)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         self.kv_caches = kv_caches
         layer_names = self.no_compile_layers.keys()
@@ -723,14 +817,32 @@ class AIBrixOffloadingConnectorWorker:
         self,
         metadata: AIBrixOffloadingConnectorMetadata,
     ) -> dict[str, int]:
+        self._update_meta_cache(metadata)
+
         stats = {}
         for seq_request_id, seq_request_meta in metadata.items():
             num_fetched_tokens = self._recv_kv_sync_impl(seq_request_meta)
-            if num_fetched_tokens > 0:
-                stats[seq_request_id] = num_fetched_tokens
-                # update seq_request_meta
-                seq_request_meta.query_len -= num_fetched_tokens
-                seq_request_meta.context_len += num_fetched_tokens
+            stats[seq_request_id] = num_fetched_tokens
+
+        if len(stats) > 0 and self.kv_group is not None:
+            for idx, (seq_request_id, seq_request_meta) in \
+                enumerate(metadata.items()):
+                self._coll_tensor[idx] = stats.get(seq_request_id, 0)
+            dist.all_reduce(self._coll_tensor[:idx], dist.ReduceOp.MIN,
+                            self.kv_group)
+
+            for idx, (seq_request_id, seq_request_meta) in \
+                enumerate(metadata.items()):
+                if self._coll_tensor[idx] > 0:
+                    stats[seq_request_id] = self._coll_tensor[idx].item()
+                else:
+                    stats.pop(seq_request_id, None)
+
+        for seq_request_id, num_fetched_tokens in stats.items():
+            seq_request_meta = metadata[seq_request_id]
+            # update seq_request_meta
+            seq_request_meta.query_len -= num_fetched_tokens
+            seq_request_meta.context_len += num_fetched_tokens
 
             seq_request_meta.state = \
                 AIBrixOffloadingConnectorRequestState.WAITING_FOR_SEND
@@ -743,18 +855,13 @@ class AIBrixOffloadingConnectorWorker:
     ) -> int:
         logger.debug("_recv_kv_sync_impl: %s", seq_request_meta)
         seq_request_id = seq_request_meta.req_id
-        seq_context_len = seq_request_meta.context_len
-        if seq_request_meta.seq_token_ids_view is None:
-            seq_request_meta.seq_token_ids_view = TokenListView(
-                seq_request_meta.seq_token_ids)
-        seq_all_tokens = seq_request_meta.seq_token_ids_view
+        seq_cached_meta = self._meta_cache[seq_request_id]
+        seq_all_tokens = seq_cached_meta.get_context_tokens_view()
         assert seq_all_tokens is not None, "seq_all_tokens is None"
+        seq_context_len = seq_request_meta.context_len
 
         prompt_len = seq_request_meta.prompt_len
         query_len = seq_request_meta.query_len
-
-        seq_slot_mapping = seq_request_meta.seq_slot_mapping.cuda(
-            non_blocking=True)
 
         # align to block boundary
         aligned_context_len = round_down(seq_context_len,
@@ -817,7 +924,8 @@ class AIBrixOffloadingConnectorWorker:
             offset = len(chunk_prefix)
             length = num_fetched_tokens
 
-            chunk_slot_mapping = seq_slot_mapping[offset:offset + length]
+            chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
+                offset:offset + length]
 
             with perf_timer() as get_kernel_onload_dur_ms:
                 reshape_and_cache_multi_layer(
@@ -896,9 +1004,8 @@ class AIBrixOffloadingConnectorWorker:
         logger.debug("_send_kv_sync_impl: %s", seq_request_meta)
         seq_request_id = seq_request_meta.req_id
         seq_context_len = seq_request_meta.context_len
-        seq_slot_mapping = seq_request_meta.seq_slot_mapping.cuda(
-            non_blocking=True)
-        seq_all_tokens = seq_request_meta.seq_token_ids_view
+        seq_cached_meta = self._meta_cache[seq_request_id]
+        seq_all_tokens = seq_cached_meta.get_context_tokens_view()
         assert seq_all_tokens is not None, "seq_all_tokens is None"
         prompt_len = seq_request_meta.prompt_len
         query_len = seq_request_meta.query_len
@@ -966,7 +1073,8 @@ class AIBrixOffloadingConnectorWorker:
             tensors = handle.to_tensors()
             length = len(tensors) * self.cache_block_ntokens
 
-            chunk_slot_mapping = seq_slot_mapping[offset:offset + length]
+            chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
+                offset:offset + length]
 
             with perf_timer() as get_kernel_offload_dur_ms:
                 reshape_and_offload_multi_layer(

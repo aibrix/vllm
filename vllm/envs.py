@@ -127,6 +127,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_AIBRIX_SYNC_GRANULARITY: str = "PER_OP"
 
 
 def get_default_cache_root():
@@ -870,6 +871,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB":
     lambda: int(os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")),
+
+    # Specify the sync granularity used by AIBrix controllers. Please refer to
+    # AIBrixOffloadingConnectorSyncGranularity for more details.
+    "VLLM_AIBRIX_SYNC_GRANULARITY":
+    lambda: os.environ.get("VLLM_AIBRIX_SYNC_GRANULARITY", "PER_OP").upper(),
 }
 
 # --8<-- [end:env-vars-definition]

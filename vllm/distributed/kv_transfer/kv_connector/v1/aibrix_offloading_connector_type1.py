@@ -579,10 +579,7 @@ class AIBrixOffloadingConnectorWorker:
 
         tp_size = parallel_config.tensor_parallel_size
         num_kv_heads = model_config.get_num_kv_heads(parallel_config)
-        hidden_size = model_config.get_hidden_size()
-        num_attention_heads = model_config.get_num_attention_heads(
-            parallel_config) * tp_size
-        head_size = int(hidden_size / num_attention_heads)
+        head_size = model_config.get_head_size()
 
         rank = get_tp_group().rank_in_group
         kv_head_ids = list(

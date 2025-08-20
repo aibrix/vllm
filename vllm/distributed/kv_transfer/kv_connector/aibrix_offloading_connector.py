@@ -489,9 +489,13 @@ class AIBrixOffloadingConnector(KVConnectorBase):
             ),
         )
 
-        config = KVCacheConfig(block_spec=block_spec,
-                               model_spec=ModelSpec(
-                                   model_config.max_model_len))
+        config = KVCacheConfig(
+            block_spec=block_spec,
+            model_spec=ModelSpec(
+                model_config.max_model_len,
+                config.scheduler_config.max_num_batched_tokens,
+            ),
+        )
 
         if parallel_config.tensor_parallel_size == 1:
             self.cache = BaseKVCacheManager(config=config)

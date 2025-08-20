@@ -631,7 +631,14 @@ class AIBrixOffloadingConnectorWorker:
     """
 
     def __init__(self, config: "VllmConfig"):
+        self._init_worker(config)
 
+    def _init_worker(
+        self,
+        config: "VllmConfig",
+        max_num_batched_tokens: int = -1,
+        tp_aware: bool = True,
+    ):
         cache_config = config.cache_config
         model_config = config.model_config
         parallel_config = config.parallel_config
@@ -673,12 +680,16 @@ class AIBrixOffloadingConnectorWorker:
             ),
         )
 
-        kv_config = KVCacheConfig(block_spec=block_spec,
-                                  model_spec=ModelSpec(
-                                      model_config.max_model_len))
+        kv_config = KVCacheConfig(
+            block_spec=block_spec,
+            model_spec=ModelSpec(
+                model_config.max_model_len,
+                max_num_batched_tokens,
+            ),
+        )
 
         self.kv_group: dist.ProcessGroup | None = None
-        if parallel_config.tensor_parallel_size == 1:
+        if parallel_config.tensor_parallel_size == 1 or not tp_aware:
             self.cache = BaseKVCacheManager(config=kv_config)
         else:
             backend = torch.distributed.get_backend(get_world_group()\
@@ -805,6 +816,10 @@ class AIBrixOffloadingConnectorWorker:
         self.layers_kv_caches = [
             self.kv_caches[layer_name] for layer_name in layer_names
         ]
+        self.layer_name_idx_mapping = {
+            layer_name: idx
+            for idx, layer_name in enumerate(layer_names)
+        }
         layers = self.no_compile_layers.values()
         self.k_scales = [layer._k_scale for layer in layers]
         self.v_scales = [layer._v_scale for layer in layers]

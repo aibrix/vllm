@@ -201,7 +201,7 @@ class KVConnectorBase_V1(ABC):
 
     def get_finished(
         self, finished_req_ids: set[str]
-    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str | tuple[str, int]]]]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -209,7 +209,8 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ids of requests that have finished asynchronous transfer
             (requests that previously returned True from request_finished()),
-            tuple of (sending/saving ids, recving/loading ids).
+            tuple of (sending/saving ids, recving/loading ids or
+            (prefetching id, num. of prefetched tokens) pairs).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
@@ -295,3 +296,12 @@ class KVConnectorBase_V1(ABC):
             returned by the engine.
         """
         return False, None
+
+    def request_preempted(
+        self,
+        request: "Request",
+    ) -> None:
+        """
+        Called when a request has been preempted.
+        """
+        return

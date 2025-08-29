@@ -35,7 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_transfer_metrics import (
     KVTransferMetrics, KVTransferMetricsExporter)
-from vllm.utils import get_kv_cache_torch_dtype, round_down
+from vllm.utils import get_kv_cache_torch_dtype, round_down, round_up
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 if TYPE_CHECKING:
@@ -99,19 +99,19 @@ class AIBrixOffloadingConnectorOpMetrics(Metrics):
         SEND = enum.auto()
         RECV = enum.auto()
 
-    num_ops: int = 0
-    total_tokens: int = 0
-    total_sent_or_recved_tokens: int = 0
-    num_prefixes: list[int] = []
-    num_tokens: list[int] = []
-    num_sent_or_recved_tokens: list[int] = []
-    op_lat_ms: Optional[list[int]] = None
-
     def __init__(
         self,
         op: OP,
         enable_time_measurement: bool = True,
     ) -> None:
+        self.num_ops: int = 0
+        self.total_tokens: int = 0
+        self.total_sent_or_recved_tokens: int = 0
+        self.num_prefixes: list[int] = []
+        self.num_tokens: list[int] = []
+        self.num_sent_or_recved_tokens: list[int] = []
+        self.op_lat_ms: Optional[list[int]] = None
+
         self._op = op
         self._enable_time_measurement = enable_time_measurement
         self._init_optionals()
@@ -374,17 +374,28 @@ class AIBrixOffloadingConnectorCachedMeta:
             self.context_tokens_view = TokenListView(self.get_context_tokens())
         return self.context_tokens_view
 
-    def extend(self, tokens: list[int], slot_mapping: torch.Tensor) -> None:
-        offset = self.context_tokens_offset
-        length = len(tokens)
-        self.context_tokens[offset:offset + length] = tokens
-        self.context_tokens_offset += length
-        self.context_tokens_view = None
+    def extend(
+        self,
+        tokens: tuple[int, list[int]],
+        slot_mapping: Optional[tuple[int, torch.Tensor]],
+    ):
+        if tokens:
+            offset = tokens[0]
+            length = len(tokens[1])
+            self.context_tokens[offset:offset + length] = tokens[1]
+            self.context_tokens_offset = offset + length
+            self.context_tokens_view = None
 
-        offset = self.context_slot_mapping_offset
-        leng = min(slot_mapping.shape[0], len(self.context_tokens) - offset)
-        self.context_slot_mapping[offset:offset + leng] = slot_mapping[:leng]
-        self.context_slot_mapping_offset += leng
+        if slot_mapping is None:
+            return
+        offset = slot_mapping[0]
+        length = min(
+            slot_mapping[1].shape[0],
+            self.context_slot_mapping.shape[0] - offset,
+        )
+        self.context_slot_mapping[offset : offset + length] = \
+            slot_mapping[1][:length]
+        self.context_slot_mapping_offset = offset + length
 
 
 class AIBrixOffloadingConnectorRequestState(enum.IntEnum):
@@ -402,24 +413,45 @@ class AIBrixOffloadingConnectorRequestMetadata(CachedPyObjectBase):
     prompt_len: int = -1
     context_len: int = -1
     query_len: int = -1  # num of tokens to send/recv
+    load_len: int = -1  # num of tokens to load
+    # a tuple of offset and
     # 1. all token ids for a new request
     # 2. new token ids for a cached request
-    seq_token_ids: list[int] = field(default_factory=list)
+    seq_token_ids: tuple[int, list[int]] = field(default_factory=tuple)
+    # a tuple of offset and
     # 1. all slot mapping for a new request
     # 2. new slot mapping for a cached request
-    seq_slot_mapping: Optional[torch.Tensor] = None
+    seq_slot_mapping: Optional[tuple[int, torch.Tensor]] = None
     state: AIBrixOffloadingConnectorRequestState = (
         AIBrixOffloadingConnectorRequestState.INIT)
     resumed_from_preemption: bool = False
 
     def __str__(self) -> str:
+        seq_slot_mapping_off = (
+            "None" if self.seq_slot_mapping is None else \
+                str(self.seq_slot_mapping[0])
+        )
+        seq_slot_mapping_len = (
+            "None" if self.seq_slot_mapping is None else \
+                str(self.seq_slot_mapping[1].shape[0])
+        )
+        seq_token_ids_off = (
+            "None" if not self.seq_token_ids else \
+                str(self.seq_token_ids[0])
+        )
+        seq_token_ids_len = ("None" if not self.seq_token_ids
+                             or len(self.seq_token_ids) < 2 else str(
+                                 len(self.seq_token_ids[1])))
         return (f"AIBrixOffloadingConnectorRequestMetadata["
                 f"req_id={self.req_id}, "
                 f"prompt_len={self.prompt_len}, "
                 f"context_len={self.context_len}, "
                 f"query_len={self.query_len}, "
-                f"len(seq_token_ids)={len(self.seq_token_ids)}, "
-                f"seq_slot_mapping.shape={self.seq_slot_mapping.shape}, "
+                f"load_len={self.load_len}, "
+                f"offset(seq_token_ids)={seq_token_ids_off}, "
+                f"len(seq_token_ids)={seq_token_ids_len}, "
+                f"offset(seq_slot_mapping)={seq_slot_mapping_off}, "
+                f"len(seq_slot_mapping)={seq_slot_mapping_len}, "
                 f"state={self.state.name}, "
                 f"resumed_from_preemption={self.resumed_from_preemption}]")
 
@@ -435,6 +467,9 @@ class AIBrixOffloadingConnectorMetadata(KVConnectorMetadata):
         # Requests that need to load from external kvcache.
         self.requests = requests
         self.finished_requests_ids: set[str] = set()
+        self.total_num_scheduled_tokens: int = 0
+        self.side_channel_host: str = ""
+        self.side_channel_port: int = -1
 
     def __getitem__(self,
                     key: str) -> AIBrixOffloadingConnectorRequestMetadata:
@@ -492,6 +527,9 @@ class AIBrixOffloadingConnectorMetadata(KVConnectorMetadata):
         self.requests.clear()
         self.finished_requests_ids.clear()
 
+    def __str__(self) -> str:
+        return f"AIBrixOffloadingConnectorMetadata: {self.__dict__}"
+
 
 class AIBrixOffloadingConnectorScheduler:
 
@@ -527,8 +565,8 @@ class AIBrixOffloadingConnectorScheduler:
                 prompt_len=prompt_len,
                 context_len=context_len,
                 query_len=query_len,
-                seq_token_ids=req.prompt_token_ids[:seq_len],
-                seq_slot_mapping=slot_mapping,
+                seq_token_ids=(0, req.prompt_token_ids[:seq_len]),
+                seq_slot_mapping=(0, slot_mapping),
                 state=AIBrixOffloadingConnectorRequestState.WAITING_FOR_RECV,
             )
 
@@ -559,20 +597,27 @@ class AIBrixOffloadingConnectorScheduler:
                     context_len,
                     query_len,
                 )
-                new_token_len = seq_len
+                (block_ids, ) = req.new_block_ids
+                seq_token_ids = (
+                    context_len,
+                    req.new_token_ids[:seq_len - context_len],
+                )
+                seq_slot_mapping = (0,
+                                    self._block_ids_to_slot_mapping(block_ids))
             else:
-                new_token_len = query_len
-
-            (block_ids, ) = req.new_block_ids
-            seq_token_ids = req.new_token_ids
-            seq_slot_mapping = self._block_ids_to_slot_mapping(block_ids)
+                (block_ids, ) = req.new_block_ids
+                seq_token_ids = (context_len, req.new_token_ids)
+                seq_slot_mapping = (
+                    round_up(context_len, self.engine_block_ntokens),
+                    self._block_ids_to_slot_mapping(block_ids),
+                )
 
             self._scheduler_meta.upsert_request(
                 req_id,
                 prompt_len=prompt_len,
                 context_len=context_len,
                 query_len=query_len,
-                seq_token_ids=seq_token_ids[:new_token_len],
+                seq_token_ids=seq_token_ids,
                 seq_slot_mapping=seq_slot_mapping,
                 state=AIBrixOffloadingConnectorRequestState.WAITING_FOR_RECV,
                 resumed_from_preemption=req.resumed_from_preemption,
@@ -638,6 +683,7 @@ class AIBrixOffloadingConnectorWorker:
         config: "VllmConfig",
         max_num_batched_tokens: int = -1,
         tp_aware: bool = True,
+        multi_threaded: bool = False,
     ):
         cache_config = config.cache_config
         model_config = config.model_config
@@ -686,6 +732,7 @@ class AIBrixOffloadingConnectorWorker:
                 model_config.max_model_len,
                 max_num_batched_tokens,
             ),
+            multi_threaded=multi_threaded,
         )
 
         self.kv_group: dist.ProcessGroup | None = None
@@ -736,7 +783,9 @@ class AIBrixOffloadingConnectorWorker:
                 self.cache = BaseKVCacheManager(config=kv_config)
                 self.kv_group = kv_group.cpu_group
                 self._coll_tensor = torch.empty(
-                    (config.scheduler_config.max_num_seqs), dtype=torch.int32)
+                    (config.scheduler_config.max_num_seqs * 3),
+                    dtype=torch.int32,
+                )
             else:
                 raise ValueError(
                     f"Unknown sync granularity {sync_granularity}")

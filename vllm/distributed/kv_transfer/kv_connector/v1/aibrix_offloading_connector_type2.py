@@ -219,6 +219,11 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
                     3,
                     str(status),
                 )
+            if self._metrics.time_measurement_enabled:
+                end = time.perf_counter()
+                lat_ms = (end - start) * 1000
+                self._metrics._recv_metrics.add(aligned_context_len,
+                                                aligned_query_len, 0, lat_ms)
             return 0
 
         num_fetched_tokens, handle = status.value

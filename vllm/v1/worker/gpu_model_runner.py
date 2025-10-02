@@ -834,7 +834,8 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
+    def _update_states(self, scheduler_output: "SchedulerOutput",
+                       load_results: dict[str, int]) -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -887,6 +888,20 @@ class GPUModelRunner(
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+
+            num_loaded_tokens = load_results.get(req_id, 0)
+            if num_loaded_tokens > 0:
+                num_scheduled_tokens = \
+                    scheduler_output.num_scheduled_tokens[req_id]
+                if num_loaded_tokens == num_scheduled_tokens:
+                    num_loaded_tokens -= 1
+
+                new_req_data.num_computed_tokens += num_loaded_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= \
+                    num_loaded_tokens
+                scheduler_output.total_num_scheduled_tokens -= \
+                    num_loaded_tokens
+
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
 
@@ -950,6 +965,19 @@ class GPUModelRunner(
         valid_sampled_token_count = self._get_valid_sampled_token_count()
 
         for i, req_id in enumerate(req_data.req_ids):
+            num_loaded_tokens = load_results.get(req_id, 0)
+            if num_loaded_tokens > 0:
+                num_scheduled_tokens = \
+                    scheduler_output.num_scheduled_tokens[req_id]
+                if num_loaded_tokens == num_scheduled_tokens:
+                    num_loaded_tokens -= 1
+
+                req_data.num_computed_tokens[i] += num_loaded_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= \
+                    num_loaded_tokens
+                scheduler_output.total_num_scheduled_tokens -= \
+                    num_loaded_tokens
+
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
@@ -982,7 +1010,10 @@ class GPUModelRunner(
                     req_state.output_token_ids.extend([-1] * num_accepted)
 
             # Update the cached states.
-            req_state.num_computed_tokens = num_computed_tokens
+            num_computed_tokens = req_data.num_computed_tokens[i] - \
+                num_loaded_tokens
+            new_num_computed_tokens = req_data.num_computed_tokens[i]
+            req_state.num_computed_tokens = new_num_computed_tokens
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -1038,7 +1069,8 @@ class GPUModelRunner(
                 continue
 
             # Update the persistent batch.
-            self.input_batch.num_computed_tokens_cpu[req_index] = num_computed_tokens
+            self.input_batch.num_computed_tokens_cpu[req_index] = (
+                new_num_computed_tokens)
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(new_block_ids, req_index)
 
@@ -3134,8 +3166,13 @@ class GPUModelRunner(
             record_function_or_nullcontext("gpu_model_runner: preprocess"),
             self.synchronize_input_prep(),
         ):
+            load_results = {}
+            if has_kv_transfer_group():
+                load_results = \
+                    self.kv_connector_load_before_update(scheduler_output)
+
             # Update persistent batch states.
-            self._update_states(scheduler_output)
+            self._update_states(scheduler_output, load_results)
 
             if has_ec_transfer() and get_ec_transfer().is_producer:
                 with self.maybe_get_ec_connector_output(

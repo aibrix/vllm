@@ -75,6 +75,15 @@ class KVConnectorModelRunnerMixin:
         return None, None
 
     @staticmethod
+    def kv_connector_load_before_update(
+            scheduler_output: "SchedulerOutput") -> dict[str, int]:
+        kv_connector = get_kv_transfer_group()
+        assert scheduler_output.kv_connector_metadata is not None
+        kv_connector.bind_connector_metadata(
+            scheduler_output.kv_connector_metadata)
+        return kv_connector.start_load_kv_before_update()
+
+    @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
     ) -> ModelRunnerOutput:

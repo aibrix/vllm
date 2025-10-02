@@ -201,3 +201,13 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
     "MooncakeConnector",
 )
+
+KVConnectorFactory.register_connector(
+    "AIBrixOffloadingConnectorV1Type1",
+    "vllm.distributed.kv_transfer.kv_connector.v1"
+    ".aibrix_offloading_connector_type1", "AIBrixOffloadingConnector")
+
+KVConnectorFactory.register_connector(
+    "AIBrixOffloadingConnectorV1Type2",
+    "vllm.distributed.kv_transfer.kv_connector.v1"
+    ".aibrix_offloading_connector_type2", "AIBrixOffloadingConnector")

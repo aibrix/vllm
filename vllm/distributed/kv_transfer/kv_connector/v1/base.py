@@ -147,6 +147,20 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def start_load_kv_before_update(self, **kwargs) -> dict[str, int]:
+        """
+        Start loading the KV cache from the connector to vLLM's paged
+        KV buffer before gpu runner updating its states.
+
+        Args:
+            **kwargs: additional arguments for the load operation
+
+        Returns:
+            dict[str, int]: a dictionary of request ids and the number of
+            tokens loaded for each request.
+        """
+        return {}
+
     @abstractmethod
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:

@@ -488,7 +488,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
+    def _update_states(self, scheduler_output: "SchedulerOutput",
+                       load_results: dict[str, int]) -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -533,6 +534,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+
+            num_loaded_tokens = load_results.get(req_id, 0)
+            if num_loaded_tokens > 0:
+                num_scheduled_tokens = \
+                    scheduler_output.num_scheduled_tokens[req_id]
+                if num_loaded_tokens == num_scheduled_tokens:
+                    num_loaded_tokens -= 1
+
+                new_req_data.num_computed_tokens += num_loaded_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= \
+                    num_loaded_tokens
+                scheduler_output.total_num_scheduled_tokens -= \
+                    num_loaded_tokens
+
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
 
@@ -578,13 +593,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_last_rank = get_pp_group().is_last_rank
         req_data = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(req_data.req_ids):
+            num_loaded_tokens = load_results.get(req_id, 0)
+            if num_loaded_tokens > 0:
+                num_scheduled_tokens = \
+                    scheduler_output.num_scheduled_tokens[req_id]
+                if num_loaded_tokens == num_scheduled_tokens:
+                    num_loaded_tokens -= 1
+
+                req_data.num_computed_tokens[i] += num_loaded_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= \
+                    num_loaded_tokens
+                scheduler_output.total_num_scheduled_tokens -= \
+                    num_loaded_tokens
+
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            req_state.num_computed_tokens = num_computed_tokens
+            num_computed_tokens = req_data.num_computed_tokens[i] - \
+                num_loaded_tokens
+            new_num_computed_tokens = req_data.num_computed_tokens[i]
+            req_state.num_computed_tokens = new_num_computed_tokens
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -625,7 +656,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
-                num_computed_tokens)
+                new_num_computed_tokens)
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(
                     new_block_ids, req_index)
@@ -2003,7 +2034,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
         with record_function_or_nullcontext("Preprocess"):
-            self._update_states(scheduler_output)
+            load_results = {}
+            if has_kv_transfer_group():
+                load_results = \
+                    self.kv_connector_load_before_update(scheduler_output)
+
+            self._update_states(scheduler_output, load_results)
             if not scheduler_output.total_num_scheduled_tokens:
                 if not has_kv_transfer_group():
                     # Return empty ModelRunnerOutput if there's no work to do.

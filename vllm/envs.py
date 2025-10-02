@@ -176,6 +176,9 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
+    VLLM_AIBRIX_SIDE_CHANNEL_PORT: int = 6667
+    VLLM_AIBRIX_SYNC_GRANULARITY: str = "PER_OP"
+    VLLM_AIBRIX_TYPE3_USE_LAYER_WISE_SAVE: bool = True
 
 
 def get_default_cache_root():
@@ -1247,6 +1250,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # raw bytes. Defaults to True for backward compatibility.
     "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES":
     lambda: bool(int(os.getenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "1"))),
+
+    # Port used by AIBrix connector side channel
+    "VLLM_AIBRIX_SIDE_CHANNEL_PORT":
+    lambda: int(os.getenv("VLLM_AIBRIX_SIDE_CHANNEL_PORT", "6667")),
+
+    # Specify the sync granularity used by AIBrix controllers. Please refer to
+    # AIBrixOffloadingConnectorSyncGranularity for more details.
+    "VLLM_AIBRIX_SYNC_GRANULARITY":
+    lambda: os.environ.get("VLLM_AIBRIX_SYNC_GRANULARITY", "PER_OP").upper(),
+
+    "VLLM_AIBRIX_TYPE3_USE_LAYER_WISE_SAVE":
+    lambda: (
+        os.environ.get("VLLM_AIBRIX_TYPE3_USE_LAYER_WISE_SAVE", "true").lower()\
+            in ("1", "true")
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

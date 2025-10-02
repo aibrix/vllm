@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import itertools
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -90,6 +90,10 @@ class Scheduler(SchedulerInterface):
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
+        self.use_three_phase_kv_sched = (
+            self.connector and self.vllm_config.kv_transfer_config.kv_connector
+            == "AIBrixOffloadingConnectorV1Type3")
+
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
             self.parallel_config.data_parallel_rank,
@@ -122,6 +126,7 @@ class Scheduler(SchedulerInterface):
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+        self.prefetching: deque[Request] = deque()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -132,6 +137,11 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
 
+        self.prefetching_req_stats: dict[str, int] = {}
+        self.nonprefetchable_req_ids: set[str] = set()
+        self.local_cached_req_ids: set[str] = set()
+        self.testing_req_ids: set[str] = set()
+        self.max_testing_reqs = 32
         # Encoder-related.
         # Calculate encoder cache size if applicable
         # NOTE: For now we use the same budget for both compute and space.
@@ -194,6 +204,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
+        prefetching_token_budget = token_budget
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -257,7 +268,19 @@ class Scheduler(SchedulerInterface):
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
+                    if self.prefetching:
+                        preempted_req = self.prefetching.pop()
+                        preempted_req.status = RequestStatus.WAITING
+                        assert self.connector is not None
+                        self.connector.request_preempted(preempted_req)
+                        # preempted request becomes prefetchable again
+                        self.nonprefetchable_req_ids.discard(
+                            preempted_req.request_id)
+                        self.local_cached_req_ids.discard(
+                            preempted_req.request_id)
+                        self.prefetching_req_stats.pop(
+                            preempted_req.request_id, None)
+                    elif self.policy == SchedulingPolicy.PRIORITY:
                         preempted_req = max(
                             self.running,
                             key=lambda r: (r.priority, r.arrival_time),
@@ -265,12 +288,12 @@ class Scheduler(SchedulerInterface):
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             scheduled_running_reqs.remove(preempted_req)
+                        preempted_req.status = RequestStatus.PREEMPTED
                     else:
                         preempted_req = self.running.pop()
-
+                        preempted_req.status = RequestStatus.PREEMPTED
                     self.kv_cache_manager.free(preempted_req)
                     self.encoder_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
                         preempted_req.record_event(
@@ -325,13 +348,142 @@ class Scheduler(SchedulerInterface):
                 if req.lora_request and req.lora_request.lora_int_id > 0)
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # Second, schedule the PREFETCHING requests.
+
+        # Use a temporary deque to collect requests that need to be skipped
+        # and put back at the head of the prefetching queue later
+        skipped_prefetching_requests: deque[Request] = deque()
+
+        if not preempted_reqs and self.use_three_phase_kv_sched:
+            while self.prefetching and prefetching_token_budget > 0:
+                request = self.prefetching[0]
+                req_id = request.request_id
+
+                num_prompt_tokens = request.num_prompt_tokens
+                num_loaded_tokens = request.num_computed_tokens
+
+                # will allocate slots for these prefetched tokens
+                num_new_prefetched_tokens = \
+                    self.prefetching_req_stats.get(req_id, 0)
+
+                num_prefetched_tokens = \
+                    num_loaded_tokens + num_new_prefetched_tokens
+
+                if num_new_prefetched_tokens == 0:
+                    # prefetched zero tokens in last prefetching, start to
+                    # compute from here
+                    logger.debug(
+                        "Request[id=%s, prompt_len=%d, loaded_len=%d, "
+                        "prefetched_len=%d] stopped prefetching",
+                        req_id,
+                        num_prompt_tokens,
+                        num_loaded_tokens,
+                        num_prefetched_tokens,
+                    )
+
+                    self.prefetching.popleft()
+                    # append it to the head of waiting queue
+                    request.status = RequestStatus.WAITING
+                    self.waiting.prepend_request(request)
+                    self.nonprefetchable_req_ids.add(req_id)
+                    continue
+                elif num_prefetched_tokens == num_prompt_tokens:
+                    # this will be a full hit, let remain the last token as
+                    # uncomputed
+                    num_prefetched_tokens -= 1
+                    num_new_prefetched_tokens -= 1
+                    num_to_prefetch_tokens = 0
+                else:
+                    num_to_prefetch_tokens = max(
+                        0, num_prompt_tokens - num_prefetched_tokens)
+
+                    if (0 < self.scheduler_config.long_prefill_token_threshold
+                            < num_to_prefetch_tokens):
+                        num_to_prefetch_tokens = (
+                            self.scheduler_config.long_prefill_token_threshold)
+
+                    num_to_prefetch_tokens = min(
+                        num_to_prefetch_tokens,
+                        prefetching_token_budget,
+                    )
+
+                if num_new_prefetched_tokens > 0:
+                    logger.debug(
+                        "Request[id=%s, loaded_len=%d] is allocating kvcache "
+                        "for %d tokens",
+                        req_id,
+                        num_loaded_tokens,
+                        num_new_prefetched_tokens,
+                    )
+
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_prefetched_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        # will cache the allocated blocks after the prefetching
+                        # request finishes prefetching and calls allocate_slots
+                        # again when it is in the waiting queue.
+                        delay_cache_blocks=True,
+                    )
+                    if new_blocks is None:
+                        logger.debug(
+                            "Request[id=%s] failed to allocate slots, skip",
+                            req_id,
+                        )
+                        break
+
+                    assert self.connector is not None
+                    self.connector.update_state_after_alloc(
+                        request,
+                        new_blocks,
+                        0,
+                    )
+
+                assert self.connector is not None
+                num_to_prefetch_tokens = self.connector.load_and_prefetch(
+                    request, num_new_prefetched_tokens, num_to_prefetch_tokens)
+                if num_to_prefetch_tokens > 0:
+                    logger.debug(
+                        "Request[id=%s, prompt_len=%d] loaded tokens: "
+                        "%d, tokens to load: %d, tokens to prefetch: "
+                        "%d. CONT.",
+                        req_id,
+                        request.num_prompt_tokens,
+                        request.num_computed_tokens,
+                        num_new_prefetched_tokens,
+                        num_to_prefetch_tokens,
+                    )
+                    prefetching_token_budget -= num_to_prefetch_tokens
+                    assert prefetching_token_budget >= 0
+
+                else:
+                    logger.debug(
+                        "Request[id=%s, prompt_len=%d] loaded tokens: "
+                        "%d, tokens to load: %d, tokens to prefetch: "
+                        "%d. TERM.",
+                        req_id,
+                        request.num_prompt_tokens,
+                        request.num_computed_tokens,
+                        num_new_prefetched_tokens,
+                        num_to_prefetch_tokens,
+                    )
+
+                self.prefetching.popleft()
+                skipped_prefetching_requests.appendleft(request)
+                continue
+
+        # Put back any skipped requests at the head of the prefetching queue
+        if skipped_prefetching_requests:
+            self.prefetching.extendleft(skipped_prefetching_requests)
         # Use a temporary RequestQueue to collect requests that need to be
         # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            while self.waiting and token_budget > 0:
+            while self.waiting and (token_budget > 0 or
+                                    (self.use_three_phase_kv_sched
+                                     and prefetching_token_budget > 0)):
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
@@ -370,6 +522,83 @@ class Scheduler(SchedulerInterface):
                     self.waiting.pop_request()
                     skipped_waiting_requests.prepend_request(request)
                     continue
+
+                num_to_prefetch_tokens = 0
+                if (self.use_three_phase_kv_sched
+                        and prefetching_token_budget > 0
+                        and self._is_prefetchable(request)):
+                    # Get locally-cached tokens.
+                    local_matched_blocks, num_local_matched_tokens = \
+                        self.kv_cache_manager.get_computed_blocks(
+                            request)
+
+                    req_id = request.request_id
+
+                    num_to_prefetch_tokens = (request.num_prompt_tokens -
+                                              num_local_matched_tokens)
+
+                    if (0 < self.scheduler_config.long_prefill_token_threshold
+                            < num_to_prefetch_tokens):
+                        num_to_prefetch_tokens = (
+                            self.scheduler_config.long_prefill_token_threshold)
+
+                    num_to_prefetch_tokens = min(
+                        num_to_prefetch_tokens,
+                        prefetching_token_budget,
+                    )
+
+                if num_to_prefetch_tokens > 0:
+                    assert self.connector is not None
+                    request.num_computed_tokens = num_local_matched_tokens
+                    num_to_prefetch_tokens = (self.connector.load_and_prefetch(
+                        request, 0, num_to_prefetch_tokens))
+                    if num_to_prefetch_tokens > 0:
+                        logger.debug(
+                            "Request[id=%s, prompt_len=%d] computed tokens: "
+                            "%d, tokens to prefetch: %d.",
+                            req_id,
+                            request.num_prompt_tokens,
+                            request.num_computed_tokens,
+                            num_to_prefetch_tokens,
+                        )
+                        prefetching_token_budget -= num_to_prefetch_tokens
+                        assert prefetching_token_budget >= 0
+
+                        if (num_local_matched_tokens > 0
+                                and self.kv_cache_manager.enable_caching):
+                            self.kv_cache_manager.block_pool.touch(
+                                local_matched_blocks.blocks)
+                            self.kv_cache_manager.coordinator\
+                                .save_new_computed_blocks(
+                                request.request_id, local_matched_blocks.blocks
+                            )
+                            self.local_cached_req_ids.add(request.request_id)
+                            self.connector.update_state_after_alloc(
+                                request,
+                                local_matched_blocks,
+                                0,
+                            )
+
+                        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                        self.waiting.pop_request()
+                        self.prefetching.append(request)
+                        self.testing_req_ids.discard(req_id)
+                        continue
+                    else:
+                        request.num_computed_tokens -= num_local_matched_tokens
+                        self.nonprefetchable_req_ids.add(req_id)
+
+                if self.use_three_phase_kv_sched:
+                    # 1. we don't have token budget but still have prefetching
+                    # budget, skip current request and try the next one in the Q
+                    if prefetching_token_budget > 0 and token_budget == 0:
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
+                    # 2. we still have token budget but only continue to
+                    # schedule compute if this is a nonprefetchable request
+                    if request.request_id not in self.nonprefetchable_req_ids:
+                        break
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
@@ -508,6 +737,10 @@ class Scheduler(SchedulerInterface):
 
                 req_index += 1
                 self.running.append(request)
+
+                if self.use_three_phase_kv_sched:
+                    self.testing_req_ids.discard(request.request_id)
+
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
                                          scheduled_timestamp)
@@ -548,11 +781,12 @@ class Scheduler(SchedulerInterface):
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
-        # Since some requests in the RUNNING queue may not be scheduled in
-        # this step, the total number of scheduled requests can be smaller than
-        # len(self.running).
-        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) <= len(self.running))
+        # Since some requests in the RUNNING/PREFETCHING queue may not be
+        # scheduled in this step, the total number of scheduled requests can
+        # be smaller than len(self.running) + len(self.prefetching).
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
+            scheduled_running_reqs) <= len(self.running) + len(
+                self.prefetching)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -562,7 +796,9 @@ class Scheduler(SchedulerInterface):
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
+                    any_request,
+                    len(self.running) + len(self.local_cached_req_ids),
+                ))
 
         # Construct the scheduler output.
         new_reqs_data = [
@@ -657,6 +893,33 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+
+    def _is_prefetchable(self, request: Request) -> bool:
+        req_id = request.request_id
+        if (req_id not in self.testing_req_ids
+                and req_id not in self.nonprefetchable_req_ids) or len(
+                    self.testing_req_ids) <= (self.max_testing_reqs // 2):
+            requests: list[Request] = []
+            for req in self.waiting:
+                if (req.request_id in self.testing_req_ids
+                        or req.request_id in self.nonprefetchable_req_ids):
+                    continue
+                if req.status == RequestStatus.WAITING:
+                    self.testing_req_ids.add(req.request_id)
+                    requests.append(req)
+                if len(requests) == self.max_testing_reqs:
+                    break
+
+            assert self.connector is not None
+            self.connector.add_requests(requests)
+
+        if req_id in self.nonprefetchable_req_ids:
+            return False
+        elif self.connector.test_request(request):
+            return True
+        else:
+            self.nonprefetchable_req_ids.add(req_id)
+            return False
 
     def _make_cached_request_data(
         self,
@@ -1127,6 +1390,9 @@ class Scheduler(SchedulerInterface):
             valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
+            elif (self.use_three_phase_kv_sched
+                  and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS):
+                self.prefetching.remove(request)
             else:
                 waiting_requests_to_remove.append(request)
 
@@ -1148,6 +1414,10 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
+        self.nonprefetchable_req_ids.discard(request_id)
+        self.local_cached_req_ids.discard(request_id)
+        self.testing_req_ids.discard(request_id)
+        self.prefetching_req_stats.pop(request_id, None)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
@@ -1162,7 +1432,7 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        return len(self.waiting) + len(self.running) + len(self.prefetching)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
@@ -1180,7 +1450,7 @@ class Scheduler(SchedulerInterface):
         assert prefix_cache_stats is not None
         return SchedulerStats(
             num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
+            num_waiting_reqs=len(self.waiting) + len(self.prefetching),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
@@ -1279,9 +1549,36 @@ class Scheduler(SchedulerInterface):
             self.connector.update_connector_output(kv_connector_output)
 
         # KV Connector:: update recv and send status from last step.
-        for req_id in (kv_connector_output.finished_recving or ()):
-            logger.debug("Finished recving KV transfer for request %s", req_id)
-            self.finished_recving_kv_req_ids.add(req_id)
+        for item in (kv_connector_output.finished_recving or ()):
+            if isinstance(item, tuple):
+                req_id, num_new_prefetched_tokens = item
+                num_new_loaded_tokens = self.prefetching_req_stats.get(
+                    req_id, 0)
+                if num_new_loaded_tokens > 0:
+                    request = self.requests[req_id]
+                    # cache the blocks that have finished loading
+                    num_computed_tokens = (request.num_computed_tokens +
+                                           num_new_loaded_tokens)
+                    if num_computed_tokens == request.num_prompt_tokens:
+                        num_computed_tokens -= 1
+                    logger.debug(
+                        "Finished loading %d tokens for request %s, computed "
+                        "tokens=%d",
+                        num_new_loaded_tokens,
+                        req_id,
+                        num_computed_tokens,
+                    )
+
+                    # update num_computed_tokens
+                    request.num_computed_tokens = num_computed_tokens
+
+                logger.debug("Finished prefetching for request %s", req_id)
+                self.prefetching_req_stats[req_id] = num_new_prefetched_tokens
+            else:
+                req_id = item
+                logger.debug("Finished recving KV transfer for request %s",
+                             req_id)
+                self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])

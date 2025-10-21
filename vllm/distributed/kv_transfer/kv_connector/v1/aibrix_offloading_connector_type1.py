@@ -25,7 +25,7 @@ from aibrix_kvcache.profiling import tag_wrapper
 from aibrix_kvcache.utils import perf_timer
 
 import vllm.envs
-from vllm.attention import get_attn_backend
+from vllm.v1.attention.selector import get_attn_backend
 # from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 # from vllm.v1.attention.backends.flex_attention import FlexAttentionBackend
 # from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
@@ -35,15 +35,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_transfer_metrics import (
     KVTransferMetrics, KVTransferMetricsExporter)
-from vllm.utils import get_kv_cache_torch_dtype, round_down, round_up
+from vllm.utils.math_utils import round_down, round_up
+from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = getLogger(__name__)
@@ -297,15 +299,10 @@ class AIBrixOffloadingConnectorMetrics(KVTransferMetrics):
                f"\n\t{self._recv_metrics.summary()}" \
                f"\n\t{self._cache_metrics.summary()}"
 
-    # NOTE: Functions `log` and `findCaller` are used as a workaround to
-    # log metrics on the worker side, will be removed once the worker is
-    # able to transfer metrics to the scheduler.
-    def log(self, level, msg, *args) -> None:
-        logger.log(level, str(self))
+    def log_str(self) -> str:
+        ret = str(self)
         self.reset()
-
-    def findCaller(self) -> tuple[str, int, str, str | None]:
-        return logger.findCaller()
+        return ret
 
 
 class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
@@ -351,20 +348,16 @@ class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
 
 @dataclass
 class AIBrixOffloadingConnectorCachedMeta:
-    context_tokens: np.ndarray = field(default_factory=lambda: np.array([]))
-    context_tokens_offset: int = 0
-    context_tokens_view: Optional[TokenListView] = None
-
-    context_slot_mapping: Optional[torch.Tensor] = None
-    context_slot_mapping_offset: int = 0
-
     def __init__(self, prompt_len: int) -> None:
-        self.context_tokens = np.empty(prompt_len, dtype=np.int32)
-        self.context_slot_mapping = torch.empty(
+        self.context_tokens: np.ndarray = np.empty(prompt_len, dtype=np.int32)
+        self.context_tokens_offset: int = 0
+        self.context_tokens_view: Optional[TokenListView] = None
+        self.context_slot_mapping: Optional[torch.Tensor] = torch.empty(
             prompt_len,
             dtype=torch.long,
             device="cuda",
         )
+        self.context_slot_mapping_offset: int = 0
 
     def get_context_tokens(self) -> list[int]:
         return self.context_tokens[:self.context_tokens_offset]
@@ -590,7 +583,7 @@ class AIBrixOffloadingConnectorScheduler:
             if context_len >= prompt_len:
                 continue
 
-            if cached_reqs.resumed_from_preemption[i]:
+            if req_id in cached_reqs.resumed_req_ids:
                 logger.debug(
                     "Got preempt Request[id=%s, context_len=%d, query_len=%d]",
                     req_id,
@@ -617,7 +610,7 @@ class AIBrixOffloadingConnectorScheduler:
                 seq_token_ids=None,
                 seq_slot_mapping=seq_slot_mapping,
                 state=AIBrixOffloadingConnectorRequestState.WAITING_FOR_RECV,
-                resumed_from_preemption=cached_reqs.resumed_from_preemption[i],
+                resumed_from_preemption=req_id in cached_reqs.resumed_req_ids,
             )
 
         # 4. keep requests that are in the WAITING_FOR_RECV state
@@ -708,7 +701,6 @@ class AIBrixOffloadingConnectorWorker:
             model_config.dtype,
             kv_cache_dtype,
             block_ntokens,
-            model_config.is_attention_free,
             use_mla=model_config.use_mla,
         )
 
@@ -1062,7 +1054,12 @@ class AIBrixOffloadingConnectorWorker:
             self._send_kv_sync_impl(seq_request_meta)
 
         if self._metrics.time_measurement_enabled:
-            log_every_n_seconds(self._metrics, logging.INFO, "UNUSED", 10)
+            log_every_n_seconds(
+                logger,
+                logging.INFO,
+                self._metrics.log_str(),
+                10,
+            )
 
     def _send_kv_sync_impl(
         self,
@@ -1199,8 +1196,13 @@ class AIBrixOffloadingConnector(KVConnectorBase_V1):
     to the kv cache offloading service.
     """
 
-    def __init__(self, config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=config, role=role)
+    def __init__(
+        self,
+        config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(vllm_config=config, role=role, kv_cache_config=kv_cache_config)
 
         self.connector_scheduler: Optional[
             AIBrixOffloadingConnectorScheduler] = None

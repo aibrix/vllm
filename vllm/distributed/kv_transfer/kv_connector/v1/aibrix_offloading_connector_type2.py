@@ -18,7 +18,7 @@ from aibrix_kvcache.profiling import tag_wrapper
 # from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils import round_down
+from vllm.utils.math_utils import round_down
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 from .aibrix_offloading_connector_type1 import (
@@ -32,11 +32,12 @@ from .aibrix_offloading_connector_type1 import (
 from .aibrix_offloading_connector_type1 import delegate_to
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = getLogger(__name__)
@@ -449,7 +450,12 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
         self._send_lengths.clear()
 
         if self._metrics.time_measurement_enabled:
-            log_every_n_seconds(self._metrics, logging.INFO, "UNUSED", 10)
+            log_every_n_seconds(
+                logger,
+                logging.INFO,
+                self._metrics.log_str(),
+                10,
+            )
 
     def _send_kv_impl(
         self,
@@ -523,8 +529,13 @@ class AIBrixOffloadingConnector(KVConnectorBase_V1):
     to the kv cache offloading service.
     """
 
-    def __init__(self, config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=config, role=role)
+    def __init__(
+        self,
+        config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(vllm_config=config, role=role, kv_cache_config=kv_cache_config)
 
         self.connector_scheduler: Optional[
             AIBrixOffloadingConnectorScheduler] = None

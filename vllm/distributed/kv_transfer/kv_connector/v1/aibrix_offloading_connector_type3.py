@@ -56,6 +56,7 @@ OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
     FlashAttentionBackend.get_name(): KVCacheBlockLayout.LCND,
 }
 OFFLOADING_CONNECTOR_TIMEOUT_S = 0.1
+OFFLOADING_CONNECTOR_TEST_BATCH_MAX = 128
 
 
 class AIBrixOffloadingConnectorWorkerMeta(
@@ -108,7 +109,7 @@ class AIBrixOffloadingConnectorScheduler(
             self.cache_block_ntokens = self.engine_block_ntokens
 
         self._testing_requests: dict[str, int] = {}
-        self._pending_requests: list[Request] = []
+        self._pending_requests = queue.Queue()
         self._testing_result_queue = queue.Queue()
 
         # init side channels
@@ -188,19 +189,39 @@ class AIBrixOffloadingConnectorScheduler(
         poller = zmq.Poller()
         poller.register(self._sidechannel_sock, zmq.POLLIN)
         while True:
-            for sock, _ in poller.poll():
-                id, _, msg = sock.recv_multipart()
-                responses = decoder.decode(msg)
-                for response in responses:
-                    seq_existing_len = response.seq_existing_len
-                    logger.debug(
-                        "Test Request[id=%s] %s returns %d",
-                        response.req_id,
-                        id.hex(),
-                        seq_existing_len,
-                    )
-                    self._testing_result_queue.put(
-                        (response.req_id, seq_existing_len))
+            test_requests: list[AIBrixOffloadingConnectorTestRequest] = []
+            while len(test_requests) < OFFLOADING_CONNECTOR_TEST_BATCH_MAX:
+                req = self._pending_requests.get()
+                test_requests.append(req)
+                if self._pending_requests.empty():
+                    break
+            if len(test_requests) == 0:
+                continue
+
+            encoder = msgspec.msgpack.Encoder()
+            encoded_data = encoder.encode(test_requests)
+            # only test requests on worker-0 to alleviate comm overhead
+            id0 = self._worker_identities[0]
+            self._sidechannel_sock.send_multipart((id0, b"", encoded_data))
+
+            ready = dict(poller.poll(OFFLOADING_CONNECTOR_TIMEOUT_S * 1000))
+            if ready.get(self._sidechannel_sock) != zmq.POLLIN:
+                logger.error("Timeout waiting for responses from worker %s",
+                             id0.hex())
+                continue
+
+            id, _, msg = self._sidechannel_sock.recv_multipart()
+            responses = decoder.decode(msg)
+            for response in responses:
+                seq_existing_len = response.seq_existing_len
+                logger.debug(
+                    "Test Request[id=%s] %s returns %d",
+                    response.req_id,
+                    id.hex(),
+                    seq_existing_len,
+                )
+                self._testing_result_queue.put(
+                    (response.req_id, seq_existing_len))
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -297,21 +318,12 @@ class AIBrixOffloadingConnectorScheduler(
         )
         return query_len
 
-    def add_requests(
-        self,
-        requests: list["Request"],
-    ) -> None:
-        self._pending_requests.extend(requests)
-        self._send_test_requests()
-
     def test_request(
         self,
         request: "Request",
     ) -> bool:
         if not self._sidechannels_ready:
             return False
-        if len(self._pending_requests) > 0:
-            self._send_test_requests()
 
         req_id = request.request_id
         if req_id not in self._testing_requests:
@@ -330,18 +342,16 @@ class AIBrixOffloadingConnectorScheduler(
 
         return self._testing_requests[req_id] > 0
 
-    def _send_test_requests(self) -> None:
-        # side channels are not ready, return
-        if not self._sidechannels_ready:
-            return
-
+    def add_requests(
+        self,
+        requests: list["Request"],
+    ) -> None:
         num_to_test_tokens = max(
             OFFLOADING_CONNECTOR_SKIP_THRESHOLD * self.engine_block_ntokens,
             self.cache_block_ntokens,
         )
 
-        test_requests: list[AIBrixOffloadingConnectorTestRequest] = []
-        for request in self._pending_requests:
+        for request in requests:
             req_id = request.request_id
             if req_id in self._testing_requests:
                 continue
@@ -368,16 +378,7 @@ class AIBrixOffloadingConnectorScheduler(
                 seq_token_ids=seq_token_ids,
             )
             self._testing_requests[req_id] = -1
-            test_requests.append(test)
-
-        encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(test_requests)
-        # only test requests on worker-0 to alleviate comm overhead
-        id0 = self._worker_identities[0]
-        self._sidechannel_sock.send_multipart((id0, b"", encoded_data))
-
-        # clear pending requests
-        self._pending_requests.clear()
+            self._pending_requests.put(test)
 
     def build_connector_meta(
             self, scheduler_output: "SchedulerOutput") -> KVConnectorMetadata:
@@ -573,9 +574,6 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
 
         # side channel
         self._zmq_ctx = zmq.Context()
-        self._sidechannel_path: Optional[str] = None
-        self._sidechannel_sock: Optional[zmq.Socket
-                                         | zmq.asyncio.Socket] = None
         self._sidechannel_thread: Optional[threading.Thread] = None
 
     def __del__(self):
@@ -719,43 +717,41 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
             self._start_load_kv(self._load_reqs)
 
     def _handshake(self, metadata: AIBrixOffloadingConnectorMetadata):
-        self._sidechannel_path = make_zmq_path("tcp",
-                                               metadata.side_channel_host,
-                                               metadata.side_channel_port)
-        self._sidechannel_sock = make_zmq_socket(
+        sidechannel_path = make_zmq_path("tcp", metadata.side_channel_host,
+                                         metadata.side_channel_port)
+        # init side channel
+        self._sidechannel_thread = threading.Thread(
+            target=self._sidechannel_run,
+            args=(sidechannel_path, ),
+            daemon=True,
+            name="worker_sidechannel_run")
+        self._sidechannel_thread.start()
+
+    def _sidechannel_run(self, sidechannel_path: str):
+        sidechannel_sock = make_zmq_socket(
             ctx=self._zmq_ctx,
-            path=self._sidechannel_path,
+            path=sidechannel_path,
             socket_type=zmq.REQ,
             bind=False,
         )
         metadata = AIBrixOffloadingConnectorWorkerMeta(tp_rank=self.rank, )
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
-        self._sidechannel_sock.send(encoded_data)
+        sidechannel_sock.send(encoded_data)
         logger.info(
             "Worker %d in DP group %d is establishing side channel",
             self.rank,
             self.dp_rank,
         )
 
-        # init side channel
-        self._sidechannel_thread = threading.Thread(
-            target=self._sidechannel_run,
-            args=(),
-            daemon=True,
-            name="worker_sidechannel_run")
-        self._sidechannel_thread.start()
-
-    def _sidechannel_run(self):
         logger.debug(
             "Starting worker side channel on path: %s",
-            self._sidechannel_path,
+            sidechannel_path,
         )
-        encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(
             list[AIBrixOffloadingConnectorTestRequest])
         poller = zmq.Poller()
-        poller.register(self._sidechannel_sock, zmq.POLLIN)
+        poller.register(sidechannel_sock, zmq.POLLIN)
         while True:
             for sock, _ in poller.poll():
                 msg = sock.recv()
@@ -796,12 +792,13 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
                     seq_request_id = seq_request_meta.req_id
                     if self._coll_tensor[idx] > 0:
                         num_fetched_tokens = self._coll_tensor[idx].item()
-                        num_handles = round_up(
+                        num_mrs = round_up(
                             num_fetched_tokens,
                             self.cache_block_ntokens,
                         )
-                        stats[seq_request_id][0] = num_fetched_tokens
-                        stats[seq_request_id][1].truncate(num_handles)
+                        handle = stats[seq_request_id][1]
+                        handle.truncate(num_mrs)
+                        stats[seq_request_id] = num_fetched_tokens, handle
                     else:
                         stats[seq_request_id][1].release()
                         stats.pop(seq_request_id, None)
@@ -870,6 +867,7 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
             return 0, None
 
         num_fetched_tokens, handle = status.value
+        assert isinstance(num_fetched_tokens, int)
 
         # update recv_len
         seq_recv_len += num_fetched_tokens
@@ -1074,15 +1072,14 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
                 else:
                     self._allocated_kvcache_handles[seq_req_id] = handle
 
-        for seq_req_id, _ in self._allocated_kvcache_handles.items():
-            if seq_req_id not in self._allocated_kvcache_handles or \
-                self._allocated_kvcache_handles[seq_req_id] is None:
+        for seq_req_id, seq_allocated_handle in \
+            self._allocated_kvcache_handles.items():
+            if seq_allocated_handle is None:
                 return
 
             seq_cached_meta = self._meta_cache[seq_req_id]
             seq_context_len = metadata[seq_req_id].context_len
 
-            seq_allocated_handle = self._allocated_kvcache_handles[seq_req_id]
             seq_allocated_tensors = seq_allocated_handle.to_tensors()
             seq_num_tokens = len(
                 seq_allocated_tensors) * self.cache_block_ntokens
@@ -1347,7 +1344,12 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
         logger.debug("get_finished: %s", prefetch_output)
 
         if self._metrics.time_measurement_enabled:
-            log_every_n_seconds(self._metrics, logging.INFO, "UNUSED", 10)
+            log_every_n_seconds(
+                logger,
+                logging.INFO,
+                self._metrics.log_str(),
+                10,
+            )
 
         return None, prefetch_output
 

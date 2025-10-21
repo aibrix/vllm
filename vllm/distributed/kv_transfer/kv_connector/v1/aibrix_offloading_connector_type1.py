@@ -297,15 +297,10 @@ class AIBrixOffloadingConnectorMetrics(KVTransferMetrics):
                f"\n\t{self._recv_metrics.summary()}" \
                f"\n\t{self._cache_metrics.summary()}"
 
-    # NOTE: Functions `log` and `findCaller` are used as a workaround to
-    # log metrics on the worker side, will be removed once the worker is
-    # able to transfer metrics to the scheduler.
-    def log(self, level, msg, *args) -> None:
-        logger.log(level, str(self))
+    def log_str(self) -> str:
+        ret = str(self)
         self.reset()
-
-    def findCaller(self) -> tuple[str, int, str, str | None]:
-        return logger.findCaller()
+        return ret
 
 
 class AIBrixOffloadingConnectorMetricsExporter(KVTransferMetricsExporter):
@@ -1062,7 +1057,12 @@ class AIBrixOffloadingConnectorWorker:
             self._send_kv_sync_impl(seq_request_meta)
 
         if self._metrics.time_measurement_enabled:
-            log_every_n_seconds(self._metrics, logging.INFO, "UNUSED", 10)
+            log_every_n_seconds(
+                logger,
+                logging.INFO,
+                self._metrics.log_str(),
+                10,
+            )
 
     def _send_kv_sync_impl(
         self,

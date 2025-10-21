@@ -449,7 +449,12 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
         self._send_lengths.clear()
 
         if self._metrics.time_measurement_enabled:
-            log_every_n_seconds(self._metrics, logging.INFO, "UNUSED", 10)
+            log_every_n_seconds(
+                logger,
+                logging.INFO,
+                self._metrics.log_str(),
+                10,
+            )
 
     def _send_kv_impl(
         self,

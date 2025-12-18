@@ -121,3 +121,8 @@ KVConnectorFactory.register_connector(
     "AIBrixOffloadingConnectorV1Type3",
     "vllm.distributed.kv_transfer.kv_connector.v1"
     ".aibrix_offloading_connector_type3", "AIBrixOffloadingConnector")
+
+KVConnectorFactory.register_connector(
+    "AIBrixPDReuseConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1"
+    ".aibrix_pd_reuse_connector", "AIBrixPDReuseConnector")

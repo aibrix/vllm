@@ -225,8 +225,6 @@ class AIBrixPDReuseConnectorMetadata(KVConnectorMetadata):
         self.requests = requests
         self.finished_requests_ids: set[str] = set()
         self.total_num_scheduled_tokens: int = 0
-        self.side_channel_host: str = ""
-        self.side_channel_port: int = -1
 
     def __getitem__(self,
                     key: str) -> AIBrixPDReuseConnectorRequestMetadata:
@@ -298,13 +296,9 @@ class AIBrixPDReuseConnectorScheduler:
         assert config.kv_transfer_config.engine_id is not None
         self.engine_id = config.kv_transfer_config.engine_id
         
-        self.side_channel_host = getattr(
-            vllm.envs, 'VLLM_NIXL_SIDE_CHANNEL_HOST', '127.0.0.1'
-        )
-        self.side_channel_port = (
-            getattr(vllm.envs, 'VLLM_NIXL_SIDE_CHANNEL_PORT', 29500) +
-            config.parallel_config.data_parallel_rank *
-            config.parallel_config.tensor_parallel_size)
+        # AIBrixPDReuseConnector only communicates with KVCacheManager,
+        # which handles L2 cache (SHFS, HPKV, PrisKV, etc.) internally.
+        # No side channel (ZMQ) is needed for KVCacheManager communication.
         
         self._scheduler_meta = AIBrixPDReuseConnectorMetadata({})
 
@@ -545,18 +539,23 @@ class AIBrixPDReuseConnectorScheduler:
             params.get("do_remote_decode")
             and request.status == RequestStatus.FINISHED_LENGTH_CAPPED
         ):
-            # Do NOT delay_free_blocks in SHFS mode.
-            # The KV cache has already been saved to SHFS (shared file system)
-            # in wait_for_save(). Decoder will read from SHFS, not from
-            # prefiller's GPU memory. So we can free the GPU blocks immediately.
+            # Do NOT delay_free_blocks because KV cache is already saved to
+            # KVCacheManager (L2 cache) in wait_for_save(). Decoder will read
+            # from KVCacheManager, not from prefiller's GPU memory.
+            # So we can free the GPU blocks immediately.
+            #
+            # NOTE: remote_host and remote_port are set to empty values because
+            # AIBrixPDReuseConnector only uses KVCacheManager for communication,
+            # not direct network connections. These fields are included for
+            # router compatibility but are not used by the decoder.
             self._scheduler_meta.finish_request(req_id)
             return False, dict(
                 do_remote_prefill=True,
                 do_remote_decode=False,
                 remote_block_ids=block_ids,
                 remote_engine_id=self.engine_id,
-                remote_host=self.side_channel_host,
-                remote_port=self.side_channel_port,
+                remote_host="",
+                remote_port=-1,
                 tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             )
 

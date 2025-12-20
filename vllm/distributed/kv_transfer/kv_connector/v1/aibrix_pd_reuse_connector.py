@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-AIBrix PD Reuse Connector combines prefiller-decoder separation with kvcache reuse.
+AIBrix PD Reuse Connector combines PD disaggregation with kvcache reuse.
 
 This connector:
-1. Supports pd separation: transfers KV cache between prefiller and decoder instances
-2. Supports kvcache reuse: uses KVCacheManager to store and retrieve reusable kvcache
+1. Supports pd disaggregation: transfer KV cache between prefiller & decoder
+2. Supports kvcache reuse: use KVCacheManager to store and retrieve (reuse)
 3. L2 connector (e.g., SHFS) is transparent to this connector
 """
 
@@ -172,7 +172,7 @@ class AIBrixPDReuseConnectorRequestMetadata(CachedPyObjectBase):
     state: AIBrixPDReuseConnectorRequestState = (
         AIBrixPDReuseConnectorRequestState.INIT)
     resumed_from_preemption: bool = False
-    # PD separation related fields
+    # PD disaggregation related fields
     do_remote_prefill: bool = False
     do_remote_decode: bool = False
     remote_block_ids: list[int] = field(default_factory=list)
@@ -298,16 +298,15 @@ class AIBrixPDReuseConnectorScheduler:
         assert config.kv_transfer_config.engine_id is not None
         self.engine_id = config.kv_transfer_config.engine_id
         
-        self.side_channel_host = getattr(vllm.envs, 'VLLM_NIXL_SIDE_CHANNEL_HOST', '127.0.0.1')
+        self.side_channel_host = getattr(
+            vllm.envs, 'VLLM_NIXL_SIDE_CHANNEL_HOST', '127.0.0.1'
+        )
         self.side_channel_port = (
             getattr(vllm.envs, 'VLLM_NIXL_SIDE_CHANNEL_PORT', 29500) +
             config.parallel_config.data_parallel_rank *
             config.parallel_config.tensor_parallel_size)
         
         self._scheduler_meta = AIBrixPDReuseConnectorMetadata({})
-        
-        # Track requests that need PD transfer
-        self._reqs_need_send: dict[str, float] = {}  # req_id -> expiration_time
 
     def get_num_new_matched_tokens(
         self,
@@ -322,7 +321,9 @@ class AIBrixPDReuseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             import os
             from aibrix_kvcache import envs
-            l2_backend = os.getenv("AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND", "").strip().upper()
+            l2_backend = os.getenv(
+                "AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND", ""
+            ).strip().upper()
             
             needs_async_load = l2_backend not in ["SHFS", ""]
             
@@ -348,11 +349,18 @@ class AIBrixPDReuseConnectorScheduler:
         if not params:
             return
         
-        # Handle PD separation: update metadata if needed
+        # Handle PD disaggregation: update metadata if needed
         if params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
-                if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port")):
-                    # Create or update metadata (may not exist yet if called before build_connector_meta)
+                if all(
+                    p in params
+                    for p in ("remote_engine_id", "remote_host", "remote_port")
+                ):
+                    # Create or update metadata (may not exist yet if called
+                    # before build_connector_meta)
+                    conf_tp_size = (
+                        self.vllm_config.parallel_config.tensor_parallel_size
+                    )
                     self._scheduler_meta.upsert_request(
                         request.request_id,
                         do_remote_prefill=True,
@@ -360,7 +368,7 @@ class AIBrixPDReuseConnectorScheduler:
                         remote_engine_id=params.get("remote_engine_id", ""),
                         remote_host=params.get("remote_host", ""),
                         remote_port=params.get("remote_port", -1),
-                        tp_size=params.get("tp_size", self.vllm_config.parallel_config.tensor_parallel_size),
+                        tp_size=params.get("tp_size", conf_tp_size),
                     )
                     params["do_remote_prefill"] = False  # Only trigger once
                 else:
@@ -368,9 +376,10 @@ class AIBrixPDReuseConnectorScheduler:
                         f"Got invalid KVTransferParams: {params}. "
                         "This request will not utilize KVTransfer")
         
-        # Handle PD separation: update do_remote_decode for prefiller
+        # Handle PD disaggregation: update do_remote_decode for prefiller
         if params.get("do_remote_decode"):
-            # Create or update metadata (may not exist yet if called before build_connector_meta)
+            # Create or update metadata (may not exist yet if
+            # called before build_connector_meta)
             self._scheduler_meta.upsert_request(
                 request.request_id,
                 do_remote_decode=True,
@@ -399,9 +408,11 @@ class AIBrixPDReuseConnectorScheduler:
             (block_ids,) = req.block_ids
             slot_mapping = self._block_ids_to_slot_mapping(block_ids)
 
-            # Get PD separation params from request metadata if it was already set in update_state_after_alloc
-            # Also check request.kv_transfer_params as fallback (in case update_state_after_alloc hasn't been called yet)
-            # Check if request metadata already exists (from update_state_after_alloc)
+            # Get PD disaggregation params from request metadata if it was
+            # already set in update_state_after_alloc. Also check
+            # request.kv_transfer_params as fallback (in case
+            # update_state_after_alloc hasn't been called yet). Check if request
+            # metadata already exists (from update_state_after_alloc).
             if req_id in self._scheduler_meta:
                 existing_meta = self._scheduler_meta[req_id]
                 do_remote_prefill = existing_meta.do_remote_prefill
@@ -413,9 +424,11 @@ class AIBrixPDReuseConnectorScheduler:
                 tp_size = existing_meta.tp_size
             else:
                 # Try to get from request.kv_transfer_params (if available)
-                # Note: We need to get the original request from scheduler, but NewRequestData doesn't have kv_transfer_params
-                # So we'll initialize with defaults and let update_state_after_alloc update it later
-                # However, if update_state_after_alloc was already called, the metadata should exist
+                # Note: We need to get the original request from scheduler,
+                # but NewRequestData doesn't have kv_transfer_params. So we'll
+                # initialize with defaults and let update_state_after_alloc
+                # update it later. However, if update_state_after_alloc was
+                # already called, the metadata should exist.
                 do_remote_prefill = False
                 do_remote_decode = False
                 remote_block_ids = []
@@ -464,7 +477,10 @@ class AIBrixPDReuseConnectorScheduler:
 
             if cached_reqs.resumed_from_preemption[i]:
                 (block_ids,) = cached_reqs.new_block_ids[i]
-                seq_slot_mapping = (0, self._block_ids_to_slot_mapping(block_ids))
+                seq_slot_mapping = (
+                    0,
+                    self._block_ids_to_slot_mapping(block_ids),
+                )
             elif cached_reqs.new_block_ids[i] is not None:
                 (block_ids,) = cached_reqs.new_block_ids[i]
                 seq_slot_mapping = (
@@ -487,7 +503,9 @@ class AIBrixPDReuseConnectorScheduler:
 
         # 4. Keep requests that are in the WAITING_FOR_RECV state
         meta = self._scheduler_meta.get(
-            lambda req: req.state == AIBrixPDReuseConnectorRequestState.WAITING_FOR_RECV
+            lambda req: (
+                req.state == AIBrixPDReuseConnectorRequestState.WAITING_FOR_RECV
+            )
         )
 
         # 5. Update scheduled requests
@@ -521,12 +539,16 @@ class AIBrixPDReuseConnectorScheduler:
             self._scheduler_meta.finish_request(req_id)
             return False, None
 
-        # Handle PD separation: if this is a prefiller finishing, return metadata for decoder
-        if params.get("do_remote_decode") and request.status == RequestStatus.FINISHED_LENGTH_CAPPED:
+        # Handle PD disaggregation: if this is a prefiller finishing, return
+        # metadata for decoder.
+        if (
+            params.get("do_remote_decode")
+            and request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        ):
             # Do NOT delay_free_blocks in SHFS mode.
-            # The KV cache has already been saved to SHFS (shared file system) in wait_for_save().
-            # Decoder will read from SHFS, not from prefiller's GPU memory.
-            # So we can free the GPU blocks immediately.
+            # The KV cache has already been saved to SHFS (shared file system)
+            # in wait_for_save(). Decoder will read from SHFS, not from
+            # prefiller's GPU memory. So we can free the GPU blocks immediately.
             self._scheduler_meta.finish_request(req_id)
             return False, dict(
                 do_remote_prefill=True,
@@ -547,8 +569,9 @@ class AIBrixPDReuseConnectorScheduler:
         num_blocks = block_ids_tensor.shape[0]
         block_offsets = torch.arange(0, self.engine_block_ntokens)
         slot_mapping = (
-            block_offsets.reshape((1, self.engine_block_ntokens)) +
-            block_ids_tensor.reshape((num_blocks, 1)) * self.engine_block_ntokens
+            block_offsets.reshape((1, self.engine_block_ntokens))
+            + block_ids_tensor.reshape((num_blocks, 1))
+            * self.engine_block_ntokens
         )
         return slot_mapping.flatten()
 
@@ -622,7 +645,9 @@ class AIBrixPDReuseConnectorWorker:
         if parallel_config.tensor_parallel_size == 1 or not tp_aware:
             self.cache = BaseKVCacheManager(config=kv_config)
         else:
-            backend = torch.distributed.get_backend(get_world_group().device_group)
+            backend = torch.distributed.get_backend(
+                get_world_group().device_group
+            )
             world_size = parallel_config.world_size
             dp_size = parallel_config.data_parallel_size
             pp_size = parallel_config.pipeline_parallel_size
@@ -640,13 +665,28 @@ class AIBrixPDReuseConnectorWorker:
             )
             assert rank == kv_group.rank_in_group
 
-            sync_granularity = getattr(vllm.envs, 'VLLM_AIBRIX_SYNC_GRANULARITY', 'NONE')
-            if (AIBrixPDReuseConnectorSyncGranularity.NONE.name == sync_granularity):
+            sync_granularity = getattr(
+                vllm.envs,
+                'VLLM_AIBRIX_SYNC_GRANULARITY',
+                'NONE'
+            )
+            if (
+                AIBrixPDReuseConnectorSyncGranularity.NONE.name
+                == sync_granularity
+            ):
                 self.cache = BaseKVCacheManager(config=kv_config)
-            elif (AIBrixPDReuseConnectorSyncGranularity.PER_OP.name == sync_granularity):
+            elif (
+                AIBrixPDReuseConnectorSyncGranularity.PER_OP.name
+                == sync_granularity
+            ):
                 self.cache = GroupAwareKVCacheManager(
-                    config=kv_config, process_group=kv_group.cpu_group)
-            elif (AIBrixPDReuseConnectorSyncGranularity.PER_BATCH.name == sync_granularity):
+                    config=kv_config,
+                    process_group=kv_group.cpu_group
+                )
+            elif (
+                AIBrixPDReuseConnectorSyncGranularity.PER_BATCH.name
+                == sync_granularity
+            ):
                 self.cache = BaseKVCacheManager(config=kv_config)
                 self.kv_group = kv_group.cpu_group
                 self._coll_tensor = torch.empty(
@@ -674,7 +714,9 @@ class AIBrixPDReuseConnectorWorker:
         self.kv_cache_dtype = kv_cache_dtype
 
         # KV caches and kv scales will be init'ed later
-        self.no_compile_layers = config.compilation_config.static_forward_context
+        self.no_compile_layers = (
+            config.compilation_config.static_forward_context
+        )
         self.kv_caches: dict[str, torch.Tensor] | None = None
         self.layers_kv_caches: list[torch.Tensor] | None = None
         self.k_scales: list[torch.Tensor] | None = None
@@ -688,10 +730,10 @@ class AIBrixPDReuseConnectorWorker:
             self.cache = None
 
     def _get_block_layout(self) -> KVCacheBlockLayout:
-        if self.attn_backend.get_name() in OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS:
-            return KVCacheBlockLayout(
-                OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS[
-                    self.attn_backend.get_name()])
+        backend_name = self.attn_backend.get_name()
+        supported = OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS
+        if backend_name in supported:
+            return KVCacheBlockLayout(supported[backend_name])
         raise NotImplementedError(
             f"Only support attn backends in "
             f"{list(OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS.keys())}. "
@@ -743,7 +785,7 @@ class AIBrixPDReuseConnectorWorker:
         """
         Start loading KV cache from KVCacheManager (for kvcache reuse).
         Only loads if kv_role is 'kv_consumer' or 'kv_both'.
-        Also handle PD separation if needed.
+        Also handle PD disaggregation if needed.
         """
         # Only load if this instance is a consumer (kv_consumer or kv_both)
         if not self.vllm_config.kv_transfer_config.is_kv_consumer:
@@ -754,19 +796,27 @@ class AIBrixPDReuseConnectorWorker:
         stats = {}
         for seq_request_id, seq_request_meta in metadata.items():
             # For kvcache reuse: load from KVCacheManager (SHFS)
-            # For PD separation: 
-            #   - Prefiller (do_remote_decode=True): May skip if entire cache in SHFS
-            #   - Decoder (do_remote_prefill=True): Always load from SHFS if exists
+            # For PD disaggregation:
+            # Prefiller (do_remote_decode=True): May skip if whole cache in SHFS
+            # Decoder (do_remote_prefill=True): Always load from SHFS if exists
             num_fetched_tokens = self._recv_kv_from_cache_impl(seq_request_meta)
             
             stats[seq_request_id] = num_fetched_tokens
 
         if len(stats) > 0 and self.kv_group is not None:
-            for idx, (seq_request_id, seq_request_meta) in enumerate(metadata.items()):
+            for idx, (seq_request_id, seq_request_meta) in enumerate(
+                metadata.items()
+            ):
                 self._coll_tensor[idx] = stats.get(seq_request_id, 0)
-            dist.all_reduce(self._coll_tensor[:idx], dist.ReduceOp.MIN, self.kv_group)
+            dist.all_reduce(
+                self._coll_tensor[:idx],
+                dist.ReduceOp.MIN,
+                self.kv_group
+            )
 
-            for idx, (seq_request_id, seq_request_meta) in enumerate(metadata.items()):
+            for idx, (seq_request_id, seq_request_meta) in enumerate(
+                metadata.items()
+            ):
                 if self._coll_tensor[idx] > 0:
                     stats[seq_request_id] = self._coll_tensor[idx].item()
                 else:
@@ -777,7 +827,9 @@ class AIBrixPDReuseConnectorWorker:
             # Update seq_request_meta
             seq_request_meta.query_len -= num_fetched_tokens
             seq_request_meta.context_len += num_fetched_tokens
-            seq_request_meta.state = AIBrixPDReuseConnectorRequestState.WAITING_FOR_SEND
+            seq_request_meta.state = (
+                AIBrixPDReuseConnectorRequestState.WAITING_FOR_SEND
+            )
 
         return stats
 
@@ -799,16 +851,24 @@ class AIBrixPDReuseConnectorWorker:
         query_len = seq_request_meta.query_len
 
         # Align to block boundary
-        aligned_context_len = round_down(seq_context_len, self.cache_block_ntokens)
+        aligned_context_len = round_down(
+            seq_context_len,
+            self.cache_block_ntokens
+        )
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(actual_query_len, self.cache_block_ntokens)
+        aligned_query_len = round_down(
+            actual_query_len,
+            self.cache_block_ntokens
+        )
         shift_len = seq_context_len - aligned_context_len
 
         assert prompt_len >= aligned_context_len + aligned_query_len, \
             f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
 
         prefix = seq_all_tokens[:aligned_context_len]
-        tokens = seq_all_tokens[aligned_context_len:aligned_context_len + aligned_query_len]
+        tokens = seq_all_tokens[
+            aligned_context_len:aligned_context_len + aligned_query_len
+        ]
 
         # Check if entire KV cache exists in KVCacheManager (SHFS)
         exists_status = self.cache.exists(prefix, tokens)
@@ -816,25 +876,35 @@ class AIBrixPDReuseConnectorWorker:
         if exists_status.is_ok():
             num_existing_tokens = exists_status.value
 
-        # Optimization for PD separation + KV cache reuse:
-        # - Prefiller (do_remote_decode=True): If entire KV cache exists in SHFS, skip loading
-        #   (decoder will load it from SHFS to its own GPU)
+        # Optimization for PD disaggregation + KV cache reuse:
+        # - Prefiller (do_remote_decode=True): If entire KV cache exists in
+        #   SHFS, skip loading (decoder will load it from SHFS to its own GPU)
         # - Decoder (do_remote_prefill=True): Always load from SHFS if exists
-        # - KV cache reuse only (no PD separation): Load to local GPU for computation
+        # - KV cache reuse only (no PD disaggregation): Load to local GPU
+        #   for computation
         is_prefiller_with_remote_decode = seq_request_meta.do_remote_decode
         is_decoder_with_remote_prefill = seq_request_meta.do_remote_prefill
         
         if is_prefiller_with_remote_decode:
-            # Prefiller: If entire KV cache exists in SHFS, skip loading (decoder will load it)
-            if exists_status.is_ok() and num_existing_tokens >= aligned_query_len:
+            # Prefiller: If entire KV cache exists in SHFS, skip loading
+            # (decoder will load it)
+            if (
+                exists_status.is_ok() and
+                num_existing_tokens >= aligned_query_len
+            ):
                 return 0  # Skip loading, decoder will handle it
         elif is_decoder_with_remote_prefill:
-            # Decoder: Always try to load from SHFS if exists (this is the main path for PD separation)
-            if exists_status.is_ok() and num_existing_tokens >= aligned_query_len:
+            # Decoder: Always try to load from SHFS if exists (this is the main
+            # path for PD disaggregation)
+            if (
+                exists_status.is_ok() and
+                num_existing_tokens >= aligned_query_len
+            ):
                 # Continue to acquire (will load from SHFS)
                 pass
         else:
-            # KV cache reuse only (no PD separation): Use threshold to avoid loading very small chunks
+            # KV cache reuse only (no PD disaggregation): Use threshold to
+            # avoid loading very small chunks
             threshold = max(
                 OFFLOADING_CONNECTOR_SKIP_THRESHOLD * self.engine_block_ntokens,
                 self.cache_block_ntokens,
@@ -842,7 +912,10 @@ class AIBrixPDReuseConnectorWorker:
             if aligned_query_len < threshold:
                 return 0
             # For kvcache reuse, proceed to load if exists
-            if exists_status.is_ok() and num_existing_tokens >= aligned_query_len:
+            if (
+                exists_status.is_ok() and
+                num_existing_tokens >= aligned_query_len
+            ):
                 # KV cache reuse, entire cache exists
                 pass
 
@@ -858,7 +931,8 @@ class AIBrixPDReuseConnectorWorker:
                 self.cache.prefetch(chunk_prefix + chunk_tokens, next_tokens)
 
             # Get KV caches from KVCacheManager
-            # For decoder with do_remote_prefill=True, this will load from SHFS (L2) if L1 is disabled
+            # For decoder with do_remote_prefill=True, this will load from
+            # SHFS (L2) if L1 is disabled
             status = self.cache.acquire(chunk_prefix, chunk_tokens)
 
             if not status.is_ok():
@@ -920,9 +994,10 @@ class AIBrixPDReuseConnectorWorker:
         Only saves if kv_role is 'kv_producer' or 'kv_both'.
         For prefiller: also prepare for PD transfer if needed.
         
-        NOTE: After this function completes, KV cache is saved to L2 cache (e.g., SHFS).
-        The GPU blocks can be freed immediately in request_finished() because decoder
-        will read from L2 cache, not from prefiller's GPU memory.
+        NOTE: After this function completes, KV cache is saved to L2
+        cache (e.g., SHFS). The GPU blocks can be freed immediately in
+        request_finished() because decoder will read from L2 cache, not from
+        prefiller's GPU memory.
         """
         # Only save if this instance is a producer (kv_producer or kv_both)
         if not self.vllm_config.kv_transfer_config.is_kv_producer:
@@ -952,15 +1027,23 @@ class AIBrixPDReuseConnectorWorker:
         query_len = seq_request_meta.query_len
 
         # Align to block boundary
-        aligned_context_len = round_down(seq_context_len, self.cache_block_ntokens)
+        aligned_context_len = round_down(
+            seq_context_len,
+            self.cache_block_ntokens
+        )
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(actual_query_len, self.cache_block_ntokens)
+        aligned_query_len = round_down(
+            actual_query_len,
+            self.cache_block_ntokens
+        )
 
         assert prompt_len >= aligned_context_len + aligned_query_len, \
             f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
 
         prefix = seq_all_tokens[:aligned_context_len]
-        tokens = seq_all_tokens[aligned_context_len:aligned_context_len + aligned_query_len]
+        tokens = seq_all_tokens[
+            aligned_context_len:aligned_context_len + aligned_query_len
+        ]
 
         total_sent = 0
         for (
@@ -983,9 +1066,13 @@ class AIBrixPDReuseConnectorWorker:
                     # Partially exists
                     offset += num_existing_tokens
                     length -= num_existing_tokens
-                    new_chunk_prefix_len = len(chunk_prefix) + num_existing_tokens
+                    new_chunk_prefix_len = (
+                        len(chunk_prefix) + num_existing_tokens
+                    )
                     chunk_prefix = all[:new_chunk_prefix_len]
-                    chunk_tokens = all[new_chunk_prefix_len:new_chunk_prefix_len + length]
+                    chunk_tokens = all[
+                        new_chunk_prefix_len:new_chunk_prefix_len + length
+                    ]
 
             # Allocate space for KV caches
             status = self.cache.allocate_for(chunk_prefix, chunk_tokens)
@@ -1028,18 +1115,20 @@ class AIBrixPDReuseConnectorWorker:
 
 class AIBrixPDReuseConnector(KVConnectorBase_V1):
     """
-    AIBrixPDReuseConnector combines prefiller-decoder separation with kvcache reuse.
+    AIBrixPDReuseConnector combines PD disaggregation with kvcache reuse.
     
     This connector:
-    1. Supports pd separation: transfers KV cache between prefiller and decoder instances
-    2. Supports kvcache reuse: uses KVCacheManager to store and retrieve reusable kvcache
+    1. Supports pd disaggregation: transfer KV cache between prefiller & decoder
+    2. Supports kvcache reuse: use KVCacheManager to store and retrieve (reuse)
     3. L2 connector (e.g., SHFS) is transparent to this connector
     """
 
     def __init__(self, config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=config, role=role)
 
-        self.connector_scheduler: Optional[AIBrixPDReuseConnectorScheduler] = None
+        self.connector_scheduler: Optional[
+            AIBrixPDReuseConnectorScheduler
+        ] = None
         self.connector_worker: Optional[AIBrixPDReuseConnectorWorker] = None
         
         if role == KVConnectorRole.SCHEDULER:
@@ -1109,7 +1198,9 @@ class AIBrixPDReuseConnector(KVConnectorBase_V1):
         return self.connector_worker.start_load_kv_before_update(
             self._connector_metadata)
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(
+            self, forward_context: "ForwardContext", **kwargs
+        ) -> None:
         """Start loading KV cache."""
         pass
 

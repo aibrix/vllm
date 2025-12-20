@@ -310,26 +310,16 @@ class AIBrixPDReuseConnectorScheduler:
         """
         Get number of new tokens that can be loaded from the
         external KV cache (KVCacheManager) beyond the num_computed_tokens.
-        """
-        params = request.kv_transfer_params
-        if params is not None and params.get("do_remote_prefill"):
-            import os
-            from aibrix_kvcache import envs
-            l2_backend = os.getenv(
-                "AIBRIX_KV_CACHE_OL_L2_CACHE_BACKEND", ""
-            ).strip().upper()
-            
-            needs_async_load = l2_backend not in ["SHFS", ""]
-            
-            count = len(request.prompt_token_ids) - num_computed_tokens
-            if count > 0:
-                if needs_async_load:
-                    return count, True
-                else:
-                    return 0, False
         
-        # For kvcache reuse, we don't know the matched tokens here
-        # It will be determined in start_load_kv_before_update
+        NOTE: This method returns (0, False) for both prefiller and decoder.
+        The actual KV cache loading happens in start_load_kv_before_update(),
+        which is called before model execution. This ensures:
+        1. Prefiller: Can still load reusable KV cache from KVCacheManager
+           even though this method returns 0. The loaded tokens will update
+           num_computed_tokens, so only uncached tokens are computed.
+        2. Decoder: Loads KV cache from KVCacheManager synchronously before
+           execution, not asynchronously between scheduler steps.
+        """
         return 0, False
 
     def update_state_after_alloc(

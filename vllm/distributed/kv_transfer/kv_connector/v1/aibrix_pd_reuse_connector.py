@@ -1008,7 +1008,6 @@ class AIBrixPDReuseConnectorWorker:
         prompt_len = seq_request_meta.prompt_len
         query_len = seq_request_meta.query_len
 
-        # Align context_len to block boundary
         aligned_context_len = round_down(
             seq_context_len,
             self.cache_block_ntokens
@@ -1026,40 +1025,68 @@ class AIBrixPDReuseConnectorWorker:
                 _,
                 all,
         ) in self.cache.cache_chunk_keys(prefix, tokens):
-            chunk_size = len(chunk_tokens)
+            chunk_len = len(chunk_tokens)
             offset = len(chunk_prefix)
-            length = chunk_size
+            is_unaligned = chunk_len % self.cache_block_ntokens != 0
 
-            # Check if already exists in cache
-            exists_status = self.cache.exists(chunk_prefix, chunk_tokens)
+            # Prepare tokens for allocation (pad if unaligned)
+            if is_unaligned:
+                rounded_len = round_up(chunk_len, self.cache_block_ntokens)
+                tokens_to_alloc = chunk_tokens + [0] * (rounded_len - chunk_len)
+            else:
+                tokens_to_alloc = chunk_tokens
+
+            exists_status = self.cache.exists(chunk_prefix, tokens_to_alloc)
             if exists_status.is_ok():
                 num_existing_tokens = exists_status.value
-                if chunk_size - num_existing_tokens < self.cache_block_ntokens:
-                    continue
+                if is_unaligned:
+                    # For unaligned, check if we have enough existing tokens
+                    if num_existing_tokens >= chunk_len:
+                        continue
                 else:
-                    # Partially exists
-                    offset += num_existing_tokens
-                    length -= num_existing_tokens
-                    new_chunk_prefix_len = (
-                        len(chunk_prefix) + num_existing_tokens
-                    )
-                    chunk_prefix = all[:new_chunk_prefix_len]
-                    chunk_tokens = all[
-                        new_chunk_prefix_len:new_chunk_prefix_len + length
-                    ]
+                    if (
+                        chunk_len - num_existing_tokens
+                        < self.cache_block_ntokens
+                    ):
+                        continue
+                    else:
+                        # Partially exists
+                        offset += num_existing_tokens
+                        chunk_len -= num_existing_tokens
+                        new_chunk_prefix_len = (
+                            len(chunk_prefix) + num_existing_tokens
+                        )
+                        chunk_prefix = all[:new_chunk_prefix_len]
+                        chunk_tokens = all[
+                            new_chunk_prefix_len
+                            : new_chunk_prefix_len + chunk_len
+                        ]
+                        # Re-calc tokens_to_alloc after adjusting chunk_tokens
+                        if is_unaligned:
+                            rounded_len = round_up(
+                                chunk_len,
+                                self.cache_block_ntokens
+                            )
+                            tokens_to_alloc = chunk_tokens + [0] * (
+                                rounded_len - chunk_len
+                            )
+                        else:
+                            tokens_to_alloc = chunk_tokens
 
-            # Allocate space for KV caches
-            status = self.cache.allocate_for(chunk_prefix, chunk_tokens)
+            status = self.cache.allocate_for(chunk_prefix, tokens_to_alloc)
             if not status.is_ok():
                 log_every_n_seconds(logger, logging.ERROR,
                                     f"Failed to allocate: %s", 3, str(status))
                 break
             handle = status.value
             tensors = handle.to_tensors()
-            length = len(tensors) * self.cache_block_ntokens
+            allocated_length = len(tensors) * self.cache_block_ntokens
 
+            # Slot mapping: only map real tokens, no padding
+            real_len = min(chunk_len, allocated_length)
             chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
-                offset:offset + length]
+                offset:offset + real_len
+            ]
 
             with perf_timer() as get_kernel_offload_dur_ms:
                 reshape_and_offload_multi_layer(
@@ -1074,7 +1101,9 @@ class AIBrixPDReuseConnectorWorker:
                 )
 
             # Put KV caches to KVCacheManager (L2 cache, e.g., SHFS)
-            status = self.cache.put(chunk_prefix, chunk_tokens[:length], handle)
+            status = self.cache.put(
+                chunk_prefix, tokens_to_alloc[:allocated_length], handle
+            )
             if not status.is_ok():
                 log_every_n_seconds(logger, logging.ERROR,
                                     f"Failed to put to KVCacheManager: %s",
@@ -1082,90 +1111,13 @@ class AIBrixPDReuseConnectorWorker:
                 break
 
             put_ntokens = status.get()
-            total_sent += put_ntokens
-            if put_ntokens != length:
-                break
-
-        # Handle remaining unaligned tokens
-        remaining_tokens_start = aligned_context_len + total_sent
-        if remaining_tokens_start < prompt_len:
-            remaining_tokens = seq_all_tokens[remaining_tokens_start:prompt_len]
-            remaining_len = len(remaining_tokens)
-
-            # For alloc
-            remaining_tokens_rounded = round_up(
-                remaining_len,
-                self.cache_block_ntokens
-            )
-            # Extend tokens to full block
-            remaining_tokens_extended = remaining_tokens + [0] * (
-                remaining_tokens_rounded - remaining_len
-            )
-
-            remaining_prefix = seq_all_tokens[:remaining_tokens_start]
-
-            exists_status = self.cache.exists(
-                remaining_prefix, remaining_tokens_extended
-            )
-            if exists_status.is_ok():
-                num_existing_tokens = exists_status.value
-                if num_existing_tokens >= remaining_len:
-                    return
-
-            # For remaining unaligned KV cache (rounded up to block size)
-            status = self.cache.allocate_for(
-                remaining_prefix, remaining_tokens_extended
-            )
-            if not status.is_ok():
-                log_every_n_seconds(
-                    logger,
-                    logging.ERROR,
-                    f"Failed to allocate for remaining unaligned part: %s",
-                    3,
-                    str(status)
-                )
-                return
-
-            handle = status.value
-            tensors = handle.to_tensors()
-            allocated_length = len(tensors) * self.cache_block_ntokens
-
-            # Slot mapping for remaining unaligned part (no padding)
-            remaining_slot_mapping = seq_cached_meta.context_slot_mapping[
-                remaining_tokens_start:remaining_tokens_start + remaining_len
-            ]
-
-            with perf_timer() as get_kernel_offload_dur_ms:
-                reshape_and_offload_multi_layer(
-                    tensors,
-                    self.layers_kv_caches,
-                    remaining_slot_mapping,
-                    self.engine_block_ntokens,
-                    self.kv_cache_dtype,
-                    self.k_scales,
-                    self.v_scales,
-                    self.block_layout.name,
-                )
-
-            # Full block with padding
-            status = self.cache.put(
-                remaining_prefix,
-                remaining_tokens_extended[:allocated_length],
-                handle
-            )
-            if not status.is_ok():
-                log_every_n_seconds(
-                    logger,
-                    logging.ERROR,
-                    f"Failed to put remaining unaligned part to cache: %s",
-                    3,
-                    str(status)
-                )
-                return
-
-            put_ntokens = status.get()
-            total_sent += min(put_ntokens, remaining_len)
-
+            if is_unaligned:
+                # Only count actual tokens, not padding
+                total_sent += min(put_ntokens, chunk_len)
+            else:
+                total_sent += put_ntokens
+                if put_ntokens != allocated_length:
+                    break
 
 class AIBrixPDReuseConnector(KVConnectorBase_V1):
     """

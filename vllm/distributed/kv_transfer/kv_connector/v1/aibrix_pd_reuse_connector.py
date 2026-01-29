@@ -1024,7 +1024,7 @@ class AIBrixPDReuseConnectorWorker:
                 chunk_tokens,
                 _,
                 all,
-        ) in self.cache.cache_chunk_keys(prefix, tokens):
+        ) in self.cache.cache_chunk_keys(prefix, tokens, include_unaligned=True):
             chunk_len = len(chunk_tokens)
             offset = len(chunk_prefix)
             is_unaligned = chunk_len % self.cache_block_ntokens != 0

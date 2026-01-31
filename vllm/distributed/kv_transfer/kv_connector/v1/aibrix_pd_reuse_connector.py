@@ -1039,39 +1039,33 @@ class AIBrixPDReuseConnectorWorker:
             exists_status = self.cache.exists(chunk_prefix, tokens_to_alloc)
             if exists_status.is_ok():
                 num_existing_tokens = exists_status.value
-                if is_unaligned:
-                    # For unaligned, check if we have enough existing tokens
-                    if num_existing_tokens >= chunk_len:
-                        continue
-                else:
-                    if (
-                        chunk_len - num_existing_tokens
-                        < self.cache_block_ntokens
-                    ):
-                        continue
-                    else:
-                        # Partially exists
-                        offset += num_existing_tokens
-                        chunk_len -= num_existing_tokens
-                        new_chunk_prefix_len = (
-                            len(chunk_prefix) + num_existing_tokens
+                # Check if all tokens already exist
+                if num_existing_tokens >= chunk_len:
+                    continue
+                # Partially exists: adjust chunk to process remaining tokens
+                if num_existing_tokens > 0:
+                    offset += num_existing_tokens
+                    chunk_len -= num_existing_tokens
+                    new_chunk_prefix_len = (
+                        len(chunk_prefix) + num_existing_tokens
+                    )
+                    chunk_prefix = all[:new_chunk_prefix_len]
+                    chunk_tokens = all[
+                        new_chunk_prefix_len
+                        : new_chunk_prefix_len + chunk_len
+                    ]
+                    # Re-calc tokens_to_alloc after adjusting chunk_tokens
+                    if is_unaligned:
+                        # For unaligned chunks, pad to full block size
+                        rounded_len = round_up(
+                            chunk_len,
+                            self.cache_block_ntokens
                         )
-                        chunk_prefix = all[:new_chunk_prefix_len]
-                        chunk_tokens = all[
-                            new_chunk_prefix_len
-                            : new_chunk_prefix_len + chunk_len
-                        ]
-                        # Re-calc tokens_to_alloc after adjusting chunk_tokens
-                        if is_unaligned:
-                            rounded_len = round_up(
-                                chunk_len,
-                                self.cache_block_ntokens
-                            )
-                            tokens_to_alloc = chunk_tokens + [0] * (
-                                rounded_len - chunk_len
-                            )
-                        else:
-                            tokens_to_alloc = chunk_tokens
+                        tokens_to_alloc = chunk_tokens + [0] * (
+                            rounded_len - chunk_len
+                        )
+                    else:
+                        tokens_to_alloc = chunk_tokens
 
             status = self.cache.allocate_for(chunk_prefix, tokens_to_alloc)
             if not status.is_ok():

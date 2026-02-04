@@ -1024,7 +1024,9 @@ class AIBrixPDReuseConnectorWorker:
                 chunk_tokens,
                 _,
                 all,
-        ) in self.cache.cache_chunk_keys(prefix, tokens, include_unaligned=True):
+        ) in self.cache.cache_chunk_keys(
+            prefix, tokens, include_unaligned=True
+        ):
             chunk_len = len(chunk_tokens)
             offset = len(chunk_prefix)
             is_unaligned = chunk_len % self.cache_block_ntokens != 0
@@ -1036,16 +1038,7 @@ class AIBrixPDReuseConnectorWorker:
                     "BlockHashes is not supported in this context."
                 )
 
-            # Prepare tokens for allocation (pad if unaligned)
-            if is_unaligned:
-                rounded_len = round_up(chunk_len, self.cache_block_ntokens)
-                chunk_tokens_list = list(chunk_tokens)
-                padded_tokens = chunk_tokens_list + [0] * (rounded_len - chunk_len)
-                tokens_to_alloc = TokenListView(padded_tokens)
-            else:
-                tokens_to_alloc = chunk_tokens
-
-            exists_status = self.cache.exists(chunk_prefix, tokens_to_alloc)
+            exists_status = self.cache.exists(chunk_prefix, chunk_tokens)
             if exists_status.is_ok():
                 num_existing_tokens = exists_status.value
                 # Check if all tokens already exist
@@ -1063,20 +1056,18 @@ class AIBrixPDReuseConnectorWorker:
                         new_chunk_prefix_len
                         : new_chunk_prefix_len + chunk_len
                     ]
-                    # Re-calc tokens_to_alloc after adjusting chunk_tokens
-                    if is_unaligned:
-                        # For unaligned chunks, pad to full block size
-                        rounded_len = round_up(
-                            chunk_len,
-                            self.cache_block_ntokens
-                        )
-                        chunk_tokens_list = list(chunk_tokens)
-                        padded_tokens = chunk_tokens_list + [0] * (
-                            rounded_len - chunk_len
-                        )
-                        tokens_to_alloc = TokenListView(padded_tokens)
-                    else:
-                        tokens_to_alloc = chunk_tokens
+                    # Re-check is_unaligned after adjusting chunk_tokens
+                    is_unaligned = chunk_len % self.cache_block_ntokens != 0
+
+            # Prepare tokens for allocation (pad if unaligned)
+            if is_unaligned:
+                rounded_len = round_up(chunk_len, self.cache_block_ntokens)
+                chunk_tokens_list = list(chunk_tokens)
+                padding_size = rounded_len - chunk_len
+                padded_tokens = chunk_tokens_list + [0] * padding_size
+                tokens_to_alloc = TokenListView(padded_tokens)
+            else:
+                tokens_to_alloc = chunk_tokens
 
             status = self.cache.allocate_for(chunk_prefix, tokens_to_alloc)
             if not status.is_ok():

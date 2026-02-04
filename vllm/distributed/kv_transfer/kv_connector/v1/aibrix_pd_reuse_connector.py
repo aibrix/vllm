@@ -1029,10 +1029,19 @@ class AIBrixPDReuseConnectorWorker:
             offset = len(chunk_prefix)
             is_unaligned = chunk_len % self.cache_block_ntokens != 0
 
+            # In case KVCacheKeyTypes is BlockHashes...
+            if not isinstance(chunk_tokens, TokenListView):
+                raise TypeError(
+                    f"Expected TokenListView, got {type(chunk_tokens)}. "
+                    "BlockHashes is not supported in this context."
+                )
+
             # Prepare tokens for allocation (pad if unaligned)
             if is_unaligned:
                 rounded_len = round_up(chunk_len, self.cache_block_ntokens)
-                tokens_to_alloc = chunk_tokens + [0] * (rounded_len - chunk_len)
+                chunk_tokens_list = list(chunk_tokens)
+                padded_tokens = chunk_tokens_list + [0] * (rounded_len - chunk_len)
+                tokens_to_alloc = TokenListView(padded_tokens)
             else:
                 tokens_to_alloc = chunk_tokens
 
@@ -1061,9 +1070,11 @@ class AIBrixPDReuseConnectorWorker:
                             chunk_len,
                             self.cache_block_ntokens
                         )
-                        tokens_to_alloc = chunk_tokens + [0] * (
+                        chunk_tokens_list = list(chunk_tokens)
+                        padded_tokens = chunk_tokens_list + [0] * (
                             rounded_len - chunk_len
                         )
+                        tokens_to_alloc = TokenListView(padded_tokens)
                     else:
                         tokens_to_alloc = chunk_tokens
 

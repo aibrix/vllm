@@ -1078,11 +1078,32 @@ class AIBrixPDReuseConnectorWorker:
             tensors = handle.to_tensors()
             allocated_length = len(tensors) * self.cache_block_ntokens
 
-            # Slot mapping: only map real tokens, no padding
+            # For unaligned chunks, padding slots will be invalid (-1)
             real_len = min(chunk_len, allocated_length)
-            chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
-                offset:offset + real_len
-            ]
+            slot_mapping_len = seq_cached_meta.context_slot_mapping.shape[0]
+
+            if offset + allocated_length <= slot_mapping_len:
+                # Use direct slice if within bounds
+                chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
+                    offset:offset + allocated_length
+                ]
+                # Pad the tail with -1 if unaligned
+                if allocated_length > real_len:
+                    chunk_slot_mapping[real_len:] = -1
+            else:
+                # Need to pad slot mapping for unaligned chunks (out of bounds)
+                real_slot_mapping = seq_cached_meta.context_slot_mapping[
+                    offset:offset + real_len
+                ]
+                # Pad with invalid slots (-1) for padding tokens
+                padding_size = allocated_length - real_len
+                pad_slots = torch.full(
+                    (padding_size,),
+                    -1,
+                    dtype=real_slot_mapping.dtype,
+                    device=real_slot_mapping.device
+                )
+                chunk_slot_mapping = torch.cat([real_slot_mapping, pad_slots])
 
             with perf_timer() as get_kernel_offload_dur_ms:
                 reshape_and_offload_multi_layer(

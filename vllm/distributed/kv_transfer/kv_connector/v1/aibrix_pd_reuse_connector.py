@@ -1118,9 +1118,7 @@ class AIBrixPDReuseConnectorWorker:
                 )
 
             # Put KV caches to KVCacheManager (L2 cache, e.g., SHFS)
-            status = self.cache.put(
-                chunk_prefix, tokens_to_alloc[:allocated_length], handle
-            )
+            status = self.cache.put(chunk_prefix, chunk_tokens, handle)
             if not status.is_ok():
                 log_every_n_seconds(logger, logging.ERROR,
                                     f"Failed to put to KVCacheManager: %s",

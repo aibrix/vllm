@@ -68,7 +68,7 @@ def delegate_to(
         member_name: str) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """
     Decorator that delegates a method call to a member object.
-    
+
     Args:
         member_name: The name of the member attribute to delegate to.
     """
@@ -113,20 +113,60 @@ class AIBrixPDReuseConnectorCachedMeta:
     context_slot_mapping: Optional[torch.Tensor] = None
     context_slot_mapping_offset: int = 0
 
-    def __init__(self, prompt_len: int) -> None:
-        self.context_tokens = np.empty(prompt_len, dtype=np.int32)
-        self.context_slot_mapping = torch.empty(
-            prompt_len,
+    # For unaligned tail support
+    cache_block_ntokens: int = 0
+    padding_token_id: int = -1
+
+    def __init__(
+        self, prompt_len: int, cache_block_ntokens: int = 0
+    ) -> None:
+        assert cache_block_ntokens > 0, (
+            "cache_block_ntokens must be > 0 to pre-allocate aligned size"
+        )
+
+        aligned_prompt_len = round_up(prompt_len, cache_block_ntokens)
+
+        self.context_tokens = np.empty(aligned_prompt_len, dtype=np.int32)
+        self.context_slot_mapping = torch.full(
+            (aligned_prompt_len,),
+            -1,
             dtype=torch.long,
             device="cuda",
         )
+        self.cache_block_ntokens = cache_block_ntokens
+        self.padding_token_id = -1
 
     def get_context_tokens(self) -> list[int]:
         return self.context_tokens[:self.context_tokens_offset]
 
     def get_context_tokens_view(self) -> TokenListView:
+        """
+        Get context tokens view, aligned to block boundary.
+
+        Returns:
+            TokenListView: May contain padding tokens if tail is unaligned.
+        """
+        actual_len = self.context_tokens_offset
+
+        aligned_len = round_up(actual_len, self.cache_block_ntokens)
+
+        if actual_len == aligned_len:
+            tokens_to_view = self.context_tokens[:actual_len]
+        else:
+            assert aligned_len <= len(self.context_tokens), (
+                f"Aligned length exceeds pre-allocated size: "
+                f"aligned_len={aligned_len}, "
+                f"allocated_size={len(self.context_tokens)}. "
+            )
+
+            self.context_tokens[actual_len:aligned_len] = (
+                self.padding_token_id
+            )
+
+            tokens_to_view = self.context_tokens[:aligned_len]
+
         if self.context_tokens_view is None:
-            self.context_tokens_view = TokenListView(self.get_context_tokens())
+            self.context_tokens_view = TokenListView(list(tokens_to_view))
         return self.context_tokens_view
 
     def extend(
@@ -137,8 +177,16 @@ class AIBrixPDReuseConnectorCachedMeta:
         if tokens:
             offset = tokens[0]
             length = len(tokens[1])
+            new_offset = offset + length
+
+            assert new_offset <= len(self.context_tokens), (
+                f"Data exceeds pre-allocated size: new_offset={new_offset}, "
+                f"allocated_size={len(self.context_tokens)}. "
+                f"This should not happen if __init__ pre-allocated correctly."
+            )
+
             self.context_tokens[offset:offset + length] = tokens[1]
-            self.context_tokens_offset = offset + length
+            self.context_tokens_offset = new_offset
             self.context_tokens_view = None
 
         if slot_mapping is None:
@@ -295,11 +343,11 @@ class AIBrixPDReuseConnectorScheduler:
         self.vllm_config = config
         assert config.kv_transfer_config.engine_id is not None
         self.engine_id = config.kv_transfer_config.engine_id
-        
+
         # AIBrixPDReuseConnector only communicates with KVCacheManager,
         # which handles L2 cache (SHFS, HPKV, PrisKV, etc.) internally.
         # No side channel (ZMQ) is needed for KVCacheManager communication.
-        
+
         self._scheduler_meta = AIBrixPDReuseConnectorMetadata({})
 
     def get_num_new_matched_tokens(
@@ -310,7 +358,7 @@ class AIBrixPDReuseConnectorScheduler:
         """
         Get number of new tokens that can be loaded from the
         external KV cache (KVCacheManager) beyond the num_computed_tokens.
-        
+
         NOTE: This method returns (0, False) for both prefiller and decoder.
         The actual KV cache loading happens in start_load_kv_before_update(),
         which is called before model execution. This ensures:
@@ -332,7 +380,7 @@ class AIBrixPDReuseConnectorScheduler:
         params = request.kv_transfer_params
         if not params:
             return
-        
+
         # Handle PD disaggregation: update metadata if needed
         if params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
@@ -359,7 +407,7 @@ class AIBrixPDReuseConnectorScheduler:
                     logger.warning(
                         f"Got invalid KVTransferParams: {params}. "
                         "This request will not utilize KVTransfer")
-        
+
         # Handle PD disaggregation: update do_remote_decode for prefiller
         if params.get("do_remote_decode"):
             # Create or update metadata (may not exist yet if
@@ -420,7 +468,7 @@ class AIBrixPDReuseConnectorScheduler:
                 remote_host = ""
                 remote_port = -1
                 tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            
+
             self._scheduler_meta.upsert_request(
                 req_id,
                 prompt_len=prompt_len,
@@ -512,7 +560,7 @@ class AIBrixPDReuseConnectorScheduler:
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request is finished.
-        
+
         For prefiller: return metadata to router for decoder to use.
         For decoder: just clean up.
         """
@@ -741,12 +789,17 @@ class AIBrixPDReuseConnectorWorker:
         for req_id, meta in metadata.items():
             if req_id not in self._meta_cache:
                 self._meta_cache[req_id] = AIBrixPDReuseConnectorCachedMeta(
-                    meta.prompt_len)
+                    meta.prompt_len,
+                    cache_block_ntokens=self.cache_block_ntokens
+                )
             elif meta.resumed_from_preemption:
                 self._meta_cache[req_id].context_slot_mapping_offset = 0
                 self._meta_cache[req_id].context_slot_mapping.zero_()
 
             seq_meta_cache = self._meta_cache[req_id]
+            assert seq_meta_cache.cache_block_ntokens > 0, (
+                "cache_block_ntokens should be set in __init__"
+            )
             seq_meta_cache.extend(meta.seq_token_ids, meta.seq_slot_mapping)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -779,7 +832,7 @@ class AIBrixPDReuseConnectorWorker:
         # Only load if this instance is a consumer (kv_consumer or kv_both)
         if not self.vllm_config.kv_transfer_config.is_kv_consumer:
             return {}
-        
+
         self._update_meta_cache(metadata)
 
         stats = {}
@@ -789,7 +842,7 @@ class AIBrixPDReuseConnectorWorker:
             # Prefiller (do_remote_decode=True): May skip if whole cache in SHFS
             # Decoder (do_remote_prefill=True): Always load from SHFS if exists
             num_fetched_tokens = self._recv_kv_from_cache_impl(seq_request_meta)
-            
+
             stats[seq_request_id] = num_fetched_tokens
 
         if len(stats) > 0 and self.kv_group is not None:
@@ -814,11 +867,18 @@ class AIBrixPDReuseConnectorWorker:
         for seq_request_id, num_fetched_tokens in stats.items():
             seq_request_meta = metadata[seq_request_id]
             # Update seq_request_meta
-            seq_request_meta.query_len -= num_fetched_tokens
-            seq_request_meta.context_len += num_fetched_tokens
+            # Cap num_fetched_tokens to query_len to prevent negative query_len.
+            original_query_len = seq_request_meta.query_len
+            actual_fetched_tokens = min(num_fetched_tokens, original_query_len)
+
+            seq_request_meta.query_len -= actual_fetched_tokens
+            seq_request_meta.context_len += actual_fetched_tokens
             seq_request_meta.state = (
                 AIBrixPDReuseConnectorRequestState.WAITING_FOR_SEND
             )
+
+            # Update stats to reflect the actual fetched tokens
+            stats[seq_request_id] = actual_fetched_tokens
 
         return stats
 
@@ -832,6 +892,8 @@ class AIBrixPDReuseConnectorWorker:
         """
         seq_request_id = seq_request_meta.req_id
         seq_cached_meta = self._meta_cache[seq_request_id]
+
+        # Aligned view
         seq_all_tokens = seq_cached_meta.get_context_tokens_view()
         assert seq_all_tokens is not None, "seq_all_tokens is None"
         seq_context_len = seq_request_meta.context_len
@@ -845,14 +907,23 @@ class AIBrixPDReuseConnectorWorker:
             self.cache_block_ntokens
         )
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(
-            actual_query_len,
-            self.cache_block_ntokens
-        )
+
+        actual_prompt_len = prompt_len
+        aligned_prompt_len = round_up(prompt_len, self.cache_block_ntokens)
+        has_unaligned_tail = (actual_prompt_len < aligned_prompt_len)
+
+        # Calculate query length to load (including unaligned tail if exists)
+        if has_unaligned_tail:
+            aligned_query_len = aligned_prompt_len - aligned_context_len
+        else:
+            aligned_query_len = round_down(
+                actual_query_len, self.cache_block_ntokens
+            )
+
         shift_len = seq_context_len - aligned_context_len
 
-        assert prompt_len >= aligned_context_len + aligned_query_len, \
-            f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
+        assert aligned_prompt_len >= aligned_context_len + aligned_query_len, \
+            f"{aligned_prompt_len}<{aligned_context_len}+{aligned_query_len}"
 
         prefix = seq_all_tokens[:aligned_context_len]
         tokens = seq_all_tokens[
@@ -873,7 +944,7 @@ class AIBrixPDReuseConnectorWorker:
         #   for computation
         is_prefiller_with_remote_decode = seq_request_meta.do_remote_decode
         is_decoder_with_remote_prefill = seq_request_meta.do_remote_prefill
-        
+
         if is_prefiller_with_remote_decode:
             # Prefiller: If entire KV cache exists in SHFS, skip loading
             # (decoder will load it)
@@ -883,14 +954,10 @@ class AIBrixPDReuseConnectorWorker:
             ):
                 return 0  # Skip loading, decoder will handle it
         elif is_decoder_with_remote_prefill:
-            # Decoder: Always try to load from SHFS if exists (this is the main
-            # path for PD disaggregation)
-            if (
-                exists_status.is_ok() and
-                num_existing_tokens >= aligned_query_len
-            ):
-                # Continue to acquire (will load from SHFS)
-                pass
+            # Decoder: Always try to load from SHFS if exists (this is the
+            # main path for PD disaggregation)
+            # Continue to acquire (will load from SHFS) if cache exists
+            pass
         else:
             # KV cache reuse only (no PD disaggregation): Use threshold to
             # avoid loading very small chunks
@@ -901,12 +968,6 @@ class AIBrixPDReuseConnectorWorker:
             if aligned_query_len < threshold:
                 return 0
             # For kvcache reuse, proceed to load if exists
-            if (
-                exists_status.is_ok() and
-                num_existing_tokens >= aligned_query_len
-            ):
-                # KV cache reuse, entire cache exists
-                pass
 
         seq_recv_len = 0
         for (
@@ -938,11 +999,49 @@ class AIBrixPDReuseConnectorWorker:
             num_fetched_tokens, handle = status.value
             kv_blocks = handle.to_tensors()
 
-            offset = len(chunk_prefix)
-            length = num_fetched_tokens
+            # Relative to aligned_context_len, not the length of chunk_prefix
+            offset = len(chunk_prefix) - aligned_context_len
+
+            chunk_start_in_prompt = aligned_context_len + offset
+            chunk_end_in_prompt = chunk_start_in_prompt + num_fetched_tokens
+
+            if chunk_end_in_prompt > actual_prompt_len:
+                actual_chunk_len = actual_prompt_len - chunk_start_in_prompt
+                padding_len = num_fetched_tokens - actual_chunk_len
+            else:
+                actual_chunk_len = num_fetched_tokens
+                padding_len = 0
+
+            slot_mapping_end = chunk_start_in_prompt + num_fetched_tokens
 
             chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
-                offset:offset + length]
+                chunk_start_in_prompt:slot_mapping_end
+            ]
+
+            # Verify padding slots are set correctly (beyond actual_prompt_len)
+            actual_slot_mapping_end = min(
+                chunk_start_in_prompt + actual_chunk_len,
+                slot_mapping_end
+            )
+            if actual_slot_mapping_end < slot_mapping_end:
+                padding_start_idx = (
+                    actual_slot_mapping_end - chunk_start_in_prompt
+                )
+                if padding_start_idx < len(chunk_slot_mapping):
+                    chunk_slot_mapping[padding_start_idx:].fill_(-1)
+
+            if len(chunk_slot_mapping) > 0:
+                num_valid_slots = (chunk_slot_mapping >= 0).sum().item()
+                if num_valid_slots == 0:
+                    # Skip kernel call
+                    increment = num_fetched_tokens - shift_len
+                    seq_recv_len += increment
+                    shift_len = 0
+                    handle.release()
+                    if num_fetched_tokens < len(chunk_tokens):
+                        # Didn't receive all tokens for current chunk, break
+                        break
+                    continue
 
             with perf_timer() as get_kernel_onload_dur_ms:
                 reshape_and_cache_multi_layer(
@@ -957,7 +1056,8 @@ class AIBrixPDReuseConnectorWorker:
                 )
 
             # Update recv_len
-            seq_recv_len += num_fetched_tokens - shift_len
+            increment = num_fetched_tokens - shift_len
+            seq_recv_len += increment
             # Reset shift_len
             shift_len = 0
 
@@ -982,7 +1082,7 @@ class AIBrixPDReuseConnectorWorker:
         Save newly generated KV cache to KVCacheManager (for kvcache reuse).
         Only saves if kv_role is 'kv_producer' or 'kv_both'.
         For prefiller: also prepare for PD transfer if needed.
-        
+
         NOTE: After this function completes, KV cache is saved to L2
         cache (e.g., SHFS). The GPU blocks can be freed immediately in
         request_finished() because decoder will read from L2 cache, not from
@@ -991,7 +1091,7 @@ class AIBrixPDReuseConnectorWorker:
         # Only save if this instance is a producer (kv_producer or kv_both)
         if not self.vllm_config.kv_transfer_config.is_kv_producer:
             return
-        
+
         assert self.layers_kv_caches is not None, "layers_kv_caches is None"
 
         for seq_request_id, seq_request_meta in metadata.items():
@@ -1010,6 +1110,8 @@ class AIBrixPDReuseConnectorWorker:
         seq_request_id = seq_request_meta.req_id
         seq_context_len = seq_request_meta.context_len
         seq_cached_meta = self._meta_cache[seq_request_id]
+
+        # Aligned view
         seq_all_tokens = seq_cached_meta.get_context_tokens_view()
         assert seq_all_tokens is not None, "seq_all_tokens is None"
         prompt_len = seq_request_meta.prompt_len
@@ -1021,13 +1123,21 @@ class AIBrixPDReuseConnectorWorker:
             self.cache_block_ntokens
         )
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(
-            actual_query_len,
-            self.cache_block_ntokens
-        )
 
-        assert prompt_len >= aligned_context_len + aligned_query_len, \
-            f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
+        actual_prompt_len = prompt_len
+        aligned_prompt_len = round_up(prompt_len, self.cache_block_ntokens)
+        has_unaligned_tail = (actual_prompt_len < aligned_prompt_len)
+
+        # Calculate query length to save (including unaligned tail if exists)
+        if has_unaligned_tail:
+            aligned_query_len = aligned_prompt_len - aligned_context_len
+        else:
+            aligned_query_len = round_down(
+                actual_query_len, self.cache_block_ntokens
+            )
+
+        assert aligned_prompt_len >= aligned_context_len + aligned_query_len, \
+            f"{aligned_prompt_len}<{aligned_context_len}+{aligned_query_len}"
 
         prefix = seq_all_tokens[:aligned_context_len]
         tokens = seq_all_tokens[
@@ -1042,8 +1152,19 @@ class AIBrixPDReuseConnectorWorker:
                 all,
         ) in self.cache.cache_chunk_keys(prefix, tokens):
             chunk_size = len(chunk_tokens)
-            offset = len(chunk_prefix)
+            # Relative to aligned_context_len, not the length of chunk_prefix
+            offset = len(chunk_prefix) - aligned_context_len
             length = chunk_size
+
+            chunk_start_in_prompt = aligned_context_len + offset
+            chunk_end_in_prompt = chunk_start_in_prompt + chunk_size
+
+            if chunk_end_in_prompt > actual_prompt_len:
+                actual_chunk_len = actual_prompt_len - chunk_start_in_prompt
+                padding_len = chunk_size - actual_chunk_len
+            else:
+                actual_chunk_len = chunk_size
+                padding_len = 0
 
             # Check if already exists in cache
             exists_status = self.cache.exists(chunk_prefix, chunk_tokens)
@@ -1051,17 +1172,26 @@ class AIBrixPDReuseConnectorWorker:
                 num_existing_tokens = exists_status.value
                 if chunk_size - num_existing_tokens < self.cache_block_ntokens:
                     continue
-                else:
-                    # Partially exists
-                    offset += num_existing_tokens
-                    length -= num_existing_tokens
-                    new_chunk_prefix_len = (
-                        len(chunk_prefix) + num_existing_tokens
+
+                # Partially exists
+                offset += num_existing_tokens
+                actual_chunk_len -= num_existing_tokens
+                # Recalculate padding_len after partial exists
+                new_chunk_size = chunk_size - num_existing_tokens
+                if padding_len > 0:
+                    # Recalculate padding_len for remaining chunk
+                    remaining_in_prompt = (
+                        actual_prompt_len - chunk_start_in_prompt -
+                        num_existing_tokens
                     )
-                    chunk_prefix = all[:new_chunk_prefix_len]
-                    chunk_tokens = all[
-                        new_chunk_prefix_len:new_chunk_prefix_len + length
-                    ]
+                    padding_len = new_chunk_size - remaining_in_prompt
+                    actual_chunk_len = remaining_in_prompt
+                new_chunk_prefix_len = len(chunk_prefix) + num_existing_tokens
+                chunk_prefix = all[:new_chunk_prefix_len]
+                chunk_tokens = all[
+                    new_chunk_prefix_len:new_chunk_prefix_len + new_chunk_size
+                ]
+                chunk_size = new_chunk_size
 
             # Allocate space for KV caches
             status = self.cache.allocate_for(chunk_prefix, chunk_tokens)
@@ -1071,10 +1201,39 @@ class AIBrixPDReuseConnectorWorker:
                 break
             handle = status.value
             tensors = handle.to_tensors()
-            length = len(tensors) * self.cache_block_ntokens
+            allocated_length = len(tensors) * self.cache_block_ntokens
+
+            actual_chunk_start = aligned_context_len + offset
+            slot_mapping_end = actual_chunk_start + allocated_length
 
             chunk_slot_mapping = seq_cached_meta.context_slot_mapping[
-                offset:offset + length]
+                actual_chunk_start:slot_mapping_end
+            ]
+
+            # Verify padding slots are set correctly (beyond actual_prompt_len)
+            actual_slot_mapping_end = min(
+                actual_chunk_start + actual_chunk_len,
+                slot_mapping_end
+            )
+            if actual_slot_mapping_end < slot_mapping_end:
+                padding_start_idx = actual_slot_mapping_end - actual_chunk_start
+                if padding_start_idx < len(chunk_slot_mapping):
+                    chunk_slot_mapping[padding_start_idx:].fill_(-1)
+
+            if len(chunk_slot_mapping) > 0:
+                num_valid_slots = (chunk_slot_mapping >= 0).sum().item()
+                if num_valid_slots == 0:
+                    # Skip kernel call
+                    status = self.cache.put(
+                        chunk_prefix, chunk_tokens[:allocated_length], handle
+                    )
+                    if not status.is_ok():
+                        log_every_n_seconds(
+                            logger, logging.ERROR,
+                            f"Failed to put empty chunk to cache: %s", 3,
+                            str(status)
+                        )
+                    continue
 
             with perf_timer() as get_kernel_offload_dur_ms:
                 reshape_and_offload_multi_layer(
@@ -1089,7 +1248,9 @@ class AIBrixPDReuseConnectorWorker:
                 )
 
             # Put KV caches to KVCacheManager (L2 cache, e.g., SHFS)
-            status = self.cache.put(chunk_prefix, chunk_tokens[:length], handle)
+            status = self.cache.put(
+                chunk_prefix, chunk_tokens[:allocated_length], handle
+            )
             if not status.is_ok():
                 log_every_n_seconds(logger, logging.ERROR,
                                     f"Failed to put to KVCacheManager: %s",
@@ -1098,14 +1259,14 @@ class AIBrixPDReuseConnectorWorker:
 
             put_ntokens = status.get()
             total_sent += put_ntokens
-            if put_ntokens != length:
+            if put_ntokens != allocated_length:
                 break
 
 
 class AIBrixPDReuseConnector(KVConnectorBase_V1):
     """
     AIBrixPDReuseConnector combines PD disaggregation with kvcache reuse.
-    
+
     This connector:
     1. Supports pd disaggregation: transfer KV cache between prefiller & decoder
     2. Supports kvcache reuse: use KVCacheManager to store and retrieve (reuse)
@@ -1119,7 +1280,7 @@ class AIBrixPDReuseConnector(KVConnectorBase_V1):
             AIBrixPDReuseConnectorScheduler
         ] = None
         self.connector_worker: Optional[AIBrixPDReuseConnectorWorker] = None
-        
+
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = AIBrixPDReuseConnectorScheduler(config)
         elif role == KVConnectorRole.WORKER:

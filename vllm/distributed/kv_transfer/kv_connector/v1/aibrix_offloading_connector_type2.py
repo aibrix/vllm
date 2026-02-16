@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.utils.math_utils import round_down
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
 from .aibrix_offloading_connector_type1 import (
     AIBrixOffloadingConnectorMetadata,
@@ -45,6 +46,7 @@ logger = getLogger(__name__)
 OFFLOADING_CONNECTOR_SKIP_THRESHOLD = 8
 OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
     FlashAttentionBackend.get_name(): KVCacheBlockLayout.LCND,
+    FlashInferBackend.get_name(): KVCacheBlockLayout.LCND,
 }
 
 
@@ -298,10 +300,11 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
                 [self.layers_kv_caches[lid]],
                 self._recv_slot_mapping[:slot_mapping_offset],
                 self.engine_block_ntokens,
-                self.kv_cache_dtype,
+                "auto",
                 [self.k_scales[lid]],
                 [self.v_scales[lid]],
                 self.block_layout.name,
+                self.kv_layout_blocks_first,
             )
 
     def wait_for_layer_load(self, metadata: AIBrixOffloadingConnectorMetadata,
@@ -384,10 +387,11 @@ class AIBrixOffloadingConnectorWorker(AIBrixOffloadingConnectorWorkerType1):
                 [kv_layer],
                 self._send_slot_mapping[:slot_mapping_offset],
                 self.engine_block_ntokens,
-                self.kv_cache_dtype,
+                "auto",
                 [self.k_scales[lid]],
                 [self.v_scales[lid]],
                 self.block_layout.name,
+                self.kv_layout_blocks_first,
             )
 
     def _allocate_for_request(

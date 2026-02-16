@@ -38,6 +38,7 @@ from vllm.distributed.kv_transfer.kv_transfer_metrics import (
 from vllm.utils.math_utils import round_down, round_up
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -53,6 +54,7 @@ logger = getLogger(__name__)
 OFFLOADING_CONNECTOR_SKIP_THRESHOLD = 8
 OFFLOADING_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
     FlashAttentionBackend.get_name(): KVCacheBlockLayout.LCND,
+    FlashInferBackend.get_name(): KVCacheBlockLayout.LCND,
 }
 
 T = TypeVar('T')
@@ -704,6 +706,12 @@ class AIBrixOffloadingConnectorWorker:
             use_mla=model_config.use_mla,
         )
 
+        # Check if the first dimension of the cache is kv or num_blocks
+        test_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks=1111, block_size=16, num_kv_heads=8, head_size=256
+        )
+        self.kv_layout_blocks_first = test_shape[0] == 1111
+
         block_spec = KVCacheBlockSpec(
             block_ntokens=block_ntokens,
             block_dtype=block_dtype,
@@ -992,10 +1000,11 @@ class AIBrixOffloadingConnectorWorker:
                     self.layers_kv_caches,
                     chunk_slot_mapping,
                     self.engine_block_ntokens,
-                    self.kv_cache_dtype,
+                    "auto",
                     self.k_scales,
                     self.v_scales,
                     self.block_layout.name,
+                    self.kv_layout_blocks_first,
                 )
 
             logger.info(
@@ -1146,10 +1155,11 @@ class AIBrixOffloadingConnectorWorker:
                     self.layers_kv_caches,
                     chunk_slot_mapping,
                     self.engine_block_ntokens,
-                    self.kv_cache_dtype,
+                    "auto",
                     self.k_scales,
                     self.v_scales,
                     self.block_layout.name,
+                    self.kv_layout_blocks_first,
                 )
 
             logger.info("Request[id=%s] offloads %d tokens in %.4f ms",

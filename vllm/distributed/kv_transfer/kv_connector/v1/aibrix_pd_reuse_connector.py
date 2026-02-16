@@ -44,6 +44,7 @@ from vllm.distributed.kv_transfer.kv_transfer_metrics import (
 from vllm.utils.math_utils import round_down, round_up
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -60,6 +61,7 @@ logger = getLogger(__name__)
 PD_REUSE_CONNECTOR_SKIP_THRESHOLD = 8
 PD_REUSE_CONNECTOR_SUPPORTED_ATTN_BACKENDS = {
     FlashAttentionBackend.get_name(): KVCacheBlockLayout.LCND,
+    FlashInferBackend.get_name(): KVCacheBlockLayout.LCND,
 }
 
 T = TypeVar('T')
@@ -847,6 +849,12 @@ class AIBrixPDReuseConnectorWorker:
             use_mla=model_config.use_mla,
         )
 
+        # Check if the first dimension of the cache is kv or num_blocks
+        test_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks=1111, block_size=16, num_kv_heads=8, head_size=256
+        )
+        self.kv_layout_blocks_first = test_shape[0] == 1111
+
         block_spec = KVCacheBlockSpec(
             block_ntokens=block_ntokens,
             block_dtype=block_dtype,
@@ -1164,10 +1172,11 @@ class AIBrixPDReuseConnectorWorker:
                     self.layers_kv_caches,
                     chunk_slot_mapping,
                     self.engine_block_ntokens,
-                    self.kv_cache_dtype,
+                    "auto",
                     self.k_scales,
                     self.v_scales,
                     self.block_layout.name,
+                    self.kv_layout_blocks_first,
                 )
 
             logger.info(
@@ -1228,10 +1237,17 @@ class AIBrixPDReuseConnectorWorker:
         """
         assert self.layers_kv_caches is not None, "layers_kv_caches is None"
 
+        is_prefiller = False
         for seq_request_id, seq_request_meta in metadata.items():
+            if seq_request_meta.do_remote_decode:
+                is_prefiller = True
             if seq_request_meta.query_len == 0:
                 continue
             self._send_kv_to_cache_impl(seq_request_meta)
+
+        if is_prefiller:
+            # ensure all async ops are completed
+            self.cache.flush()
 
         if self._metrics.time_measurement_enabled:
             log_every_n_seconds(
@@ -1336,10 +1352,11 @@ class AIBrixPDReuseConnectorWorker:
                     self.layers_kv_caches,
                     chunk_slot_mapping,
                     self.engine_block_ntokens,
-                    self.kv_cache_dtype,
+                    "auto",
                     self.k_scales,
                     self.v_scales,
                     self.block_layout.name,
+                    self.kv_layout_blocks_first,
                 )
 
             logger.info("Request[id=%s] offloads %d tokens in %.4f ms",

@@ -362,8 +362,26 @@ class AIBrixPDReuseConnectorRequestState(enum.IntEnum):
 class AIBrixPDReuseConnectorCachedMeta:
     """Cached metadata for a request."""
 
-    def __init__(self, prompt_len: int) -> None:
-        self.context_tokens: np.ndarray = np.empty(prompt_len, dtype=np.int32)
+    def __init__(
+        self, prompt_len: int, cache_block_ntokens: int, enable_padding: bool
+    ) -> None:
+        assert cache_block_ntokens > 0, (
+            "cache_block_ntokens must be > 0 to pre-allocate aligned size"
+        )
+
+        self.prompt_len = prompt_len
+        # For unaligned tail support
+        self.cache_block_ntokens = cache_block_ntokens
+        self.enable_padding = enable_padding
+
+        if enable_padding:
+            aligned_prompt_len = round_up(prompt_len, cache_block_ntokens)
+
+            self.context_tokens: np.ndarray = np.zeros(aligned_prompt_len,
+                                                       dtype=np.int32)
+        else:
+            self.context_tokens: np.ndarray = np.zeros(prompt_len,
+                                                       dtype=np.int32)
         self.context_tokens_offset: int = 0
         self.context_tokens_view: Optional[TokenListView] = None
         self.context_slot_mapping: Optional[torch.Tensor] = torch.empty(
@@ -373,8 +391,26 @@ class AIBrixPDReuseConnectorCachedMeta:
         )
         self.context_slot_mapping_offset: int = 0
 
-    def get_context_tokens(self) -> list[int]:
-        return self.context_tokens[:self.context_tokens_offset]
+    def get_context_tokens(self) -> np.ndarray:
+        """
+        Get context tokens, aligned to block boundary if padding is enabled.
+        """
+        actual_len = self.context_tokens_offset
+
+        if not self.enable_padding:
+            return self.context_tokens[:actual_len]
+        elif actual_len < self.prompt_len:
+            # we don't have all prompt tokens yet
+            return self.context_tokens[:actual_len]
+        else:
+            aligned_len = round_up(actual_len, self.cache_block_ntokens)
+            assert aligned_len <= len(self.context_tokens), (
+                f"Aligned length exceeds pre-allocated size: "
+                f"aligned_len={aligned_len}, "
+                f"allocated_size={len(self.context_tokens)}. "
+            )
+
+            return self.context_tokens[:aligned_len]
 
     def get_context_tokens_view(self) -> TokenListView:
         if self.context_tokens_view is None:
@@ -389,8 +425,16 @@ class AIBrixPDReuseConnectorCachedMeta:
         if tokens:
             offset = tokens[0]
             length = len(tokens[1])
+            new_offset = offset + length
+
+            assert new_offset <= len(self.context_tokens), (
+                f"Data exceeds pre-allocated size: new_offset={new_offset}, "
+                f"allocated_size={len(self.context_tokens)}. "
+                f"This should not happen if __init__ pre-allocated correctly."
+            )
+
             self.context_tokens[offset:offset + length] = tokens[1]
-            self.context_tokens_offset = offset + length
+            self.context_tokens_offset = new_offset
             self.context_tokens_view = None
 
         if slot_mapping is None:
@@ -562,16 +606,18 @@ class AIBrixPDReuseConnectorScheduler:
         """
         Get number of new tokens that can be loaded from the
         external KV cache (KVCacheManager) beyond the num_computed_tokens.
-
-        NOTE: This method returns (0, False) for both prefiller and decoder.
-        The actual KV cache loading happens in start_load_kv_before_update(),
-        which is called before model execution. This ensures:
-        1. Prefiller: Can still load reusable KV cache from KVCacheManager
-           even though this method returns 0. The loaded tokens will update
-           num_computed_tokens, so only uncached tokens are computed.
-        2. Decoder: Loads KV cache from KVCacheManager synchronously before
-           execution, not asynchronously between scheduler steps.
         """
+        params = request.kv_transfer_params
+        if not params:
+            return 0, False
+
+        if params.get("do_remote_decode"):
+            return 0, False
+
+        if params.get("do_remote_prefill"):
+            num_external_tokens = request.num_prompt_tokens - num_computed_tokens
+            if num_external_tokens > 0:
+                return num_external_tokens, True
         return 0, False
 
     def update_state_after_alloc(
@@ -586,16 +632,36 @@ class AIBrixPDReuseConnectorScheduler:
             return
 
         # Handle PD disaggregation: update metadata if needed
-        if params.get("do_remote_prefill"):
-            # Create or update metadata
+        self._scheduler_meta.upsert_request(
+            request.request_id,
+            do_remote_prefill=params.get("do_remote_prefill", False),
+            do_remote_decode=params.get("do_remote_decode", False),
+            remote_block_ids=params.get("remote_block_ids", []),
+            remote_engine_id=params.get("remote_engine_id", ""),
+            remote_host=params.get("remote_host", ""),
+            remote_port=params.get("remote_port", -1),
+            tp_size=params.get("tp_size", -1),
+        )
+
+        if params.get("do_remote_prefill") and num_external_tokens > 0:
+            req_id = request.request_id
+            prompt_len = len(request.prompt_token_ids)
+            context_len = request.num_computed_tokens
+            query_len = 0
+            if context_len >= prompt_len:
+                return
+
+            block_ids = blocks.get_unhashed_block_ids()
+            slot_mapping = self._block_ids_to_slot_mapping(block_ids)
+
             self._scheduler_meta.upsert_request(
-                request.request_id,
-                do_remote_prefill=True,
-                remote_block_ids=params.get("remote_block_ids", []),
-                remote_engine_id=params.get("remote_engine_id", ""),
-                remote_host=params.get("remote_host", ""),
-                remote_port=params.get("remote_port", -1),
-                tp_size=params.get("tp_size", -1),
+                req_id,
+                prompt_len=prompt_len,
+                context_len=context_len,
+                query_len=query_len,
+                seq_token_ids=(0, request.prompt_token_ids),
+                seq_slot_mapping=(0, slot_mapping),
+                state=AIBrixPDReuseConnectorRequestState.WAITING_FOR_RECV,
             )
 
     def build_connector_meta(
@@ -607,9 +673,27 @@ class AIBrixPDReuseConnectorScheduler:
         for req_id in scheduler_output.finished_req_ids:
             self._scheduler_meta.pop_request(req_id)
 
-        # 2. Process new requests
+        # 2. handle preempted requests for pd
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for req_id in cached_reqs.resumed_req_ids:
+            if self._scheduler_meta[req_id].do_remote_prefill:
+                self._scheduler_meta.upsert_request(
+                    req_id,
+                    state=AIBrixPDReuseConnectorRequestState.WAITING_FOR_RECV,
+                )
+
+        # 3. Process new requests
         for req in scheduler_output.scheduled_new_reqs:
             req_id = req.req_id
+
+            # In PD mode, after decoder receiving all n prompt tokens, it starts
+            # the computation from prefilling the nth prompt token (which has
+            # already been loaded) and thus we need to skip this case
+            if (
+                req_id in self._scheduler_meta
+                and self._scheduler_meta[req_id].do_remote_prefill
+            ):
+                continue
 
             prompt_len = len(req.prompt_token_ids)
             context_len = req.num_computed_tokens
@@ -659,13 +743,18 @@ class AIBrixPDReuseConnectorScheduler:
                 tp_size=tp_size,
             )
 
-        # 3. Process cached requests
-        cached_reqs = scheduler_output.scheduled_cached_reqs
+        # 4. Process cached requests
         req_ids = cached_reqs.req_ids
         for i in range(len(req_ids)):
             req_id = req_ids[i]
 
             if req_id not in self._scheduler_meta:
+                continue
+
+            # In PD mode, after decoder receiving all n prompt tokens, it starts
+            # the computation from prefilling the nth prompt token (which has
+            # already been loaded) and thus we need to skip this case
+            if self._scheduler_meta[req_id].do_remote_prefill:
                 continue
 
             req_meta = self._scheduler_meta[req_id]
@@ -712,7 +801,7 @@ class AIBrixPDReuseConnectorScheduler:
                 resumed_from_preemption=req_id in cached_reqs.resumed_req_ids,
             )
 
-        # 4. Keep requests that are in the WAITING_FOR_RECV state
+        # 5. Keep requests that are in the WAITING_FOR_RECV state
         meta = self._scheduler_meta.get(
             lambda req: (
                 req.state == AIBrixPDReuseConnectorRequestState.WAITING_FOR_RECV
@@ -720,14 +809,14 @@ class AIBrixPDReuseConnectorScheduler:
         )
         logger.debug("SCHEDULER: build_connector_meta, meta=%s", meta.__dict__)
 
-        # 5. Update scheduled requests
+        # 6. Update scheduled requests
         for req_id in meta:
             self._scheduler_meta.upsert_request(
                 req_id,
                 state=AIBrixPDReuseConnectorRequestState.RECEIVING,
             )
 
-        # 6. Attach finished requests
+        # 7. Attach finished requests
         meta.finished_requests_ids = self._scheduler_meta.finished_requests_ids
         self._scheduler_meta.finished_requests_ids = set()
 
@@ -788,7 +877,7 @@ class AIBrixPDReuseConnectorScheduler:
                 tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             )
 
-        logger.debug("SCHEDULER: Request[id=%s] finished decoding", req_id)
+        logger.debug("SCHEDULER: Request[id=%s] finished", req_id)
         self._scheduler_meta.finish_request(req_id)
         return False, None
 
@@ -965,6 +1054,8 @@ class AIBrixPDReuseConnectorWorker:
         self.v_scales: list[torch.Tensor] | None = None
 
         self._meta_cache: dict[str, AIBrixPDReuseConnectorCachedMeta] = {}
+        # used by decoder in the pd mode
+        self._received_requests: set[str] = set()
         # metrics
         self._metrics = AIBrixOffloadingConnectorMetrics(self.cache.metrics)
         logger.info(
@@ -974,7 +1065,7 @@ class AIBrixPDReuseConnectorWorker:
             self.cache_block_ntokens,
         )
 
-    def __del__(self) -> None:
+    def shutdown(self) -> None:
         if getattr(self, "cache", None) is not None:
             self.cache.close()
             self.cache = None
@@ -1001,8 +1092,14 @@ class AIBrixPDReuseConnectorWorker:
         # Update metadata cache
         for req_id, meta in metadata.items():
             if req_id not in self._meta_cache:
+                is_pd_mode = (
+                    meta.do_remote_prefill or meta.do_remote_decode
+                )
                 self._meta_cache[req_id] = AIBrixPDReuseConnectorCachedMeta(
-                    meta.prompt_len)
+                    meta.prompt_len,
+                    cache_block_ntokens=self.cache_block_ntokens,
+                    enable_padding=is_pd_mode,
+                )
             elif meta.resumed_from_preemption:
                 self._meta_cache[req_id].context_slot_mapping_offset = 0
                 self._meta_cache[req_id].context_slot_mapping.zero_()
@@ -1041,7 +1138,9 @@ class AIBrixPDReuseConnectorWorker:
         for seq_request_id, seq_request_meta in metadata.items():
             num_fetched_tokens = self._recv_kv_from_cache_impl(seq_request_meta)
 
-            stats[seq_request_id] = num_fetched_tokens
+            if not seq_request_meta.do_remote_prefill:
+                # decoder should not update stats
+                stats[seq_request_id] = num_fetched_tokens
 
         if len(stats) > 0 and self.kv_group is not None:
             for idx, (seq_request_id, seq_request_meta) in enumerate(
@@ -1091,18 +1190,27 @@ class AIBrixPDReuseConnectorWorker:
         )
 
         prompt_len = seq_request_meta.prompt_len
-        query_len = seq_request_meta.query_len
 
         # Align to block boundary
         aligned_context_len = round_down(seq_context_len,
                                          self.cache_block_ntokens)
-        actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(actual_query_len,
-                                       self.cache_block_ntokens)
         shift_len = seq_context_len - aligned_context_len
+        if not seq_request_meta.do_remote_prefill:
+            query_len = seq_request_meta.query_len
+            actual_query_len = seq_context_len + query_len - aligned_context_len
+            aligned_query_len = round_down(actual_query_len,
+                                           self.cache_block_ntokens)
 
-        assert prompt_len >= aligned_context_len + aligned_query_len, \
-            f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
+            assert prompt_len >= aligned_context_len + aligned_query_len, \
+                f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
+        else:
+            # Decoder in pd mode needs to load kvcache for the entire prompt not
+            # the scheduled tokens
+            actual_query_len = prompt_len - aligned_context_len
+            aligned_query_len = round_up(actual_query_len,
+                                         self.cache_block_ntokens)
+            # mark this request as received
+            self._received_requests.add(seq_request_id)
 
         prefix = seq_all_tokens[:aligned_context_len]
         tokens = seq_all_tokens[
@@ -1142,8 +1250,6 @@ class AIBrixPDReuseConnectorWorker:
                 self.cache.prefetch(chunk_prefix + chunk_tokens, next_tokens)
 
             # Get KV caches from KVCacheManager
-            # For decoder with do_remote_prefill=True, this will load from
-            # SHFS (L2) if L1 is disabled
             status = self.cache.acquire(chunk_prefix, chunk_tokens)
 
             if not status.is_ok():
@@ -1187,7 +1293,16 @@ class AIBrixPDReuseConnectorWorker:
             )
 
             # Update recv_len
-            seq_recv_len += num_fetched_tokens - shift_len
+            if len(chunk_prefix) + num_fetched_tokens <= prompt_len:
+                seq_recv_len += num_fetched_tokens - shift_len
+            else:
+                seq_recv_len += prompt_len - len(chunk_prefix) - shift_len
+                logger.debug(
+                    "Request[id=%s] padding chunk: %d tokens %d padding",
+                    seq_request_id,
+                    prompt_len - len(chunk_prefix),
+                    num_fetched_tokens + len(chunk_prefix) - prompt_len,
+                )
             # Reset shift_len
             shift_len = 0
 
@@ -1275,16 +1390,22 @@ class AIBrixPDReuseConnectorWorker:
         is_pd_mode = (
             seq_request_meta.do_remote_prefill or seq_request_meta.do_remote_decode
         )
+        have_all_prompt_tokens = seq_context_len + query_len >= prompt_len
 
         # Align to block boundary
         aligned_context_len = round_down(seq_context_len,
                                          self.cache_block_ntokens)
         actual_query_len = seq_context_len + query_len - aligned_context_len
-        aligned_query_len = round_down(actual_query_len,
-                                       self.cache_block_ntokens)
 
-        assert prompt_len >= aligned_context_len + aligned_query_len, \
-            f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
+        if is_pd_mode and have_all_prompt_tokens:
+            aligned_query_len = round_up(actual_query_len,
+                                         self.cache_block_ntokens)
+        else:
+            aligned_query_len = round_down(actual_query_len,
+                                           self.cache_block_ntokens)
+
+            assert prompt_len >= aligned_context_len + aligned_query_len, \
+                f"{prompt_len}<{aligned_context_len}+{aligned_query_len}"
 
         prefix = seq_all_tokens[:aligned_context_len]
         tokens = seq_all_tokens[
@@ -1319,7 +1440,7 @@ class AIBrixPDReuseConnectorWorker:
                 logger.info(
                     "Request[id=%s] send(%d) encounters %d existing tokens",
                     seq_request_id, length, num_existing_tokens)
-                if chunk_size - num_existing_tokens < self.cache_block_ntokens:
+                if chunk_size == num_existing_tokens:
                     continue
                 else:
                     # Partially exists
@@ -1372,6 +1493,14 @@ class AIBrixPDReuseConnectorWorker:
 
             put_ntokens = status.get()
             total_sent += put_ntokens
+            if len(chunk_prefix) + put_ntokens > prompt_len:
+                logger.debug(
+                    "Request[id=%s] padding chunk: %d tokens %d padding",
+                    seq_request_id,
+                    prompt_len - len(chunk_prefix),
+                    put_ntokens + len(chunk_prefix) - prompt_len,
+                )
+
             if put_ntokens != length:
                 break
 
@@ -1393,6 +1522,18 @@ class AIBrixPDReuseConnectorWorker:
             self._metrics._send_metrics.add(aligned_context_len,
                                             aligned_query_len, total_sent,
                                             lat_ms)
+
+    @tag_wrapper({
+        "connector": "AIBrixPDReuseConnector",
+        "func": "get_finished"
+    })
+    def get_finished(
+        self,
+        metadata: AIBrixPDReuseConnectorMetadata,
+    ) -> None:
+        received_requests = self._received_requests
+        self._received_requests = set()
+        return None, received_requests
 
 
 class AIBrixPDReuseConnector(KVConnectorBase_V1):
@@ -1468,6 +1609,10 @@ class AIBrixPDReuseConnector(KVConnectorBase_V1):
     # ==============================
 
     @delegate_to("connector_worker")
+    def shutdown(self):
+        pass
+
+    @delegate_to("connector_worker")
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV caches."""
         pass
@@ -1521,4 +1666,9 @@ class AIBrixPDReuseConnector(KVConnectorBase_V1):
         finished_req_ids: set[str],
     ) -> tuple[set[str], set[str]]:
         """Get finished requests."""
-        return set(), set()
+        assert self.connector_worker is not None
+        assert isinstance(
+            self._connector_metadata,
+            AIBrixPDReuseConnectorMetadata,
+        )
+        return self.connector_worker.get_finished(self._connector_metadata)

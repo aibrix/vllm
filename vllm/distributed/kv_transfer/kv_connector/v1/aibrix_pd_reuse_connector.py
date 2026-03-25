@@ -968,37 +968,7 @@ class AIBrixPDReuseConnectorWorker:
         if parallel_config.tensor_parallel_size == 1 or not tp_aware:
             self.cache = BaseKVCacheManager(config=kv_config)
         else:
-            backend = torch.distributed.get_backend(
-                get_world_group().device_group
-            )
-            world_size = parallel_config.world_size
-            dp_size = parallel_config.data_parallel_size
-            pp_size = parallel_config.pipeline_parallel_size
-            # the layout order is: ExternalDP x DP x PP x TP
-            # ExternalDP is the data parallel group that is not part of the
-            # model, every dp rank can generate independently (in verl
-            # integration).
-            # DP is the data parallel group that is part of the model,
-            # all the ranks in the same DP group should generate simultaneously,
-            # i.e. the `generate` call in the same DP group should be called
-            # together, otherwise it will cause deadlock.
-            # to get group_ranks for each dimension, transpose that dimension to
-            # the last dimension, then reshape to 2D, then unbind the last
-            # dimension
-            all_ranks = torch.arange(world_size).reshape(
-                -1, dp_size, pp_size, tp_size)
-
-            # Build the kv model-parallel groups.
-            group_ranks = all_ranks.view(-1, tp_size).unbind(0)
-            group_ranks = [x.tolist() for x in group_ranks]
-
-            kv_group = init_model_parallel_group(
-                group_ranks,
-                get_world_group().local_rank,
-                backend,
-                group_name="kvcache",
-            )
-            assert rank == kv_group.rank_in_group
+            kv_group = get_tp_group()
 
             sync_granularity = vllm.envs.VLLM_AIBRIX_SYNC_GRANULARITY
             if (
